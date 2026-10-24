@@ -25,6 +25,7 @@
 
 #include "../hle.h"
 #include "../settings.h"
+#include "../coop_net.h"
 
 void rt_register_fnhook(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));  // runtime/fnhook.c
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -176,6 +177,10 @@ int rt_present_interval(void);
 static __thread bool t_in_move;
 static __thread float t_move_k;
 static int move_hook(Cpu *c, uint64_t addr) {
+    if (coop_net_enabled() && c->x[0] >= 0x7000000000ull) {
+        float *pose = (float *)(uintptr_t)(c->x[0] + 0x70);
+        coop_net_publish_position(pose[0], pose[1], pose[2], 0.0f, 0, 0);
+    }
     float k = g_on && g_world ? (float)g_g1 / (float)G1_ORIGINAL : 1.0f;
     if (k >= 0.999f || c->x[0] < 0x7000000000ull) return 0;  // (the game's own step: as it is)
     float *p = (float *)(uintptr_t)(c->x[0] + 0x70), was[3] = {p[0], p[1], p[2]};
@@ -272,6 +277,7 @@ void fps60_configure(void) {
     g_rate = g_settings.fps == 120 ? 120 : 60, g_g1 = (uint32_t)(1000000000u / (uint32_t)g_rate);
     extern uint64_t rt_addr(uint64_t eevee);  // (runtime/fnhook.c: 0 in a build it doesn't know)
     if (!rt_addr(FIELD_UPDATE)) g_on = g_all60 = false;
+    if (getenv("LARECOMP_COOP_SERVER")) rt_register_fnhook(MOVE_FN, move_hook);
     if (g_on || g_stats || getenv("LARECOMP_INPUT_LOOP")) hook_all();
     // the world's update always: g_played tells the title screen (game_title) whatever the frame rate
     else if (rt_addr(FIELD_UPDATE)) rt_register_fnhook(FIELD_UPDATE, field_hook);

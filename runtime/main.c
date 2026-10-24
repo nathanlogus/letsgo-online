@@ -10,6 +10,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "coop_net.h"
 
 const char *g_romfs_dir;
 
@@ -198,6 +199,7 @@ int main(int argc, char **argv) {
         { extern void controller_skip_configure(void); controller_skip_configure(); }  // (runtime/hle/controller_skip.c)
         { extern void cutscene_configure(void); cutscene_configure(); }  // (runtime/hle/cutscene.c)
         boot(root);
+        coop_net_start();  // boot has now loaded g_program_id from main.npdm
         int kind = ui_run();  // window and input on the main thread; returns when a reboot is requested
         teardown();
         title = kind == RT_REBOOT_TITLE;

@@ -30,6 +30,7 @@ extern "C" {
 void input_reset(void);
 uint64_t rt_addr(uint64_t eevee);  // runtime/fnhook.c (0: a build without the tables the frame rate modes need)
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
+#include "../coop_net.h"
 }
 
 // ------------------------------------------------------------------ language
@@ -563,7 +564,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), cfg = g_cfg.load(), kbd = g_kbd.load() == 1;
     float fx, fy;
     bool fdown, finger = !open && !cfg && input_finger_cursor(&fx, &fy, &fdown);
-    if (!open && !cfg && !kbd && !g_settings.show_fps && !finger) {
+    CoopRemote peer = {};
+    bool remote_peer = coop_net_enabled() && coop_net_remote(&peer);
+    if (!open && !cfg && !kbd && !g_settings.show_fps && !finger && !remote_peer) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -594,6 +597,14 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
         ImGui::PopStyleVar();
         ImGui::PopStyleColor(2);
+    }
+    if (remote_peer) {
+        ImGui::SetNextWindowPos(ImVec2(16 * scale, 16 * scale), ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(0.72f);
+        ImGui::Begin("##coop-peer", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                             ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
+        ImGui::Text("Online co-op  |  %s", peer.name);
+        ImGui::End();
     }
     if (finger) {  // the controller's finger on the touch screen (right stick moves it, ZR touches)
         ImDrawList *dl = ImGui::GetForegroundDrawList();

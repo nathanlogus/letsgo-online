@@ -19,6 +19,7 @@
 #include "../nvn/renderer.h"
 #include "../settings.h"
 #include "../input_bind.h"
+#include "../coop_net.h"
 
 enum {
     BTN_A = 0, BTN_B, BTN_X, BTN_Y, BTN_LSTICK, BTN_RSTICK, BTN_L, BTN_R, BTN_ZL, BTN_ZR, BTN_PLUS, BTN_MINUS,
@@ -35,7 +36,57 @@ static _Atomic uint64_t pad2_auto_shake_start_ns;
 static void signal_style_update_events(void);
 static uint8_t keys_down[SDL_SCANCODE_COUNT];
 static SDL_Gamepad *pad, *pad2;
+static void recompute_pad(void);
+static void recompute_pad2(void);
+static void note_family(void);
+static bool gamepad_id_selection;
+static SDL_JoystickID selected_gamepad_id;
+static bool gamepad_selection_loaded;
 static _Atomic int64_t sampling;
+
+// LARECOMP_GAMEPAD_ID selects one SDL gamepad for P1 in this process and disables local P2.
+// This lets two game instances on one PC bind different physical controllers.
+static void load_gamepad_selection(void) {
+    if (gamepad_selection_loaded) return;
+    gamepad_selection_loaded = true;
+    const char *e = getenv("LARECOMP_GAMEPAD_ID");
+    if (!e || !*e) return;
+    gamepad_id_selection = true;
+    char *end = NULL;
+    unsigned long id = strtoul(e, &end, 10);
+    if (!end || *end || !id || id > UINT32_MAX) {
+        LOG("[input] invalid LARECOMP_GAMEPAD_ID=%s (expected a positive SDL device ID)\n", e);
+        return;
+    }
+    selected_gamepad_id = (SDL_JoystickID)id;
+    LOG("[input] selecting gamepad ID %u for P1; local P2 is disabled in this instance\n", selected_gamepad_id);
+}
+
+static void open_selected_gamepad(SDL_JoystickID id) {
+    load_gamepad_selection();
+    if (gamepad_id_selection) {
+        if (id != selected_gamepad_id || pad) return;
+        pad = SDL_OpenGamepad(id);
+        if (pad) {
+            LOG("[input] selected gamepad P1: id=%u name=%s\n", id, SDL_GetGamepadName(pad));
+            note_family();
+            recompute_pad();
+        }
+        return;
+    }
+    if (!pad) {
+        pad = SDL_OpenGamepad(id);
+        if (pad) { LOG("[input] gamepad P1: id=%u name=%s\n", id, SDL_GetGamepadName(pad)); note_family(); }
+    } else if (!pad2 && SDL_GetGamepadID(pad) != id) {
+        pad2 = SDL_OpenGamepad(id);
+        if (pad2) {
+            atomic_store(&pad2_auto_shake_start_ns, 0);
+            atomic_store(&pad2_auto_shake_pending, 1);
+            LOG("[input] gamepad P2: id=%u name=%s\n", id, SDL_GetGamepadName(pad2));
+            signal_style_update_events();
+        }
+    }
+}
 
 // Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
 static uint8_t test_keys[SDL_SCANCODE_COUNT];
@@ -250,22 +301,20 @@ void input_handle_event(const SDL_Event *e) {
         scanned = true;
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); if (pad) { LOG("[input] gamepad P1: %s\n", SDL_GetGamepadName(pad)); note_family(); } }
-        if (n > 1 && !pad2) {
-            pad2 = SDL_OpenGamepad(ids[1]);
-            if (pad2) {
-                atomic_store(&pad2_auto_shake_start_ns, 0);
-                atomic_store(&pad2_auto_shake_pending, 1);
-                LOG("[input] gamepad P2: %s\n", SDL_GetGamepadName(pad2));
-                signal_style_update_events();
-            }
+        load_gamepad_selection();
+        for (int i = 0; ids && i < n; i++) {
+            LOG("[input] detected gamepad: id=%u name=%s\n", ids[i], SDL_GetGamepadNameForID(ids[i]));
+            open_selected_gamepad(ids[i]);
         }
+        if (gamepad_id_selection && !pad)
+            LOG("[input] requested gamepad ID %u is not currently connected\n", selected_gamepad_id);
         SDL_free(ids);
         recompute_pad(); recompute_pad2();
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
+        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F10 && !e->key.repeat) coop_net_emote(1);
         // research (broken map after a capture): F5 marks all guest memory written (every texture re-checks its data), F6 reads
         // all vertex and index data in place from now on
         if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && getenv("LARECOMP_HEAL_KEYS")) {
@@ -309,16 +358,8 @@ void input_handle_event(const SDL_Event *e) {
         mouse_release();
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
-        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); if (pad) { LOG("[input] gamepad P1: %s\n", SDL_GetGamepadName(pad)); note_family(); } }
-        else if (!pad2) {
-            pad2 = SDL_OpenGamepad(e->gdevice.which);
-            if (pad2) {
-                atomic_store(&pad2_auto_shake_start_ns, 0);
-                atomic_store(&pad2_auto_shake_pending, 1);
-                LOG("[input] gamepad P2: %s\n", SDL_GetGamepadName(pad2));
-                signal_style_update_events();
-            }
-        }
+        LOG("[input] detected gamepad: id=%u name=%s\n", e->gdevice.which, SDL_GetGamepadNameForID(e->gdevice.which));
+        open_selected_gamepad(e->gdevice.which);
         recompute_pad2();
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
