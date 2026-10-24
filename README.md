@@ -30,6 +30,7 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 - **2x interface** images and sharper text
 - **Mods**: fan translations and other LayeredFS mods, several at once
 - Keyboard and mouse (aim Poké Balls, touch screen) and any controller, with the Nintendo or Xbox button layout; every key rebindable
+- Experimental **two-controller local co-op input** (the second gamepad joins through a simulated shake; overworld joining, movement and viewport follow have been tried in-game)
 - Experimental **wild battles** (a classic battle, then the capture) and **skip controller selection**
 - Shaders cached on disk
 
@@ -91,7 +92,7 @@ Mods of the game's code (exefs, IPS, cheats) don't work. Tested with the Brazili
 - Wild battles don't split experience yet
 - Switching to TAA while playing shows one or two black frames
 - The 2x interface shows a few frames of thin stripes during an area change
-- Online features, the Poké Ball Plus and the second player aren't supported
+- Online features, local wireless, and the Poké Ball Plus aren't supported; co-op is still experimental, with trainer battles and wild catches not yet validated
 
 Crashes: please open an issue with `lasrecomp.log` ([CONTRIBUTING.md](CONTRIBUTING.md)). What changed in each
 release: [CHANGELOG.md](CHANGELOG.md).

@@ -27,10 +27,14 @@ enum {
 
 _Static_assert(BTN_DOWN == BIND_DOWN && BTN_ZL == BIND_ZL, "bindings follow the button bits");
 
-static _Atomic uint64_t key_buttons, pad_buttons, mouse_buttons;
+static _Atomic uint64_t key_buttons, pad_buttons, pad2_buttons, mouse_buttons;
 static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, pad_ry;
+static _Atomic int32_t pad2_lx, pad2_ly, pad2_rx, pad2_ry;
+static _Atomic int pad2_auto_shake_pending;
+static _Atomic uint64_t pad2_auto_shake_start_ns;
+static void signal_style_update_events(void);
 static uint8_t keys_down[SDL_SCANCODE_COUNT];
-static SDL_Gamepad *pad;
+static SDL_Gamepad *pad, *pad2;
 static _Atomic int64_t sampling;
 
 // Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
@@ -96,6 +100,35 @@ static void recompute_pad(void) {
     stick_deadzone(&lx, &ly);
     stick_deadzone(&rx, &ry);
     pad_lx = lx, pad_ly = ly, pad_rx = rx, pad_ry = ry;
+}
+
+// The second physical gamepad is player two in Let's Go co-op. Keep it independent from the
+// keyboard/first pad so player one's menu bindings and controller remapping stay unchanged.
+static void recompute_pad2(void) {
+    uint64_t b = 0;
+    int32_t lx = 0, ly = 0, rx = 0, ry = 0;
+    static int user_off = -1;
+    if (user_off < 0) {
+        const char *v = getenv("LARECOMP_NO_USER_INPUT");
+        user_off = v ? atoi(v) != 0 : getenv("LARECOMP_INPUT") != NULL;
+    }
+    if (pad2 && !user_off) {
+        uint32_t host = 0;
+        for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
+            if (SDL_GetGamepadButton(pad2, (SDL_GamepadButton)i)) host |= 1u << i;
+        if (SDL_GetGamepadAxis(pad2, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
+        if (SDL_GetGamepadAxis(pad2, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) host |= 1u << PADB_RTRIGGER;
+        for (int i = 0; i < BIND_PAD_COUNT; i++)
+            if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
+        lx = SDL_GetGamepadAxis(pad2, SDL_GAMEPAD_AXIS_LEFTX);
+        ly = -SDL_GetGamepadAxis(pad2, SDL_GAMEPAD_AXIS_LEFTY);
+        rx = SDL_GetGamepadAxis(pad2, SDL_GAMEPAD_AXIS_RIGHTX);
+        ry = -SDL_GetGamepadAxis(pad2, SDL_GAMEPAD_AXIS_RIGHTY);
+        stick_deadzone(&lx, &ly);
+        stick_deadzone(&rx, &ry);
+    }
+    pad2_buttons = b;
+    pad2_lx = lx; pad2_ly = ly; pad2_rx = rx; pad2_ry = ry;
 }
 
 // The mouse: held by the game window (relative mode) or free
@@ -217,8 +250,18 @@ void input_handle_event(const SDL_Event *e) {
         scanned = true;
         int n = 0;
         SDL_JoystickID *ids = SDL_GetGamepads(&n);
-        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
+        if (n > 0 && !pad) { pad = SDL_OpenGamepad(ids[0]); if (pad) { LOG("[input] gamepad P1: %s\n", SDL_GetGamepadName(pad)); note_family(); } }
+        if (n > 1 && !pad2) {
+            pad2 = SDL_OpenGamepad(ids[1]);
+            if (pad2) {
+                atomic_store(&pad2_auto_shake_start_ns, 0);
+                atomic_store(&pad2_auto_shake_pending, 1);
+                LOG("[input] gamepad P2: %s\n", SDL_GetGamepadName(pad2));
+                signal_style_update_events();
+            }
+        }
         SDL_free(ids);
+        recompute_pad(); recompute_pad2();
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
@@ -266,14 +309,32 @@ void input_handle_event(const SDL_Event *e) {
         mouse_release();
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
-        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
+        if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); if (pad) { LOG("[input] gamepad P1: %s\n", SDL_GetGamepadName(pad)); note_family(); } }
+        else if (!pad2) {
+            pad2 = SDL_OpenGamepad(e->gdevice.which);
+            if (pad2) {
+                atomic_store(&pad2_auto_shake_start_ns, 0);
+                atomic_store(&pad2_auto_shake_pending, 1);
+                LOG("[input] gamepad P2: %s\n", SDL_GetGamepadName(pad2));
+                signal_style_update_events();
+            }
+        }
+        recompute_pad2();
         break;
     case SDL_EVENT_GAMEPAD_REMOVED:
         if (pad && SDL_GetGamepadID(pad) == e->gdevice.which) { SDL_CloseGamepad(pad); pad = NULL; note_family(); }
+        if (pad2 && SDL_GetGamepadID(pad2) == e->gdevice.which) {
+            SDL_CloseGamepad(pad2); pad2 = NULL;
+            atomic_store(&pad2_auto_shake_start_ns, 0);
+            atomic_store(&pad2_auto_shake_pending, 0);
+            signal_style_update_events();
+        }
         recompute_pad();
+        recompute_pad2();
         break;
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
         recompute_pad();
+        recompute_pad2();
         break;
     }
 }
@@ -509,8 +570,33 @@ static void fill_state(Cpu *c) {
     memset(s, 0, 0x28);
     *(int64_t *)s = ++sampling;
     static int nlog;
+    static bool logged_p2_state;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
-    if (id != npad_id_used(NULL)) return;  // only the one controller (npad_id_used) is connected
+    if (id == 1 && !logged_p2_state) { logged_p2_state = true; LOG("[input] P2 state requested\n"); }
+    if (id == 1) {  // NpadId::No2: the second local co-op player
+        if (!pad2) return;
+        bool menu = menu_input_captured();
+        uint64_t b = menu ? 0 : pad2_buttons;
+        // Player 2 is exposed as a right Joy-Con, whose one physical stick is represented in
+        // the guest's right-stick fields. Route the PC pad's left stick there so it remains
+        // the movement stick; keep the PC right stick on the guest's left-stick fields.
+        int32_t lx = menu ? 0 : clamp_axis(pad2_rx), ly = menu ? 0 : clamp_axis(pad2_ry);
+        int32_t rx = menu ? 0 : clamp_axis(pad2_lx), ry = menu ? 0 : clamp_axis(pad2_ly);
+        if (lx < -16000) b |= 1ull << 16;
+        if (ly > 16000) b |= 1ull << 17;
+        if (lx > 16000) b |= 1ull << 18;
+        if (ly < -16000) b |= 1ull << 19;
+        if (rx < -16000) b |= 1ull << 20;
+        if (ry > 16000) b |= 1ull << 21;
+        if (rx > 16000) b |= 1ull << 22;
+        if (ry < -16000) b |= 1ull << 23;
+        *(uint64_t *)(s + 8) = b;
+        *(int32_t *)(s + 16) = lx; *(int32_t *)(s + 20) = ly;
+        *(int32_t *)(s + 24) = rx; *(int32_t *)(s + 28) = ry;
+        *(uint32_t *)(s + 32) = 1;
+        return;
+    }
+    if (id != npad_id_used(NULL)) return;
     extern uint64_t g_watch_lo, g_watch_hi;
     if (!g_pad_obj) g_pad_obj = c->x[1] - 8;
     if (!g_watch_lo && getenv("LARECOMP_WATCH_PAD")) {
@@ -588,17 +674,34 @@ static uint32_t npad_id_used(uint32_t *style) {
 HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[0], style;
     static int nlog;
-    if (nlog++ < 4) LOG("[input] GetNpadStyleSet id %#x\n", id);
-    c->x[0] = id == npad_id_used(&style) ? style : 0;
+    static bool logged_p2;
+    if (nlog++ < 4 || (id == 1 && !logged_p2)) LOG("[input] GetNpadStyleSet id %#x\n", id);
+    if (id == 1) {
+        logged_p2 = true;
+        c->x[0] = pad2 ? 1u << 4 : 0;  // player two: JoyRight (Let's Go joins from a shaken right Joy-Con)
+    }
+    else c->x[0] = id == npad_id_used(&style) ? style : 0;
 }
 
 // BindNpadStyleSetUpdateEvent(id, SystemEventType*, clear mode): signaled once so the game sees a
 // controller connected.
 #include "../kernel.h"
+static KEvent *g_style_update_events[16];
+static int g_style_update_event_count;
+
+static void signal_style_update_events(void) {
+    pthread_mutex_lock(&g_klock);
+    for (int i = 0; i < g_style_update_event_count; i++)
+        if (g_style_update_events[i]) kernel_signal((KObject *)g_style_update_events[i]);
+    pthread_mutex_unlock(&g_klock);
+}
+
 HLE_FUNC("_ZN2nn3hid27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", hid_bind_style_event) {
     uint32_t w, r;
     KEvent *ev = kernel_create_event_pair(&w, &r);
     pthread_mutex_lock(&g_klock);
+    if (g_style_update_event_count < (int)(sizeof g_style_update_events / sizeof *g_style_update_events))
+        g_style_update_events[g_style_update_event_count++] = ev;
     kernel_signal(ev);
     pthread_mutex_unlock(&g_klock);
     uint64_t clear_mode = c->x[2];
@@ -818,7 +921,7 @@ static void mat_mul(double o[3][3], double a[3][3], double b[3][3]) {
     for (int r = 0; r < 3; r++)
         for (int k = 0; k < 3; k++) o[r][k] = a[r][0] * b[0][k] + a[r][1] * b[1][k] + a[r][2] * b[2][k];
 }
-static void six_axis_fill(uint8_t *s, int64_t sampling) {
+static void six_axis_fill(uint8_t *s, int64_t sampling, uint32_t handle) {
     static int test = -1, test_fixed;
     if (test < 0) {
         const char *e = getenv("LARECOMP_GYRO_TEST");
@@ -860,6 +963,24 @@ static void six_axis_fill(uint8_t *s, int64_t sampling) {
     for (int i = 0; i < 3; i++) acc[i] = (float)-r[2][i];  // gravity (world -z) in the controller's frame: R^T (0,0,-1)
     gyr[yaw_axis] += (float)((gyro_yaw - py) / dt / (2 * M_PI));
     gyr[gyro_pitch_axis] += (float)((gyro_pitch - pp) / dt / (2 * M_PI));
+    // The console joins local co-op when Player 2 shakes a controller. A PC gamepad has no
+    // motion sensor, so give Player 2's six-axis handle one short synthetic shake on connection.
+    if (pad2 && ((handle >> 8) & 0xff) == 1) {
+        uint64_t shake_start = atomic_load(&pad2_auto_shake_start_ns);
+        if (!shake_start && atomic_exchange(&pad2_auto_shake_pending, 0)) {
+            shake_start = now;
+            atomic_store(&pad2_auto_shake_start_ns, shake_start);
+            LOG("[input] P2 auto-co-op shake started\n");
+        }
+        if (shake_start && now - shake_start < 1000000000ull) {
+            double t = (now - shake_start) / 1e9;
+            acc[0] += (float)(2.5 * sin(2 * M_PI * 6 * t));
+            gyr[1] += (float)(4.0 * cos(2 * M_PI * 6 * t));
+        } else if (shake_start) {
+            atomic_store(&pad2_auto_shake_start_ns, 0);
+            LOG("[input] P2 auto-co-op shake finished\n");
+        }
+    }
     ang[yaw_axis] += (float)(gyro_yaw / (2 * M_PI));
     ang[gyro_pitch_axis] += (float)(gyro_pitch / (2 * M_PI));
     for (int a = 0; a < 3; a++)  // direction: the controller's x, y, z axes in world coordinates (columns of R)
@@ -871,6 +992,7 @@ HLE_FUNC("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_
     uint32_t *out = (uint32_t *)(uintptr_t)c->x[0];
     int n = (int)c->x[1] < 2 ? (int)c->x[1] : 2;
     uint32_t id = *(uint32_t *)(uintptr_t)c->x[2];
+    if (id == 1) LOG("[input] P2 six-axis handles requested (%d)\n", n);
     for (int i = 0; i < n; i++) out[i] = (id & 0xFF) << 8 | (uint32_t)i | 0x04000000u;  // (opaque to the game)
     c->x[0] = (uint64_t)n;
 }
@@ -903,12 +1025,16 @@ static void six_axis_log(Cpu *c) {  // (LARECOMP_GYRO_TEST: when the game reads 
 }
 HLE_FUNC("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", hid_six_axis_state) {
     six_axis_log(c);
-    six_axis_fill((uint8_t *)(uintptr_t)c->x[0], ++six_axis_sampling);
+    uint32_t handle = *(uint32_t *)(uintptr_t)c->x[1];
+    six_axis_fill((uint8_t *)(uintptr_t)c->x[0], ++six_axis_sampling, handle);
 }
 HLE_FUNC("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", hid_six_axis_states) {
     six_axis_log(c);
     int n = (int)c->x[1];
-    if (n > 0) six_axis_fill((uint8_t *)(uintptr_t)c->x[0], ++six_axis_sampling);  // the latest sample only
+    if (n > 0) {
+        uint32_t handle = *(uint32_t *)(uintptr_t)c->x[2];
+        six_axis_fill((uint8_t *)(uintptr_t)c->x[0], ++six_axis_sampling, handle);  // the latest sample only
+    }
     c->x[0] = n > 0 ? 1 : 0;
 }
 HLE_FUNC("_ZN2nn3hid21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", hid_six_axis_at_rest) {
