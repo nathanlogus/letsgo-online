@@ -10,6 +10,8 @@ extracted/
 extracted-*/
 generated/
 generated-*/
+Lets Go Eevee/
+assets/
 
 # Build
 build/
