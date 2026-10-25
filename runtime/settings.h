@@ -3,6 +3,10 @@
 // frame_gen = auto ("auto" in larecomp.ini): the most images per world frame that the display's refresh shows evenly
 // and the GPU keeps up with (runtime/nvn/vulkan/exec.c ip_images)
 #define FG_AUTO 1
+// How the in-between images are made (fg_method): the frame's draws run again with their constants between N-1's and
+// N's (exec.c vk_interp_replay, the default), or N-1's and N's images moved along a motion field toward the image's
+// time (exec.c flow_*: optical flow)
+enum { FG_RERENDER = 0, FG_FLOW = 1 };
 #include <stdbool.h>
 
 enum { RES_MATCH = 0, /* 1..8 = 1x..8x */ RES_DYNAMIC = 9, RES_Q75 = 10, RES_Q25 = 11, RES_Q50 = 12 };
@@ -38,15 +42,19 @@ typedef struct {
     float saturation;
     int ssao_level;       // FX_*: SSAO quality (default off); ssao and its parameters follow it
     int gi_level;         // FX_*: GI quality (default off); gi and its parameters follow it
+    bool fx_custom;       // the SSAO / contact shadow / GI parameters below set by hand (F12 Advanced, saved): the levels
+                          // then only turn the SSAO and the GI on and off, the contact shadows have a switch of their own
     bool ssao;            // screen-space ambient occlusion on the game's HDR scene (F12 menu; runtime/nvn/vulkan/exec.c)
-    int ssao_samples;     // per pixel: 8 / 12 / 16
-    float ssao_intensity; // 0..3 (default 2)
-    float ssao_radius;    // in the game's world units (~cm): 10..400 (default 100)
+    int ssao_samples;     // per pixel: 4 / 6 / 8 (low / medium / high)
+    float ssao_intensity; // 0..3 (default 1.2)
+    float ssao_radius;    // in the game's world units (~cm): 10..400 (default 240)
     bool ssao_temporal;   // accumulated over frames along the camera motion vectors (exec.c ssao_run)
     bool contact_on;      // (settings_apply_levels: SSAO ultra) short rays toward the sun in the depth: small objects'
                           // shadows the shadow map misses (exec.c contact_run)
-    int contact_steps;    // ... their steps along a ray (8)
-    float contact_strength;  // ... and how dark (0.375)
+    int contact_steps;    // ... their steps along a ray: 4..32 (6)
+    float contact_strength;  // ... how dark: 0..1 (0.35)
+    float contact_length; // ... the rays' length in world units: 10..200 (100)
+    float contact_thickness;  // ... how far behind the depth a step still counts as a hit: 5..100 (30)
     bool ssao_debug;      // (not saved) the scene shows the occlusion alone
     bool mv_debug;        // (not saved) the scene shows its camera motion vectors (runtime/nvn/vulkan/exec.c scene_hook)
     bool mv_objects;      // per-object motion vectors (characters' own motion) when motion vectors are in use (default on)
@@ -54,6 +62,7 @@ typedef struct {
     float fsr3_sharpness; // FSR 3.1: its RCAS sharpening (AMD's robust CAS), 0..1 (default 0.5; graphics page, under its mode)
     int fsr3_preset;      // FSR3_*: with the FSR 3.1 upscaler, the render resolution (default FSR3_QUALITY)
     int frame_gen;        // frame generation: 0 off, FG_AUTO, 2 / 3 / 4 images per world frame (exec.c frame interpolation, any GPU)
+    int fg_method;        // FG_RERENDER / FG_FLOW: how its in-between images are made (F12 advanced tab; live)
     bool blur_quality;    // the game's downsample / blur / depth-of-field composite read better (runtime/nvn/vulkan/exec.c fx_patch_fs)
     bool ui2x;            // the interface textures at 2x when cache/ui2x.pak was made (start screen; runtime/ui2x.c)
     int shadow_filter;    // SHADOW_*: how the shadow map is filtered (F12 menu; textures.c vk_sampler, translate.c shpcf)
