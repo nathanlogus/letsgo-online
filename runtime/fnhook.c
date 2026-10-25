@@ -91,6 +91,16 @@ add:
 }
 
 void rt_register_fnhook(uint64_t addr, FnHook fn) { reg(addr, fn, false); }
+void rt_register_fnhook_chain(uint64_t addr, FnHook wrapper, FnHook *previous) {
+    if(!wrapper || !previous)return;
+    FnHook prior=NULL;
+    for(int i=0;i<nregs;i++)if(regs[i].addr==addr && !regs[i].user) {
+        if(regs[i].fn==wrapper)return;
+        prior=regs[i].fn;break;
+    }
+    *previous=prior;
+    reg(addr,wrapper,false);
+}
 // A hook at an address of the running build as it is (research: LARECOMP_STEP_SCALE, as LARECOMP_HOOK_DUMP's)
 void rt_register_fnhook_raw(uint64_t addr, FnHook fn) { reg(addr, fn, true); }
 

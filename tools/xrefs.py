@@ -6,7 +6,7 @@
   xrefs.py float <value>     32-bit float constants equal to <value> in the module (literal pools / data) and the
                              instructions that load them (adrp + ldr / add pairs)
 
-The disassembly of main is cached in build/xrefs-main.pkl (the module never changes).
+The disassembly of main is cached in tests/cache/xrefs-main.pkl (the module never changes).
 """
 import os
 import pickle
@@ -19,7 +19,7 @@ import capstone
 from nso import Nso
 
 BASE = 0x7000000000
-CACHE = os.path.join(os.path.dirname(__file__), '..', 'build', 'xrefs-main.pkl')
+CACHE = os.path.join(os.path.dirname(__file__), '..', 'tests', 'cache', 'xrefs-main.pkl')
 
 
 def load():

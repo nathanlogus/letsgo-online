@@ -31,7 +31,8 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 - **Mods**: fan translations and other LayeredFS mods, several at once
 - Keyboard and mouse (aim Poké Balls, touch screen) and any controller, with the Nintendo or Xbox button layout; every key rebindable
 - Experimental **two-controller local co-op input** (the second gamepad joins through a simulated shake; overworld joining, movement and viewport follow have been tried in-game)
-- Experimental **wild battles** (a classic battle, then the capture) and **skip controller selection**
+- Experimental **social online co-op** with independent saves, remote trainer avatars, coloured button nameplates, and Friends controls in Communicate → Play With Others, the launcher or F8 ([setup and limits](docs/COOP-ONLINE.md)). **R3 / F10** opens an eight-emote wheel with animated speech bubbles in the overworld.
+- Experimental **wild battles** (enabled by default): classic combat, defeat XP and catching from the battle Bag on Eevee 1.0.0; plus **skip controller selection**
 - Shaders cached on disk
 
 ## Launcher
@@ -45,6 +46,9 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 </table>
 
 In the game, **F12** opens the same settings, applied at once:
+
+On **Eevee 1.0.0**, the game's own **Options** list also includes the extra graphics, image, audio and
+advanced settings. Change them with left/right; changes apply and save immediately. F12 remains available.
 
 ![The F12 settings in the game](docs/images/f12-menu.jpg)
 
@@ -89,10 +93,10 @@ Mods of the game's code (exefs, IPS, cheats) don't work. Tested with the Brazili
 ## Known issues
 
 - 60 / 120 fps and frame generation are experimental; battles and captures stay at 30 fps
-- Wild battles don't split experience yet
+- Classic wild combat, defeat XP and catching from the battle Bag currently require Eevee 1.0.0; Pikachu retains battle followed by capture
 - Switching to TAA while playing shows one or two black frames
 - The 2x interface shows a few frames of thin stripes during an area change
-- Online features, local wireless, and the Poké Ball Plus aren't supported; co-op is still experimental, with trainer battles and wild catches not yet validated
+- Nintendo's online features, local wireless, and the Poké Ball Plus aren't supported. The separate social co-op relay is experimental; shared battles, trades and story progression are not implemented.
 
 Crashes: please open an issue with `lasrecomp.log` ([CONTRIBUTING.md](CONTRIBUTING.md)). What changed in each
 release: [CHANGELOG.md](CHANGELOG.md).

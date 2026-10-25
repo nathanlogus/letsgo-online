@@ -23,6 +23,7 @@
 #include "imgui_impl_vulkan.h"
 #include "imgui_impl_sdl3.h"
 #include "settings_ui.h"
+#include "coop_ui.h"
 
 extern "C" {
 #include "gamesetup.h"
@@ -488,7 +489,7 @@ extern "C" void launcher_lg_run(const char *root) {
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
     const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
-    enum { TAB_GAME, TAB_GRAPHICS, TAB_IMAGE, TAB_CONTROLS, TAB_MODS, NTABS };
+    enum { TAB_GAME, TAB_GRAPHICS, TAB_IMAGE, TAB_CONTROLS, TAB_MODS, TAB_FRIENDS, NTABS };
     int tab = getenv("LARECOMP_LAUNCHER_TAB") ? atoi(getenv("LARECOMP_LAUNCHER_TAB")) : keys_test ? TAB_CONTROLS : TAB_GAME;
     if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
     if (getenv("LARECOMP_SETUP_DIR")) setup_start(getenv("LARECOMP_SETUP_DIR"));
@@ -553,7 +554,7 @@ extern "C" void launcher_lg_run(const char *root) {
         const char *only = T("Only with version 1.0.0 (the base game) of Eevee or Pikachu for now.",
                              "Por enquanto só na versão 1.0.0 (o jogo base) do Eevee ou do Pikachu.");
         const char *names[NTABS] = {T("Game", "Jogo"), T("Graphics", "Gráficos"), T("Image and sound", "Imagem e som"),
-                                    T("Controls", "Controles"), "Mods"};
+                                    T("Controls", "Controles"), "Mods", "Friends"};
         ui_tabs_begin(&tab, NTABS);  // (L1 / R1 on a controller: the page before / after)
 
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
@@ -654,10 +655,8 @@ extern "C" void launcher_lg_run(const char *root) {
                 float ox = ui_label_x(ol, 3);
                 ImGui::BeginDisabled(!known);
                 ui_toggle("##wild", ol[0], ox, &wildb);
-                ui_tip(!known ? only : T("Touching a wild Pokémon starts a classic battle instead of going straight to the capture. "
-                                         "Its CATCH button throws one Poké Ball, with better odds the weaker the Pokémon is.",
-                                         "Encostar num Pokémon selvagem começa uma batalha clássica em vez de ir direto para a captura. "
-                                         "O botão de captura (CATCH) joga uma Poké Bola, com mais chance quanto mais fraco o Pokémon estiver."));
+                ui_tip(!known ? only : T("Wild combat is enabled by default. Eevee 1.0.0 awards defeat XP and allows catching from the battle Bag. Pikachu uses battle followed by capture.",
+                                         "Batalhas selvagens vêm ligadas. Eevee 1.0.0 concede XP por derrota e permite capturar pela Bolsa da batalha. Pikachu usa batalha seguida de captura."));
                 ui_toggle("##skipc", ol[1], ox, &skipc);
                 ui_tip(!known ? only : T("The game starts at the Game Freak logo, with your controller already chosen, instead of asking for a button press first.",
                                          "O jogo começa no logo da Game Freak, com o seu controle já escolhido, em vez de pedir antes que se aperte um botão."));
@@ -682,6 +681,8 @@ extern "C" void launcher_lg_run(const char *root) {
                 ui_page_image_sound();
             } else if (tab == TAB_CONTROLS) {
                 keys_section();
+            } else if (tab == TAB_FRIENDS) {
+                if (coop_ui_page(true) && ready) play = true;
             } else {
                 mods_section(win, inst);
             }

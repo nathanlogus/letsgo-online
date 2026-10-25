@@ -43,16 +43,16 @@ Abra o **Git Bash** na pasta do projeto e coloque o MSYS2 no PATH (vale para ess
 
 ```bash
 export PATH="/c/msys64/ucrt64/bin:/c/msys64/usr/bin:$PATH"
-make -j20 build/lasrecomp.exe
+make -j20 build/LetsGoRecomp.exe
 ```
 
-Isso gera `build/lasrecomp.exe`, o runtime (o launcher e tudo o que substitui o Switch). Mudanças no runtime
-recompilam em segundos.
+Isso gera `build/LetsGoRecomp.exe`, o runtime (o launcher e tudo o que substitui o Switch). Mudanças no runtime
+recompilam em segundos. No Windows, este nome tamb?m ? o que a biblioteca do jogo importa; execute `LetsGoRecomp.exe` para evitar carregar dois runtimes. O alvo antigo `build/lasrecomp.exe` ainda copia o execut?vel por compatibilidade com comandos de build anteriores.
 
 ## 4. Montar o jogo pelo launcher (o caminho mais simples)
 
 ```bash
-./build/lasrecomp.exe
+./build/LetsGoRecomp.exe
 ```
 
 No launcher, clique em **Selecionar pasta do jogo...** e escolha a pasta com o jogo extraído (a que tem `exefs` e
@@ -88,12 +88,12 @@ Isso gera também `build/lasgame.dll` (o código do jogo), em 5 a 20 minutos con
 ## 5. Jogar
 
 ```bash
-./build/lasrecomp.exe
+./build/LetsGoRecomp.exe
 ```
 
 - Os saves ficam em `save/`, as configurações em `larecomp.ini` e os caches de shader em `cache/`, tudo na pasta do
   projeto.
-- `--play` pula o launcher: `./build/lasrecomp.exe extracted --play`.
+- `--play` pula o launcher: `./build/LetsGoRecomp.exe extracted --play`.
 - `make jogo` monta em `build/jogo/` uma cópia que abre com dois cliques (traz as DLLs do MSYS2) e deixa recompilar
   `build/` enquanto se joga.
 - A primeira vez em cada área compila os shaders. Pode haver objetos aparecendo atrasados por um instante; da segunda

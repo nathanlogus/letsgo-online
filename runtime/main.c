@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "gamelib.h"
+#include "gamebuild.h"
 #include "gamesetup.h"
 #include "paths.h"
 #include "settings.h"
@@ -134,6 +135,8 @@ static void boot(const char *root) {
     char why[512];
     if (!gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
+    { extern void pc_settings_configure(int build); pc_settings_configure(game_build(exefs)); }
+    { extern void coop_menu_configure(int build); coop_menu_configure(game_build(exefs)); }
     { extern void settings_load(void); settings_load(); }
     kernel_init();
     dispatch_init();
@@ -172,13 +175,24 @@ int main(int argc, char **argv) {
 #endif
     const char *root = "extracted";  // (in the data root)
     bool skip_launcher = getenv("LARECOMP_NO_LAUNCHER") || getenv("LARECOMP_INPUT");  // tests boot straight in
+    bool rebuild_game = false;
     static char arg_root[1024];
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--play")) skip_launcher = true;
+        else if (!strcmp(argv[i], "--rebuild-game")) rebuild_game = true;
         else if (argv[i][0] != '-' && !realpath(argv[i], arg_root)) root = argv[i];  // (relative to where we started)
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    if (rebuild_game) {
+        GameBuildOpts options = {.jobs=8};
+        const char *jobs = getenv("LARECOMP_BUILD_JOBS");
+        if (jobs) { int n=atoi(jobs); if(n>=1 && n<=64) options.jobs=n; }
+        char why[512] = {0};
+        bool ok=gamebuild_run(root,&options,why,sizeof why);
+        if(!ok) LOG("[gamebuild] %s\n",why);
+        return ok ? 0 : 1;
+    }
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen: resolution, fullscreen, anti-aliasing, translation, keys (runtime/ui/launcher_lg.mm)
             extern void launcher_lg_run(const char *root);
@@ -190,12 +204,15 @@ int main(int argc, char **argv) {
             snprintf(exefs, sizeof exefs, "%s/exefs", root);
             int build = game_build(exefs);
             rt_fnhook_set_build(build);
+            { extern void wildbattle_classic_configure(int build); wildbattle_classic_configure(build); }
+            { extern void coop_battle_configure(int build); coop_battle_configure(build); }
             extern const char *g_game_version;  // (runtime/services/am.c)
             g_game_version = game_version(exefs);
             if (build == GAME_BUILD_OTHER) LOG("[boot] %s: a build without address tables, 60 fps, wild battles and the controller skip stay off\n", exefs);
         }
         { extern void fps60_configure(void); fps60_configure(); }  // (runtime/hle/fps60.c: the launcher's 60 fps option)
         { extern void wildbattle_configure(void); wildbattle_configure(); }  // (runtime/hle/wildbattle.c: the wild battles option)
+        { extern void coop_battle_install_hooks(void); coop_battle_install_hooks(); }
         { extern void controller_skip_configure(void); controller_skip_configure(); }  // (runtime/hle/controller_skip.c)
         { extern void cutscene_configure(void); cutscene_configure(); }  // (runtime/hle/cutscene.c)
         boot(root);

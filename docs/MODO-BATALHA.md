@@ -4,6 +4,24 @@ _Ideia (15/10/2026): ao encostar num Pokémon selvagem, em vez de ir direto para
 numa batalha clássica - e capturar depois, como o jogo já faz com os lendários e o Snorlax. Até onde se sabe ninguém
 fez isso em mod do Let's Go ([discussão de 2026](https://reddit.sentinel-team.org/posts/1rr2xif/snapshots/2026-03-13T05%3A19%3A13.96841Z))._
 
+## Estado atual (25/10/2026)
+
+Eevee 1.0.0 usa combate clássico por padrão: sem cronômetro, XP por derrota e
+captura durante a batalha pela Bolsa nativa. Bolas e remédios usam o inventário
+real; a captura registra treinador, local, data e bola e acrescenta o Pokémon à
+equipe ou ao armazenamento. O resultado não abre outra tela de captura.
+As batalhas da história conservam suas regras. Pikachu ainda usa batalha seguida
+da captura GO. O interruptor fica nas Opções nativas do Eevee e no launcher.
+
+A captura em combate mostra o treinador arremessando o modelo da bola escolhida
+em direção ao Pokémon selvagem, com impacto, queda e balanço antes do resultado.
+Um escape devolve o modelo selvagem à cena. Os recursos vêm do próprio jogo;
+o port reconecta a criação da bola e adapta os comandos da sequência nativa.
+
+O restante deste documento conserva o histórico da investigação, incluindo
+limitações e tentativas anteriores. Implementação atual: `runtime/hle/wildbattle.c`
+e `runtime/hle/wildbattle_classic.c`; diagnóstico em [DEPURACAO.md](DEPURACAO.md).
+
 ## Etapa 1: mapa dos dois caminhos ✅
 
 Método: `LARECOMP_FNPROF` (runtime/fnprof.c: funções do jogo executadas numa janela de frames, agora com a ordem da

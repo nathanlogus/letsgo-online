@@ -33,22 +33,95 @@ static _Atomic int32_t key_lx, key_ly, key_rx, key_ry, pad_lx, pad_ly, pad_rx, p
 static _Atomic int32_t pad2_lx, pad2_ly, pad2_rx, pad2_ry;
 static _Atomic int pad2_auto_shake_pending;
 static _Atomic uint64_t pad2_auto_shake_start_ns;
+static _Atomic bool remote_p2_connected;
+static _Atomic uint64_t remote_refresh_until;
 static void signal_style_update_events(void);
 static uint8_t keys_down[SDL_SCANCODE_COUNT];
 static SDL_Gamepad *pad, *pad2;
+static _Atomic bool pad_wait_release;
+void input_quarantine_pad(void) { pad_wait_release = true; }
+bool input_primary_gamepad(uint32_t id) {
+    return id == 0x7E57u || (pad && SDL_GetGamepadID(pad) == id); // scripted SDL test device
+}
 static void recompute_pad(void);
 static void recompute_pad2(void);
 static void note_family(void);
+
+// An online peer can use the game's native local-co-op companion actor as a temporary remote avatar.
+static bool remote_peer_connected(void) {
+    CoopRemote peer;
+    return coop_net_enabled() && coop_net_remote(&peer);
+}
+static bool virtual_remote_pad2(void) {
+    if(plat_now_ns()<atomic_load(&remote_refresh_until))return false;
+    return !pad2 && remote_peer_connected() &&
+           (atomic_load(&remote_p2_connected) || coop_net_avatar_ready());
+}
+bool input_remote_avatar_active(void) { return !pad2 && atomic_load(&remote_p2_connected); }
+bool input_remote_avatar_refresh(void) {
+    if(!input_remote_avatar_active())return false;
+    atomic_store(&remote_refresh_until,plat_now_ns()+1000000000ull);
+    LOG("[coop] refreshing remote trainer after an outfit change\n");
+    return true;
+}
+void input_remote_avatar_rejoin(void) {
+    if (!input_remote_avatar_active()) return;
+    atomic_store(&pad2_auto_shake_start_ns, 0);
+    atomic_store(&pad2_auto_shake_pending, 1);
+    signal_style_update_events();
+    LOG("[coop] requesting remote avatar again after scene transition\n");
+}
+static void update_virtual_remote_pad2(void) {
+    bool connected = virtual_remote_pad2();
+    bool was_connected = atomic_exchange(&remote_p2_connected, connected);
+    if (connected && !was_connected) {
+        atomic_store(&pad2_auto_shake_start_ns, 0);
+        atomic_store(&pad2_auto_shake_pending, 1);
+        LOG("[coop] both overworlds and appearances ready; requesting the game's native P2 trainer\n");
+        signal_style_update_events();
+    } else if (!connected && was_connected) {
+        atomic_store(&pad2_auto_shake_pending, 0);
+        atomic_store(&pad2_auto_shake_start_ns, 0);
+        LOG("[coop] peer left; virtual P2 controller disconnected\n");
+        signal_style_update_events();
+    }
+}
 static bool gamepad_id_selection;
 static SDL_JoystickID selected_gamepad_id;
+static char selected_gamepad_name[64];
+static bool gamepad_name_selection;
 static bool gamepad_selection_loaded;
 static _Atomic int64_t sampling;
 
-// LARECOMP_GAMEPAD_ID selects one SDL gamepad for P1 in this process and disables local P2.
-// This lets two game instances on one PC bind different physical controllers.
+// LARECOMP_GAMEPAD_NAME (stable across processes) or LARECOMP_GAMEPAD_ID selects one SDL gamepad for P1 and disables
+// local P2. This lets two game instances on one PC bind different physical controllers.
+static bool gamepad_name_matches(const char *actual, const char *wanted) {
+    if (!actual || !wanted || !*wanted) return false;
+    size_t n = strlen(wanted);
+    for (const char *p = actual; *p; p++) {
+        size_t i = 0;
+        while (i < n && p[i] && tolower((unsigned char)p[i]) == tolower((unsigned char)wanted[i])) i++;
+        if (i == n) return true;
+    }
+    return false;
+}
+
+static bool selected_gamepad_matches(SDL_JoystickID id) {
+    if (gamepad_name_selection)
+        return gamepad_name_matches(SDL_GetGamepadNameForID(id), selected_gamepad_name);
+    return id == selected_gamepad_id;
+}
+
 static void load_gamepad_selection(void) {
     if (gamepad_selection_loaded) return;
     gamepad_selection_loaded = true;
+    const char *name = getenv("LARECOMP_GAMEPAD_NAME");
+    if (name && *name) {
+        gamepad_id_selection = gamepad_name_selection = true;
+        snprintf(selected_gamepad_name, sizeof selected_gamepad_name, "%s", name);
+        LOG("[input] selecting gamepad matching '%s' for P1; local P2 is disabled in this instance\n", selected_gamepad_name);
+        return;
+    }
     const char *e = getenv("LARECOMP_GAMEPAD_ID");
     if (!e || !*e) return;
     gamepad_id_selection = true;
@@ -65,7 +138,7 @@ static void load_gamepad_selection(void) {
 static void open_selected_gamepad(SDL_JoystickID id) {
     load_gamepad_selection();
     if (gamepad_id_selection) {
-        if (id != selected_gamepad_id || pad) return;
+        if (!selected_gamepad_matches(id) || pad) return;
         pad = SDL_OpenGamepad(id);
         if (pad) {
             LOG("[input] selected gamepad P1: id=%u name=%s\n", id, SDL_GetGamepadName(pad));
@@ -77,7 +150,7 @@ static void open_selected_gamepad(SDL_JoystickID id) {
     if (!pad) {
         pad = SDL_OpenGamepad(id);
         if (pad) { LOG("[input] gamepad P1: id=%u name=%s\n", id, SDL_GetGamepadName(pad)); note_family(); }
-    } else if (!pad2 && SDL_GetGamepadID(pad) != id) {
+    } else if (!coop_net_enabled() && !pad2 && SDL_GetGamepadID(pad) != id) {
         pad2 = SDL_OpenGamepad(id);
         if (pad2) {
             atomic_store(&pad2_auto_shake_start_ns, 0);
@@ -86,6 +159,42 @@ static void open_selected_gamepad(SDL_JoystickID id) {
             signal_style_update_events();
         }
     }
+}
+
+// A selected pad can become visible after SDL's initial device scan (Bluetooth wake, XInput
+// startup ordering, or a missed hotplug event). Re-enumerate occasionally so this instance can
+// claim its configured controller without requiring the user to unplug and reconnect it.
+void input_poll_gamepads(void) {
+    if (coop_net_enabled() && pad2) {
+        SDL_CloseGamepad(pad2); pad2 = NULL;
+        pad2_buttons = 0; pad2_lx = pad2_ly = pad2_rx = pad2_ry = 0;
+        signal_style_update_events();
+    }
+    // The game may stop querying P2 while it is disconnected. Poll the readiness gate
+    // from the host event loop as well, then signal the game's controller-style event.
+    update_virtual_remote_pad2();
+    load_gamepad_selection();
+    if (!gamepad_id_selection && coop_net_enabled()) return;
+    static uint64_t last_scan;
+    uint64_t now = SDL_GetTicksNS();
+    if (now - last_scan < 250000000ull) return;
+    last_scan = now;
+    if (gamepad_id_selection && pad && SDL_GamepadConnected(pad)) return;
+    if (!gamepad_id_selection && pad && pad2) return;
+    if (pad && !SDL_GamepadConnected(pad)) {
+        LOG("[input] selected gamepad disconnected; rescanning for '%s'\n", gamepad_name_selection ? selected_gamepad_name : "configured ID");
+        SDL_CloseGamepad(pad);
+        pad = NULL;
+        note_family();
+    }
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    for (int i = 0; ids && i < n; i++) {
+        open_selected_gamepad(ids[i]);
+        if (gamepad_id_selection ? pad != NULL : pad2 != NULL) break;
+    }
+    SDL_free(ids);
+    recompute_pad();
 }
 
 // Host keys / buttons held by a test script (LARECOMP_HOST_INPUT, input_frame): they go through the bindings
@@ -136,6 +245,8 @@ static void recompute_pad(void) {
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) > 16000) host |= 1u << PADB_RTRIGGER;
     }
+    // SDL polling must not replay the A / B press consumed by the wheel.
+    if (pad_wait_release) { if (!host) pad_wait_release = false; host = 0; }
     uint64_t b = 0;
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
@@ -306,15 +417,16 @@ void input_handle_event(const SDL_Event *e) {
             LOG("[input] detected gamepad: id=%u name=%s\n", ids[i], SDL_GetGamepadNameForID(ids[i]));
             open_selected_gamepad(ids[i]);
         }
-        if (gamepad_id_selection && !pad)
-            LOG("[input] requested gamepad ID %u is not currently connected\n", selected_gamepad_id);
+        if (gamepad_id_selection && !pad) {
+            if (gamepad_name_selection) LOG("[input] requested gamepad name '%s' is not currently connected\n", selected_gamepad_name);
+            else LOG("[input] requested gamepad ID %u is not currently connected\n", selected_gamepad_id);
+        }
         SDL_free(ids);
         recompute_pad(); recompute_pad2();
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
-        if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F10 && !e->key.repeat) coop_net_emote(1);
         // research (broken map after a capture): F5 marks all guest memory written (every texture re-checks its data), F6 reads
         // all vertex and index data in place from now on
         if (e->type == SDL_EVENT_KEY_DOWN && !e->key.repeat && getenv("LARECOMP_HEAL_KEYS")) {
@@ -522,7 +634,7 @@ void input_press_a_at(uint64_t frame) {
     for (int i = 0; i < 4; i++)
         if (!g_press_a[i] || g_press_a[i] + 4 < frame) { g_press_a[i] = frame; return; }
 }
-RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; }  // (reboot: the controller object was guest memory)
+RT_ON_RESET(input_reboot_reset) { g_pad_obj = 0; g_inject_plus = 0; remote_refresh_until=0; }  // guest controller object
 // Script entries "b<N>:<button>:<len>" count from the last input_mark() (runtime/hle/wildbattle.c marks each battle's
 // start), "c<N>:..." from the last input_mark_capture() (the capture after one of its battles): the encounter's frame
 // changes from run to run, the battle's own timing doesn't.
@@ -551,6 +663,14 @@ void input_frame(uint64_t frame) {
     watch_arm();
     host_test_frame(frame);
     const char *spec = getenv("LARECOMP_INPUT");
+    // Optional live test script: same frame/button syntax, isolated from normal
+    // play. This lets automated QA hold inputs across native game polls.
+    const char *script_path = getenv("LARECOMP_INPUT_FILE");
+    static char file_script[16384];
+    if (script_path && *script_path) {
+        FILE *f = fopen(script_path, "r");
+        if (f) { size_t n = fread(file_script, 1, sizeof file_script - 1, f); file_script[n] = 0; fclose(f); spec = file_script; }
+    }
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",
                                         "MINUS", "LEFT", "UP", "RIGHT", "DOWN"};
@@ -623,6 +743,16 @@ uint64_t input_buttons_now(void) { return (menu_input_captured() ? 0 : key_butto
 
 static int32_t clamp_axis(int32_t v) { return v > 32767 ? 32767 : v < -32767 ? -32767 : v; }
 
+// Sent with social-co-op snapshots so the peer can move its game-native P2 trainer through
+// the same controller path used by local co-op. We intentionally expose movement axes only.
+void input_coop_left_stick(int16_t *x, int16_t *y) {
+    bool menu = menu_input_captured();
+    int32_t sx = menu ? 0 : atomic_load(&key_lx) + atomic_load(&pad_lx) + atomic_load(&script_lx);
+    int32_t sy = menu ? 0 : atomic_load(&key_ly) + atomic_load(&pad_ly) + atomic_load(&script_ly);
+    if (x) *x = (int16_t)clamp_axis(sx);
+    if (y) *y = (int16_t)clamp_axis(sy);
+}
+
 // NpadFullKeyState / NpadHandheldState / NpadJoy*State share this layout (0x28 bytes):
 // {int64 sampling, u64 buttons, AnalogStick L {x,y}, AnalogStick R {x,y}, u32 attributes}
 static uint32_t npad_id_used(uint32_t *style);  // (below: which controller the player has)
@@ -637,14 +767,24 @@ static void fill_state(Cpu *c) {
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
     if (id == 1 && !logged_p2_state) { logged_p2_state = true; LOG("[input] P2 state requested\n"); }
     if (id == 1) {  // NpadId::No2: the second local co-op player
-        if (!pad2) return;
+        update_virtual_remote_pad2();
+        if (!pad2 && !virtual_remote_pad2()) return;
+        if (getenv("LARECOMP_COOP_DEBUG")) { static int n; if (n++ < 4) LOG("[coop-debug] P2 state supplied: virtual=%d\n", virtual_remote_pad2()); }
         bool menu = menu_input_captured();
         uint64_t b = menu ? 0 : pad2_buttons;
-        // Player 2 is exposed as a right Joy-Con, whose one physical stick is represented in
-        // the guest's right-stick fields. Route the PC pad's left stick there so it remains
-        // the movement stick; keep the PC right stick on the guest's left-stick fields.
-        int32_t lx = menu ? 0 : clamp_axis(pad2_rx), ly = menu ? 0 : clamp_axis(pad2_ry);
-        int32_t rx = menu ? 0 : clamp_axis(pad2_lx), ry = menu ? 0 : clamp_axis(pad2_ly);
+        // Player 2 is exposed as a right Joy-Con, whose movement stick is represented in the
+        // guest's right-stick fields. An online peer supplies only those axes; otherwise keep
+        // the existing local P2 mapping (PC left stick -> guest right stick).
+        int32_t lx = 0, ly = 0, rx, ry;
+        if (virtual_remote_pad2()) {
+            int16_t remote_x = 0, remote_y = 0;
+            coop_net_remote_stick(&remote_x, &remote_y);
+            rx = remote_x;
+            ry = remote_y;
+        } else {
+            lx = menu ? 0 : clamp_axis(pad2_rx); ly = menu ? 0 : clamp_axis(pad2_ry);
+            rx = menu ? 0 : clamp_axis(pad2_lx); ry = menu ? 0 : clamp_axis(pad2_ly);
+        }
         if (lx < -16000) b |= 1ull << 16;
         if (ly > 16000) b |= 1ull << 17;
         if (lx > 16000) b |= 1ull << 18;
@@ -742,8 +882,10 @@ HLE_FUNC("_ZN2nn3hid15GetNpadStyleSetERKj", hid_style_set) {
     static bool logged_p2;
     if (nlog++ < 4 || (id == 1 && !logged_p2)) LOG("[input] GetNpadStyleSet id %#x\n", id);
     if (id == 1) {
+        update_virtual_remote_pad2();
         logged_p2 = true;
-        c->x[0] = pad2 ? 1u << 4 : 0;  // player two: JoyRight (Let's Go joins from a shaken right Joy-Con)
+        c->x[0] = (pad2 || virtual_remote_pad2()) ? 1u << 4 : 0;  // player two: JoyRight (join from a shake)
+        if (getenv("LARECOMP_COOP_DEBUG")) { static int n; if (n++ < 12) LOG("[coop-debug] P2 style query: connected=%d virtual=%d\n", c->x[0] != 0, virtual_remote_pad2()); }
     }
     else c->x[0] = id == npad_id_used(&style) ? style : 0;
 }
@@ -987,6 +1129,7 @@ static void mat_mul(double o[3][3], double a[3][3], double b[3][3]) {
         for (int k = 0; k < 3; k++) o[r][k] = a[r][0] * b[0][k] + a[r][1] * b[1][k] + a[r][2] * b[2][k];
 }
 static void six_axis_fill(uint8_t *s, int64_t sampling, uint32_t handle) {
+    update_virtual_remote_pad2();
     static int test = -1, test_fixed;
     if (test < 0) {
         const char *e = getenv("LARECOMP_GYRO_TEST");
@@ -1030,7 +1173,8 @@ static void six_axis_fill(uint8_t *s, int64_t sampling, uint32_t handle) {
     gyr[gyro_pitch_axis] += (float)((gyro_pitch - pp) / dt / (2 * M_PI));
     // The console joins local co-op when Player 2 shakes a controller. A PC gamepad has no
     // motion sensor, so give Player 2's six-axis handle one short synthetic shake on connection.
-    if (pad2 && ((handle >> 8) & 0xff) == 1) {
+    if ((pad2 || virtual_remote_pad2()) && ((handle >> 8) & 0xff) == 1) {
+        if (getenv("LARECOMP_COOP_DEBUG")) { static int n; if (n++ < 8) LOG("[coop-debug] P2 motion sample handle=%08x pending=%d\n", handle, atomic_load(&pad2_auto_shake_pending)); }
         uint64_t shake_start = atomic_load(&pad2_auto_shake_start_ns);
         if (!shake_start && atomic_exchange(&pad2_auto_shake_pending, 0)) {
             shake_start = now;
@@ -1071,6 +1215,7 @@ HLE_FUNC("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", hid_six_
     atomic_store(&mouse_acc_y, 0);
     extern uint64_t renderer_game_frame(void);
     LOG("[input] six-axis sensor started (frame %llu)\n", (unsigned long long)renderer_game_frame());
+    if (getenv("LARECOMP_COOP_DEBUG")) LOG("[coop-debug] six-axis sensor start requested\n");
 }
 HLE_FUNC("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", hid_six_axis_stop) {
     gyro_aiming = 0;

@@ -17,6 +17,7 @@
 #include "vk.h"
 #include "../renderer.h"
 #include "../../settings.h"
+#include "../../coop_net.h"
 #include "fsr3.h"
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
@@ -3236,6 +3237,39 @@ static CamReal cam_real[3];
 static int cam_ri;
 static void mv_set_camera(const double vp[16], const uint8_t *blk, uint32_t n, uint64_t fr);
 static void mv_replay_camera(uint64_t fr);
+extern bool fps60_world_active(void);  // runtime/hle/fps60.c
+
+// Project an overworld position using the most recent game camera. The UI uses this for a
+// remote-player nameplate above the native avatar's head.
+bool renderer_world_to_screen(float x, float y, float z, float *sx, float *sy, bool *on_screen) {
+    if (!sx || !sy || !ao.vp_frame) return false;
+    const double v[4] = {x, y, z, 1.0};
+    double clip[4] = {};
+    for (int r = 0; r < 4; r++)
+        for (int c = 0; c < 4; c++) clip[r] += ao.vp[r * 4 + c] * v[c];
+    if (fabs(clip[3]) < 1e-4) return false;
+    // For a point behind the camera, mirror the perspective divide so the screen direction still
+    // points toward it. The UI clamps these coordinates to the viewport edge as a compass cue.
+    double w = fabs(clip[3]);
+    double nx = clip[0] / w, ny = clip[1] / w;
+    bool visible = clip[3] > 0 && clip[2] >= -clip[3] && clip[2] <= clip[3] && nx >= -1 && nx <= 1 && ny >= -1 && ny <= 1;
+    extern double g_present_rect[4];
+    double cx = g_present_rect[0] + g_present_rect[2] * 0.5, cy = g_present_rect[1] + g_present_rect[3] * 0.5;
+    if (visible) {
+        *sx = (float)(cx + nx * g_present_rect[2] * 0.5);
+        *sy = (float)(cy - ny * g_present_rect[3] * 0.5);
+    } else {
+        double dx = nx, dy = -ny;
+        if (fabs(dx) + fabs(dy) < 1e-6) dy = -1;
+        double mx = (g_present_rect[2] * 0.5 - 32) / fabs(dx > 0 ? dx : dx < 0 ? dx : 1e-30);
+        double my = (g_present_rect[3] * 0.5 - 32) / fabs(dy > 0 ? dy : dy < 0 ? dy : 1e-30);
+        double k = fmin(mx, my);
+        *sx = (float)(cx + dx * k);
+        *sy = (float)(cy + dy * k);
+    }
+    if (on_screen) *on_screen = visible;
+    return true;
+}
 
 // The camera of this frame, from the projection found at p (row-major): the view matrix right before it (Let's Go's
 // scene block: view +0, projection +64, view-projection +128), checked to be a rigid transform. vp = P x V, and the
@@ -3627,6 +3661,16 @@ static void draw_(CmdRec *r, bool indexed) {
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
     if (g_settings.contact_on) sun_probe();  // (the shadow map's light: the contact shadows' sun)
     begin_pass();
+    // Online head labels still need the scene camera when all camera-dependent
+    // graphics effects are off. Capture it without enabling those effects.
+    if (!ao.qual && coop_net_enabled() && pass_ncolor && pass_samples == 1 &&
+        st.rt.depth && st.ds[0] && st.ds[1] && !(st.color_state[0] & 1) && st.rt.color[0]) {
+        TexBackend *c0 = st.rt.color[0]->backend;
+        VkFormat f = pass_color[0];
+        if (c0 && c0->scalable && (f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
+            f == VK_FORMAT_R16G16B16A16_SFLOAT || f == VK_FORMAT_R32G32B32A32_SFLOAT))
+            ssao_find_projection();
+    }
     if (ao.qual && ssao_draw_hook()) begin_pass();  // (the occlusion went in before this draw: the pass again)
     // per-object motion vectors: the scene pass's depth-tested draws that are opaque, or blended but writing depth (the
     // door and window frames, foliage cards: what is seen there is them), take the program's velocity variant

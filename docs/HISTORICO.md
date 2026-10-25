@@ -9,6 +9,96 @@ Período: 14 e 15/10/2026. Estado atual e pendências: [PROGRESSO.md](PROGRESSO.
 
 ---
 
+## 25/10/2026 — Tela preta depois da captura em combate
+
+- **Sintoma:** depois de capturar na Rota 1, a tela escurecia e o jogo não
+  voltava ao campo. Reproduzido com uma cópia do save do início do jogo.
+- **Causa:** a nova sequência de arremesso passava `true` ao player nativo
+  (`a81690`). Esse modo pula a limpeza de recursos e mapas em `a7d344`;
+  a finalização da batalha ficava esperando os recursos da sequência.
+- **Correção:** usar `false`, como o envio nativo com `ee420`, e liberar os
+  descritores na mesma ordem do jogo. Os objetos da bola mantêm seus jobs
+  nativos de vida útil; esconder uma bola não agenda outra destruição.
+- **Validação:** comparação com a animação desligada, captura com Master Ball
+  em uma cópia do save inicial, captura com subida de nível e capturas reais
+  seguidas na Rota 1. O Pokémon é registrado, o processo da batalha termina
+  e o fade-in do campo volta a executar.
+
+## 25/10/2026 — Arremesso visível na captura em batalha
+
+- **Sintoma:** usar uma bola pela Bolsa mudava a câmera para o treinador e
+  mostrava o resultado sem arremesso visível.
+- **Diagnóstico e causa:** o callback de captura da cena de combate e o comando
+  de criação da bola são stubs no Let's Go. A implementação da criação ainda
+  existe no executável, junto dos recursos de envio de Pokémon.
+- **Correção:** os encontros clássicos do port reutilizam a sequência nativa
+  do treinador, câmera, modelos de bolas, efeitos e sons. O comando é ligado
+  novamente à criação nativa; ações de envio e a mensagem “Go!” são filtradas.
+  Uma trajetória em arco vai da bola na mão ao ponto do modelo selvagem, seguida
+  da queda e balanço. A visibilidade do alvo acompanha sucesso ou escape.
+  A batalha espera o processo real da sequência antes de mostrar o resultado,
+  preservando as regras de captura, inventário e registro no save.
+  Nenhum arquivo do jogo é alterado ou distribuído; os hooks ficam limitados
+  aos encontros criados pelo port no Eevee 1.0.0.
+  O player de efeitos também trata a ausência de uma instância opcional: o
+  caminho nativo de falha chamava `Play` com ponteiro nulo após um escape.
+- **Validação:** Master Ball visível na mão e no arco até Rattata, impacto e
+  resultado de sucesso; após salvar, a bola foi consumida e o Pokémon entrou
+  na sexta vaga com treinador, bola e checksum corretos. Eevee parceiro manteve
+  forma e stats. Poké Ball contra um Snorlax sintético também mostrou escape,
+  restauração do alvo e o turno seguinte da batalha, sem crash.
+- **Pendência visual:** durante o arco ainda aparece uma pequena segunda
+  representação da bola perto do jogador. O arremesso até o alvo e a resolução
+  da captura funcionam; retirar o objeto de mão pela sequência nativa não
+  eliminou essa representação nos screenshots de validação.
+
+## 25/10/2026 — Combate selvagem clássico por padrão
+
+- **Sintoma:** o processo de encontro estático herdava as regras das aves lendárias:
+  cronômetro, exclusão de XP e captura GO depois da vitória. A captura resolvida
+  pelo motor de combate também não registrava o Pokémon no save.
+- **Diagnóstico e causa:** essas regras são copiadas na montagem do contexto;
+  o processo de campo deixa a propriedade e o armazenamento para a tela GO.
+- **Correção:** `runtime/hle/wildbattle_classic.c` remove essas regras somente
+  dos encontros criados pelo port, mantém os encontros da história intactos e
+  oferece bolas com quantidades reais na Bolsa nativa de combate, junto dos remédios.
+  O resultado de captura usa as rotinas nativas de registro, treinador, local/data,
+  bola utilizada e inserção na equipe ou armazenamento. O pós-batalha mantém as
+  atualizações da equipe e evoluções, sem abrir uma segunda tela de captura.
+  O modo vem ligado no Eevee 1.0.0; `LARECOMP_WILDBATTLE_CLASSIC=0` restaura o fluxo
+  experimental anterior para diagnóstico. Pikachu conserva o fluxo anterior.
+- **Validação:** captura com falha retorna ao turno; captura com Master Ball
+  consome a bola, concede XP e acrescenta um Rattata ao armazenamento, com checksum,
+  treinador e dados de encontro válidos após salvar. Derrotar Rattata concedeu
+  24 XP ao líder e 12 XP aos demais membros da equipe.
+- **Parceiro:** os descritores de pré-carga e criação do ator usam o modelo comum
+  de Eevee/Pikachu e a animação normal de envio. Isso evita a transferência de
+  um modelo de campo ausente no encontro estático, sem alterar a forma, os stats
+  ou o Pokémon salvo. Validado com Eevee parceiro na liderança: entrada, cura,
+  reabertura da Bolsa, captura e save; forma 1 e stats preservados.
+  Outra captura com cinco membros preencheu a sexta vaga da equipe e persistiu
+  corretamente após salvar.
+
+## 24/10/2026 — Configurações do PC nas Opções nativas
+
+- **Sintoma:** as opções extras exigiam abrir o launcher ou o overlay F12.
+- **Diagnóstico e causa:** a lista original usa registros dinâmicos de oito bytes,
+  mas as tabelas de texto e descrição só aceitam os tipos originais de 0 a 10.
+  As setas também precisam rearmar a entrada após cada edição.
+- **Correção:** `runtime/hle/pc_settings.c` acrescenta 21 linhas à própria lista,
+  com valores, setas, descrições em duas linhas e ações de restauração nativas.
+  Esquerda/direita e confirmação aplicam e gravam os valores imediatamente.
+  Mudanças de anti-aliasing atualizam as linhas dependentes visíveis; opções
+  indisponíveis mostram `--` e não aceitam edição. Não há abertura do overlay.
+  Os hooks são limitados a Eevee 1.0.0; outras builds mantêm F12.
+  A opção de batalhas selvagens passa a ser consultada em cada encontro, para
+  ligar e desligar durante a partida sem reiniciar. Overrides de teste continuam
+  disponíveis. Não há alteração do formato do save nem dos arquivos do jogo.
+- **Validação:** build Windows e jogo real com cópias isoladas de save e INI;
+  rolagem até o fim, restauração, três mudanças consecutivas de frame rate,
+  troca de SMAA/TAA/FSR 3.1, edição do modo FSR após habilitá-lo e descrições
+  de duas linhas. Capturas e logs em `tests/runs/pc-settings/` (fora do Git).
+
 ## Parte 1: escolha do caminho
 
 ### A ideia

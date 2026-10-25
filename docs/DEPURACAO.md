@@ -29,6 +29,9 @@ Tudo o que foi usado para diagnosticar o port. As variáveis de ambiente valem p
 | `LARECOMP_DAYS_AHEAD=<n>` | relógio n dias à frente (coisas diárias: a fome do parceiro, que precisa ser maior que zero para ele comer) |
 | `LARECOMP_WILDBATTLE=1` (+ `LARECOMP_WILDBATTLE_*`) | batalhas selvagens (docs/MODO-BATALHA.md; o launcher liga igual). `SPECIES=<n>`/`LEVEL=<n>`: sempre esse Pokémon (padrão: o tocado); `MOVES=a,b,c,d`: esses golpes (padrão: por nível); `MAX=<n>`: batalhas por execução (padrão: todas); `FADEIN=0` desliga o fade in manual, `FADE_TYPE`/`FADE_DELAY`/`FADE_FRAMES` o ajustam; `LOGPOKE=1` loga os campos do objeto do Pokémon (`=2` grava `build/poke_<quadro>.bin`); `STATE_LOG=1` os estados do processo e do evento de batalha (com o resultado); `DEBUG=1` grava os passes de um quadro 240 quadros depois da batalha; `USECFG=1` (experimental, derruba o jogo) lança a configuração do construtor. Captura no meio da batalha (etapa 6): `AUTOCATCH=<n>` transforma a n-ésima escolha do menu em cada batalha num pedido de captura (testes sem tocar no botão); `FORCE_RATE=<n>` responde essa taxa de captura (1 para falhar, 255 para pegar); `HP=<n>` começa o selvagem com n de vida (nocaute num golpe, para testar XP); `THEIRTURN=1` faz toda volta da captura
 começar com o turno do selvagem (normalmente só depois de uma bola que estourou); `CATCH_MENU=0` entrega o menu original mesmo nas batalhas do modo (o caminho das batalhas de treinador); `CATCH_DUMP=<pasta>` grava ali os arquivos do menu montados no boot; `CATCHLOG=1` quem pede a taxa de captura; `HPLOG=1` cada Pokémon de batalha montado e devolvido (vida, status, id); `MENULOG=1` o menu (o botão CATCH ligado, as escolhas); `MSGLOG=1` as falas decifradas nas nossas batalhas; `HPSCAN=<A>:<B>[:<C>]` (+ `HPSCAN_HP`) procurou a vida na memória |
+| `LARECOMP_WILDBATTLE_CLASSIC=0` | Eevee 1.0.0: desliga as regras clássicas e restaura batalha seguida da captura GO para comparação. Sem override, o combate clássico acompanha a opção de batalhas selvagens. `LARECOMP_WILDBATTLE_STATE_LOG=1` também registra alterações de XP (`[wild-classic]`). |
+| `LARECOMP_WILDBATTLE_CATCH_ANIMATION=0` | Eevee 1.0.0: desliga somente a nova animação de captura em batalha para comparar com o callback original vazio. Por padrão, arremesso, impacto e espera pelo resultado ficam ligados no combate clássico. |
+| `LARECOMP_WILDBATTLE_TEST_AT=<quadro>` | teste isolado no Eevee 1.0.0: inicia um encontro sintético no primeiro update de campo após esse quadro. Use uma cópia do save e `LARECOMP_SAVE_DIR`; não depende de spawn aleatório. |
 | `LARECOMP_SKIP_CONTROLLER=0/1` | sem a tela de escolha do controle no início (o launcher liga igual: `skip_controller`); `runtime/hle/controller_skip.c` |
 | `LARECOMP_CUTSCENE_LOG=1` | registra o início e o fim de cada cutscene (`[cutscene]`: os nativos de script `EvCameraStart` / `EvCameraEnd`; `runtime/hle/cutscene.c`): ali e na tela de título o SSAO vai à metade |
 | `LARECOMP_IMAGE_DUMP=<arquivo>` | grava o módulo `main` como carregado e relocado (base `0x7000000000`): para ler o executável sem as ferramentas de NSO (a tabela de nativos de script, strings) |
@@ -175,6 +178,7 @@ começar com o turno do selvagem (normalmente só depois de uma bola que estouro
 | `LARECOMP_SHADER_WAIT_MS=<ms>` | quanto um quadro pode esperar por shaders / pipelines em preparo antes de pular draws (padrão 20; 0 = nunca) |
 | `LARECOMP_HIDE_FIRST_FRAMES=<n>` | janela preta nos n primeiros presents (padrão 2: o flash azul da abertura; 0 mostra tudo) |
 | `LARECOMP_WINDOW_SHOT=<frame>` | grava a imagem **da janela** em `build/window.png` (o `LARECOMP_SHOT_AT` grava a imagem do jogo, antes da janela) |
+| `LARECOMP_CAPTURE_DIR=<pasta>` | pasta das capturas de janela, incluindo imagens intermediárias; os scripts locais usam `tests/runs/` |
 | `LARECOMP_LOG_CLEARS=1` | cada limpeza de cor: frame, alvo, formato, máscara e a cor |
 | `LARECOMP_DUMP_TEX_FMT=<formato NVN>` | grava o nível 0 das texturas daquele formato, já sem tiling, em `build/tex/<addr>_<w>x<h>_f<fmt>_row<bytes>.bin` |
 | `LARECOMP_VK_SKIN_ONEBONE=1` | shaders com esqueleto usam só o 1º osso (experimento X4; foi o paliativo antes da correção) |
@@ -231,7 +235,7 @@ Não ligue debug info nos shaders para capturar: com milhares de shaders, o repl
 ### Referências cruzadas no código do jogo (`tools/xrefs.py`)
 `cd tools && ../.venv/Scripts/python xrefs.py calls <addr>` (quem chama a função que contém o endereço), `imm <valor>`
 (instruções com esse imediato) ou `float <valor>` (onde a constante está e quem a carrega). A desmontagem do `main`
-fica em cache em `build/xrefs-main.pkl`. Chamadas por vtable não aparecem: para essas, a cadeia de chamadores em tempo
+fica em cache em `tests/cache/xrefs-main.pkl`. Chamadas por vtable não aparecem: para essas, a cadeia de chamadores em tempo
 de execução (frame pointers do guest, `x29`) é o caminho.
 
 ### Jogar enquanto se testa

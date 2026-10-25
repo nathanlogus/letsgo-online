@@ -44,6 +44,9 @@ typedef struct {
 bool ui2x_find(uint64_t key, uint32_t src_w, uint32_t src_h, Ui2xTex *out);
 bool ui2x_enabled(void);  // turned on and cache/ui2x.pak there (cheap: checked once)
 
+// Decode one native UI texture from the player's own game files. Caller frees RGBA.
+bool ui_game_texture_rgba(const char *archive, const char *name, uint8_t **rgba, uint32_t *w, uint32_t *h);
+
 #ifdef __cplusplus
 }
 #endif

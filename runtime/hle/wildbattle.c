@@ -71,6 +71,8 @@ static struct {
     uint8_t status_raw[5][8];  // the battle's own status blocks (+0xa0.., below), put back in the next battle
 } g_catch;
 static uint64_t g_mgr, g_alloc;  // the process manager and allocator of the touch that started the battle (again: the same)
+bool wildbattle_active(void) { return g_active; }
+static int g_mode_override = -1; // tests: -1 follows the live native/launcher setting
 
 // The touched Pokémon's own battle/capture configuration: the object (0x2b8 bytes) that f_70003058f0 builds from the wild Pokémon (species, form, level, nature,
 // IVs, shiny...); the battle's configuration is the same kind of object, filled by f_70002f60c0 from a table record. So
@@ -216,7 +218,8 @@ static uint64_t party_call(Cpu *c, uint64_t fn, uint32_t arg, bool native, int *
 // The battle sends the starter in with ee422.bseq (f_7000a88780 for the opening, f_7000a8ced0 for a switch), which moves
 // the walking Pokémon's field model into the battle; with the starter walking alone, the static battle - the kind this
 // mode starts - has none for it and the game stops (f_7000a9ddb0 reading a null pointer), whether the starter leads or
-// is switched in. In ours it is then sent out from a Poké Ball, with its species' own model (the two hooks below).
+// is switched in. The classic-rules hooks use ordinary render descriptors and
+// send-out animations; builds without those hooks retain the capture fallback.
 static bool starter_walks_alone(Cpu *c) {
     int walking;
     party_call(c, WALKING_SLOT, 0, false, &walking);
@@ -300,6 +303,7 @@ static void start_battle(Cpu *c) {
 static int trigger_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (g_active) return 1;  // (swallowed: our battle is running)
+    if (!(g_mode_override < 0 ? g_settings.wild_battle : g_mode_override)) return 0;
     if (g_count >= g_max) return 0;  // (the game's capture runs)
     g_starter_alone = starter_walks_alone(c);  // (issue #6: the starter's battle model, above)
     g_count++;
@@ -408,6 +412,20 @@ static int field_hook(Cpu *c, uint64_t addr) {
         start_battle(c);
         memcpy(c->x, save, sizeof save);
         c->x[30] = lr, c->sp = sp;
+    }
+    // Isolated combat tests can start a synthetic encounter after loading a
+    // copied save, without depending on a random overworld Pokemon spawning.
+    static bool test_started;
+    const char *test_at = ENV("LARECOMP_WILDBATTLE_TEST_AT");
+    if (test_at && rt_addr(ENCOUNTER_TRIGGER) == ENCOUNTER_TRIGGER && !test_started &&
+        renderer_game_frame() >= strtoull(test_at, NULL, 10)) {
+        test_started = true;
+        Cpu saved = *c;
+        uint64_t world = R64(R64(0x70015fad08ull, 0), 0);
+        c->x[0] = 0;
+        c->x[1] = (uint64_t)(uintptr_t)&world;
+        trigger_hook(c, 0);
+        *c = saved;
     }
     if (!g_fadein_done && g_end_frame && (long)renderer_game_frame() >= g_end_frame + g_fadein_delay) {
         g_fadein_done = true;
@@ -1223,9 +1241,10 @@ static int capture_hook(Cpu *c, uint64_t addr) {
 // Before each boot (runtime/main.c): the launcher's "Wild battles (experimental)" (larecomp.ini wild_battle = 1) turns the
 // mode on when LARECOMP_WILDBATTLE doesn't say otherwise. The research variables (docs/DEPURACAO.md) tune it.
 static bool g_enabled;
+extern bool wildbattle_classic_enabled(void);
 // runtime/services/fs.c: whether the battle menu's files are made with the CATCH button (the mode is on), and whether
 // one of our battles runs now (its files are served then; the game's own otherwise)
-bool wildbattle_enabled(void) { return g_enabled; }
+bool wildbattle_enabled(void) { return g_enabled && !wildbattle_classic_enabled(); }
 // The battle again after a capture: runtime/services/fs.c serves the wild Pokémon's entrance (bin/battle/waza/sequence/
 // ee330.bseq, the camera on it) one frame long, and its "A wild X appeared!" isn't shown (msgwin_hook): the battle comes
 // back with the send-out alone, which runs hidden (hidden_begin). (The send-out itself, ee420.bseq, stays: cut or sped
@@ -1235,7 +1254,7 @@ bool wildbattle_quick_intro(void) { return g_active && g_catch.rebattle && !g_ca
 bool wildbattle_menu_active(void) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_WILDBATTLE_CATCH_MENU") ? atoi(getenv("LARECOMP_WILDBATTLE_CATCH_MENU")) != 0 : 1;
-    return g_active && on;
+    return g_active && on && !wildbattle_classic_enabled();
 }
 
 void wildbattle_configure(void) {
@@ -1244,9 +1263,10 @@ void wildbattle_configure(void) {
     settings_load();  // (read once; without the launcher it would come later, in boot)
     const char *e = getenv("LARECOMP_WILDBATTLE");
     bool on = e && *e ? atoi(e) != 0 : g_settings.wild_battle;
-    if (!rt_addr(ENCOUNTER_TRIGGER)) on = false;  // (a build runtime/fnhook.c doesn't know: these functions are elsewhere)
+    if (!rt_addr(ENCOUNTER_TRIGGER)) return;  // unknown build: never register guessed offsets
+    g_mode_override = e && *e ? atoi(e) != 0 : -1;
     g_enabled = on;
-    if (!on || hooked) return;
+    if (hooked) return;
     hooked = true;
     g_max = 1 << 30;  // every touch (the test runs set LARECOMP_WILDBATTLE_MAX)
     if (getenv("LARECOMP_WILDBATTLE_SPECIES")) { g_species = atoi(getenv("LARECOMP_WILDBATTLE_SPECIES")); g_explicit = true; }
@@ -1285,6 +1305,9 @@ void wildbattle_configure(void) {
     g_hp_log = getenv("LARECOMP_WILDBATTLE_HPLOG") != NULL;
     g_catch_log = getenv("LARECOMP_WILDBATTLE_CATCHLOG") != NULL;
     g_state_log = getenv("LARECOMP_WILDBATTLE_STATE_LOG") != NULL;
+    // Keep the local in-battle Bag/catch implementation intact. Upstream
+    // CATCH and return-to-battle hooks belong to the alternate GO-capture mode.
+    if (!wildbattle_classic_enabled()) {
     rt_register_fnhook(BPP_REFLECT, reflect_hook);
     rt_register_fnhook(BPP_SETUP, setup_hook);
     rt_register_fnhook(PERSONAL_PARAM, personal_hook);
@@ -1312,8 +1335,11 @@ void wildbattle_configure(void) {
     if (g_state_log) rt_register_fnhook(STATIC_UPDATE, battle_event_hook);
     rt_register_fnhook(CAPTURE_AFTER_BATTLE, capture_hook);
     if (getenv("LARECOMP_WILDBATTLE_MENULOG")) { rt_register_fnhook(CMD_FRAME_NEW, cmdframe_hook); rt_register_fnhook(CMD_EVENT, cmdevent_hook); }
+    }
+    else if (g_state_log) rt_register_fnhook(STATIC_UPDATE, battle_event_hook);
 #ifdef _WIN32
     if (getenv("LARECOMP_WILDBATTLE_DEBUG")) CreateThread(NULL, 0, debug_thread, NULL, 0, NULL);
 #endif
-    LOG("[wild] on: the touched Pokémon's own species and level%s (max %d battle(s))\n", g_explicit ? " (a fixed one: LARECOMP_WILDBATTLE_SPECIES)" : "", g_max);
+    LOG("[wild] %s: the touched Pokémon's own species and level%s (max %d battle(s))\n", on ? "on" : "ready (currently off)",
+        g_explicit ? " (a fixed one: LARECOMP_WILDBATTLE_SPECIES)" : "", g_max);
 }

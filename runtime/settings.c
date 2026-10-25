@@ -52,6 +52,7 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .show_fps = false,
+    .wild_battle = true,
     .render_thread = true,
     .vertex_read = VREAD_AUTO,
     .upscaler = UPSCALE_SHARP,

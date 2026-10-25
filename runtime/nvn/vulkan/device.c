@@ -713,7 +713,7 @@ static void present_image(TexBackend *b, bool final, int image, int nimg, uint64
             const char *e = getenv("LARECOMP_WINDOW_SHOTS");
             for (; e && *e && nlist < 512; nlist++) { list[nlist] = atol(e); e = strchr(e, ','); if (!e) { nlist++; break; } e++; }
         }
-        static char lpath[96];
+        static char lpath[1400];
         extern long fps60_scene_start(void);
         static bool rel_list = false;
         { static bool init; if (!init) { init = true; rel_list = getenv("LARECOMP_WINDOW_SHOTS_REL") != NULL; } }
@@ -721,14 +721,20 @@ static void present_image(TexBackend *b, bool final, int image, int nimg, uint64
         char mid[16];
         if (nimg > 2) snprintf(mid, sizeof mid, "mid%d", image + 1);
         else snprintf(mid, sizeof mid, "mid");
-        static char wpath[64];
-        snprintf(wpath, sizeof wpath, "build/window_%s.png", mid);
-        const char *path = shot ? (final ? "build/window.png" : wpath) : NULL;
+        static char wpath[1400], fpath[1400];
+        const char *capture_dir = getenv("LARECOMP_CAPTURE_DIR");
+        bool custom_capture_dir = capture_dir && *capture_dir;
+        if (!custom_capture_dir) capture_dir = "build";
+        snprintf(wpath, sizeof wpath, "%s/window_%s.png", capture_dir, mid);
+        snprintf(fpath, sizeof fpath, "%s/window.png", capture_dir);
+        const char *shot_path = getenv("LARECOMP_WINDOW_SHOT_PATH");
+        const char *path = shot ? (final ? (shot_path && *shot_path ? shot_path : fpath) : wpath) : NULL;
         for (int i = 0; i < nlist; i++)
             if (rel_list ? (fps60_scene_start() >= 0 && (long)frame + 1 - fps60_scene_start() == list[i])
                          : (long)frame + 1 == list[i]) {
-                mkdir("build/frames", 0755);
-                snprintf(lpath, sizeof lpath, "build/frames/%s_%ld.png", final ? "fin" : mid, list[i]);
+                const char *frames_dir = custom_capture_dir ? capture_dir : "build/frames";
+                mkdir(frames_dir, 0755);
+                snprintf(lpath, sizeof lpath, "%s/%s_%ld.png", frames_dir, final ? "fin" : mid, list[i]);
                 path = lpath;
             }
         extern void vk_present_log_tag(uint64_t frame, int image, int nimg);
@@ -1274,6 +1280,7 @@ int ui_run(void) {
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
+        input_poll_gamepads();
         menu_apply_window_requests(window);
     }
 }

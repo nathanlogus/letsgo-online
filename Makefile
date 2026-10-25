@@ -33,7 +33,7 @@ endif
 B         ?= build
 DEPS      ?=
 # EXE_NAME: the exe's name (the release's: LetsGoRecomp); the game code library imports from the exe by it
-EXE_NAME  ?= lasrecomp
+EXE_NAME  ?= $(if $(filter windows,$(PLATFORM)),LetsGoRecomp,lasrecomp)
 CC       := clang $(CROSS)
 CXX      := clang++ $(CROSS)
 IMGUI    := third_party/imgui
@@ -118,6 +118,14 @@ RTFLAGS  := -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Iruntime -Ir
 CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime/nvn -Ithird_party/fidelityfx/include $(DEPINC)
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
+
+# Keep the older local build command usable, while its import library names the
+# executable players actually run. Otherwise rebuilding game code loads a second
+# runtime through lasrecomp.exe and splits its global state.
+ifeq ($(PLATFORM):$(EXE_NAME),windows:LetsGoRecomp)
+$(B)/lasrecomp.exe: $(B)/LetsGoRecomp.exe
+	cp $< $@
+endif
 
 $(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
 	@mkdir -p $(dir $@)
@@ -220,6 +228,8 @@ dist:
 	cp runtime/cpu.h runtime/simd.h runtime/simd_fp.h runtime/gamelib.h tools/gamelib_entry.c runtime/hle/hle_symbols.txt \
 	    "$(DIST)/gamelib-src/"
 	cp docs/icon/icon_1024.png "$(DIST)/icon.png"  # (window icon)
+	mkdir -p "$(DIST)/assets/emotes"
+	cp $(addprefix assets/emotes/,$(addsuffix -mark.png,kindly pumped-up upbeat joyful flustered teary angry sleepy-time)) "$(DIST)/assets/emotes/"
 	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (in-game menu font, OFL)
 	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
 	cp third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$(DIST)/"  # (FSR 3.1, loaded at run time: without it, FSR 1)

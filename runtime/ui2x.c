@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "hle.h"
 #include "platform.h"
@@ -361,6 +362,63 @@ static uint8_t *decode_texture(const uint8_t *b, uint64_t bsize, uint64_t o, Dec
         }
     free(lin);
     return px;
+}
+
+// Native images for overlays: reuse the same decoder without making an upscaled pack.
+bool ui_game_texture_rgba(const char *archive, const char *name, uint8_t **rgba, uint32_t *w, uint32_t *h) {
+    if (!archive || !name || !rgba || !w || !h) return false;
+    *rgba = NULL; *w = *h = 0;
+    extern bool romfs_image_file(const char *, int *, uint64_t *, uint64_t *);
+    int fd = -1;
+    uint64_t off = 0, size = 0;
+    FILE *f = NULL;
+    bool image = romfs_image_file(archive, &fd, &off, &size);
+    if (!image) {
+        char path[1400];
+        snprintf(path, sizeof path, "%s/%s", g_romfs_dir, archive);
+        size = file_size(path);
+        f = fopen(path, "rb");
+        if (!f) return false;
+    }
+    if (size < 32 || size > (64u << 20)) { if (f) fclose(f); return false; }
+    uint8_t *arc = malloc((size_t)size);
+    bool read_ok = arc && (image ? pread(fd, arc, (size_t)size, (off_t)off) == (ssize_t)size : fread(arc, 1, (size_t)size, f) == size);
+    if (f) fclose(f);
+    if (!read_ok || memcmp(arc, "SARC", 4)) { free(arc); return false; }
+    uint16_t header = *(const uint16_t *)(arc + 4);
+    uint32_t data = *(const uint32_t *)(arc + 0xc);
+    if ((uint64_t)header + 12 > size) { free(arc); return false; }
+    uint16_t count = *(const uint16_t *)(arc + header + 6);
+    bool found = false;
+    for (uint32_t i = 0; i < count && (uint64_t)header + 28 + i * 16 <= size && !found; i++) {
+        const uint32_t *node = (const uint32_t *)(arc + header + 12 + i * 16);
+        uint64_t start = (uint64_t)data + node[2], end = (uint64_t)data + node[3];
+        if (end > size || start + 4 > end || memcmp(arc + start, "BNTX", 4)) continue;
+        const uint8_t *b = arc + start;
+        uint64_t bs = end - start;
+        for (uint64_t o = 0; o + 0x78 <= bs && !found; o++) {
+            if (memcmp(b + o, "BRTI", 4)) continue;
+            uint64_t no = *(const uint64_t *)(b + o + 0x60);
+            if (no > bs - 2) continue;
+            uint16_t nl = *(const uint16_t *)(b + no);
+            if (no + 2 + nl > bs || strlen(name) != nl || memcmp(b + no + 2, name, nl)) continue;
+            Decoded decoded;
+            uint32_t skipped = 0;
+            uint8_t *p = decode_texture(b, bs, o, &decoded, &skipped);
+            if (!p) continue;
+            if (decoded.pw != decoded.w) {
+                uint8_t *tight = malloc((size_t)decoded.w * decoded.h * 4);
+                if (!tight) { free(p); continue; }
+                for (uint32_t y = 0; y < decoded.h; y++)
+                    memcpy(tight + (size_t)y * decoded.w * 4, p + (size_t)y * decoded.pw * 4, (size_t)decoded.w * 4);
+                free(p); p = tight;
+            }
+            *rgba = p; *w = decoded.w; *h = decoded.h;
+            found = true;
+        }
+    }
+    free(arc);
+    return found;
 }
 
 // One BNTX texture -> PNG for waifu2x (true: written)

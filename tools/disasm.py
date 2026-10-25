@@ -1,4 +1,4 @@
-"""disasm.py <addr> [count] | disasm.py bl <target> | disasm.py ref <addr>: the game's main (build/xrefs-main.pkl of xrefs.py).
+"""disasm.py <addr> [count] | disasm.py bl <target> | disasm.py ref <addr>: the game's main (tests/cache/xrefs-main.pkl of xrefs.py).
 
   disasm.py <addr> [n]   n instructions from addr (default 40)
   disasm.py bl <target>  every bl / b to target, with its function start (the closest preceding stp x29, x30 / sub sp)

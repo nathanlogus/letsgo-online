@@ -17,9 +17,12 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "imgui_impl_vulkan.h"
+#include "emote_wheel.h"
 #include "osk.h"
 #include "settings_ui.h"
+#include "coop_ui.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 
 extern "C" {
 #include "../hle.h"
@@ -30,7 +33,13 @@ extern "C" {
 void input_reset(void);
 uint64_t rt_addr(uint64_t eevee);  // runtime/fnhook.c (0: a build without the tables the frame rate modes need)
 bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.c
+bool renderer_world_to_screen(float x, float y, float z, float *sx, float *sy, bool *on_screen);  // runtime/nvn/vulkan/exec.c
+bool fps60_world_active(void);  // runtime/hle/fps60.c
+bool fps60_social_overworld(void);
+bool coop_menu_visible(void);  // runtime/hle/coop_menu.c
 #include "../coop_net.h"
+#include "../ui2x.h"
+#include "../platform.h"
 }
 
 // ------------------------------------------------------------------ language
@@ -40,6 +49,7 @@ bool input_finger_cursor(float *x, float *y, bool *down);  // runtime/hle/input.
 // ------------------------------------------------------------------ state shared with the main thread
 static std::atomic<bool> g_open{false};  // the "close the game?" question is up
 static std::atomic<bool> g_cfg{false};   // the F12 settings are up
+static std::atomic<bool> g_friends{false};
 static int g_cfg_tab;                    // the F12 settings' tab: graphics, image and sound, advanced (render thread)
 // Ctrl (the controller's top face button: Y on Xbox, X on Nintendo) in the F12 settings: half the size, in the bottom
 // right corner, no darkening of the game - to tune the effects seeing most of the image. Hidden: not in the prompts.
@@ -142,11 +152,21 @@ static ImGuiKey key_from_pad(Uint8 b) {
 // they last used a controller.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
-static char g_kbd_text[96];
+static char g_kbd_text[1024];
+static char g_kbd_title[128];
+static char g_copy_text[256];
+static std::atomic<bool> g_copy_pending{false};
+extern "C" void menu_copy_text(const char *text) {
+    pthread_mutex_lock(&q_lock); snprintf(g_copy_text,sizeof g_copy_text,"%s",text ? text : "");
+    g_copy_pending = true; pthread_mutex_unlock(&q_lock);
+}
 static int g_kbd_max = 8;
-static bool capturing() { return g_open.load() || g_cfg.load() || g_kbd.load() == 1; }
+static bool capturing() { return emote_wheel_open() || g_open.load() || g_cfg.load() || g_friends.load() || g_kbd.load() == 1; }
 // The game gets no input while this is true (runtime/hle/input.c): the question, the settings or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
+// Friends is a social overlay over a still-running overworld. Keep the trainer
+// visible to peers while choosing emotes; game menus and modal settings are busy.
+extern "C" bool menu_social_busy(void) { return g_open.load() || g_cfg.load() || g_kbd.load() == 1; }
 
 static SDL_Scancode cfg_key(void) {
     static SDL_Scancode k = SDL_SCANCODE_UNKNOWN;
@@ -159,6 +179,7 @@ static SDL_Scancode cfg_key(void) {
 }
 
 bool menu_handle_event(const SDL_Event *e) {
+    if (emote_wheel_event(e)) return true;
     static bool back_down, start_down;
     if (e->type == SDL_EVENT_KEY_DOWN) g_last_pad = false;
     if (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) g_last_pad = true;
@@ -173,6 +194,11 @@ bool menu_handle_event(const SDL_Event *e) {
     }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
+        if (!typing && !e->key.repeat && (e->key.scancode == SDL_SCANCODE_F8 ||
+            (e->key.scancode == SDL_SCANCODE_ESCAPE && g_friends.load()))) {
+            g_friends.store(e->key.scancode == SDL_SCANCODE_ESCAPE ? false : !g_friends.load());
+            set_cfg(false); set_open(false); input_reset(); return true;
+        }
         if (!e->key.repeat && !typing && (e->key.scancode == cfg_key() || (e->key.scancode == SDL_SCANCODE_ESCAPE && g_cfg.load()))) {
             set_cfg(e->key.scancode == SDL_SCANCODE_ESCAPE ? false : !g_cfg.load());  // (Esc closes the settings)
             return true;
@@ -193,6 +219,11 @@ bool menu_handle_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_UP: {
         if (!capturing()) return false;
         bool down = e->type == SDL_EVENT_KEY_DOWN;
+        // This overlay feeds ImGui directly rather than through the launcher's
+        // SDL backend. Modifier events are required for paste, select-all, etc.
+        const ImGuiKey mods[] = {ImGuiMod_Ctrl,ImGuiMod_Shift,ImGuiMod_Alt,ImGuiMod_Super};
+        const SDL_Keymod masks[] = {SDL_KMOD_CTRL,SDL_KMOD_SHIFT,SDL_KMOD_ALT,SDL_KMOD_GUI};
+        for (int i=0;i<4;i++) { QEvent q={}; q.kind=QEvent::KEY; q.key=mods[i]; q.down=(e->key.mod&masks[i])!=0; push(q); }
         if (down && e->key.scancode == SDL_SCANCODE_ESCAPE) {
             QEvent q = {};
             q.kind = QEvent::KEY; q.key = ImGuiKey_Escape; q.down = true; push(q);
@@ -264,6 +295,9 @@ bool menu_handle_event(const SDL_Event *e) {
 
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
+    if (g_copy_pending.exchange(false)) {
+        pthread_mutex_lock(&q_lock); SDL_SetClipboardText(g_copy_text); pthread_mutex_unlock(&q_lock);
+    }
     g_pixel_density = SDL_GetWindowPixelDensity(w);
     static bool text_input;
     bool want_text = capturing();
@@ -320,6 +354,7 @@ static void drain_events(ImGuiIO &io) {
 
 // Reboot (runtime/main.c): the game is gone - the question and the name entry close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
+    g_friends = false;
     set_open(false);
     set_cfg(false);
     g_kbd = 0;
@@ -340,7 +375,7 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
     ImGui::PopStyleColor();
     ui_window_backdrop();
     ImGui::PushFont(g_font_big);
-    ImGui::TextColored(UI_TEXT, "%s", M("Enter a name", "Digite o nome", "Введите имя"));
+    ImGui::TextColored(UI_TEXT, "%s", g_kbd_title[0] ? g_kbd_title : M("Enter a name", "Digite o nome", "Введите имя"));
     ImGui::PopFont();
     static bool was_open, was_pad;
     bool pad = g_last_pad.load(), appearing = !was_open || pad != was_pad;  // (switching device: focus the new one)
@@ -367,9 +402,10 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
 
 // Game thread (runtime/hle/swkbd.c): show the dialog, re-present the last frame until it's answered.
 // Returns 1 confirmed (out = text, UTF-8), 0 cancelled.
-extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, int cap) {
+extern "C" int menu_keyboard_run_labeled(const char *title, const char *initial, int max_len, char *out, int cap) {
     extern void backend_represent(void);
     snprintf(g_kbd_text, sizeof g_kbd_text, "%s", initial ? initial : "");
+    snprintf(g_kbd_title,sizeof g_kbd_title,"%s",title ? title : "");
     g_kbd_max = max_len > 0 && max_len < (int)sizeof g_kbd_text / 4 ? max_len : 8;
     input_reset();
     g_kbd = 1;
@@ -386,6 +422,9 @@ extern "C" int menu_keyboard_run(const char *initial, int max_len, char *out, in
     g_kbd = 0;
     input_reset();
     return ok;
+}
+extern "C" int menu_keyboard_run(const char *initial,int max_len,char *out,int cap) {
+    return menu_keyboard_run_labeled(NULL,initial,max_len,out,cap);
 }
 
 // "Close the game?" - Não has the focus first (Enter / A by reflex keeps playing); B / Esc answer Não.
@@ -414,6 +453,9 @@ static void quit_draw(ImGuiIO &io, float scale) {
     }
     ImGui::SameLine();
     bool no = ImGui::Button(M("No", "Não", "Нет"), ImVec2(bw, 0));
+    if (ImGui::Button("Friends (F8)", ImVec2(w, 0))) {
+        set_open(false); g_friends = true; input_reset();
+    }
     if (ImGui::Button(M("Settings (F12)", "Configurações (F12)", "Настройки (F12)"), ImVec2(w, 0))) {
         focus_no = false;
         set_cfg(true);  // (closes the question: the way in from a controller)
@@ -574,13 +616,116 @@ static void cfg_draw(ImGuiIO &io, float scale) {
     if (close) set_cfg(false);
 }
 
+struct CoopPlate {
+    bool visible = false;
+    float px = 0, py = 0;
+    ImVec2 a, b;
+    const char *name = "";
+    uint8_t slot = 0;
+};
+
+static void clamp_coop_plate(CoopPlate &p, float scale) {
+    ImVec2 size(p.b.x - p.a.x, p.b.y - p.a.y), display = ImGui::GetIO().DisplaySize;
+    p.a.x = fmaxf(8 * scale, fminf(p.a.x, display.x - size.x - 8 * scale));
+    p.a.y = fmaxf(8 * scale, fminf(p.a.y, display.y - size.y - 8 * scale));
+    p.b = ImVec2(p.a.x + size.x, p.a.y + size.y);
+}
+
+static CoopPlate make_coop_plate(const char *name, float px, float py, float scale, uint8_t slot) {
+    CoopPlate p;
+    p.visible = true; p.name = name; p.px = px; p.py = py; p.slot = slot;
+    ImVec2 text = ImGui::CalcTextSize(name);
+    float w = text.x * 1.15f + 24 * scale, h = text.y * 1.15f + 14 * scale;
+    p.a = ImVec2(px - w * 0.5f, py - h - 12 * scale);
+    p.b = ImVec2(p.a.x + w, p.a.y + h);
+    clamp_coop_plate(p, scale);
+    return p;
+}
+
+static bool plates_overlap(const CoopPlate &a, const CoopPlate &b) {
+    return a.visible && b.visible && a.a.x < b.b.x && b.a.x < a.b.x && a.a.y < b.b.y && b.a.y < a.b.y;
+}
+
+static void separate_coop_plates(CoopPlate &local, CoopPlate &remote, float scale) {
+    if (!plates_overlap(local, remote)) return;
+    float gap = 10 * scale, mid = (local.px + remote.px) * 0.5f;
+    float lw = local.b.x - local.a.x, rw = remote.b.x - remote.a.x;
+    local.a.x = mid - gap * 0.5f - lw; local.b.x = local.a.x + lw;
+    remote.a.x = mid + gap * 0.5f; remote.b.x = remote.a.x + rw;
+    clamp_coop_plate(local, scale); clamp_coop_plate(remote, scale);
+    if (plates_overlap(local, remote)) {
+        float h = local.b.y - local.a.y;
+        local.b.y = remote.a.y - gap; local.a.y = local.b.y - h;
+        clamp_coop_plate(local, scale);
+    }
+}
+
+struct CoopButtonTextures { ImTextureID fill = 0, line = 0; };
+
+static const CoopButtonTextures &coop_button_textures(void) {
+    static CoopButtonTextures textures;
+    static bool tried;
+    if (!tried) {
+        tried = true;
+        const char *names[] = {"button_option_44px_fill_00^s", "button_option_44px_line_00^s"};
+        ImTextureID *ids[] = {&textures.fill, &textures.line};
+        for (int i = 0; i < 2; i++) {
+            uint8_t *rgba = NULL;
+            uint32_t w = 0, h = 0;
+            if (ui_game_texture_rgba("bin/app/system_window/bin/system_window_button_00.arc", names[i], &rgba, &w, &h)) {
+                // The game uses BC4 single-channel masks, tinted by its UI material.
+                for (uint64_t p = 0; p < (uint64_t)w * h; p++) {
+                    rgba[p*4+3] = rgba[p*4];
+                    rgba[p*4] = rgba[p*4+1] = rgba[p*4+2] = 255;
+                }
+                *ids[i] = (ImTextureID)vk_imgui_texture_rgba(rgba, (int)w, (int)h);
+                free(rgba);
+            }
+        }
+        LOG("[coop-ui] nameplates: %s; P1 blue / P2 coral\n", textures.fill && textures.line ? "native button textures" : "button-style fallback");
+    }
+    return textures;
+}
+
+static ImU32 coop_player_colour(uint8_t slot) {
+    return slot == 1 ? IM_COL32(255, 174, 186, 255) : IM_COL32(142, 213, 255, 255);
+}
+
+static void coop_button_slice(ImDrawList *dl, ImTextureID texture, ImVec2 a, ImVec2 b, ImU32 tint) {
+    // The native 16x44 texture is a left cap. Stretch its last column for the
+    // centre and mirror the cap for the right end, preserving the button's corners.
+    float cap = fminf((b.y - a.y) * (16.0f / 44.0f), (b.x - a.x) * 0.5f);
+    dl->AddImage(texture, a, ImVec2(a.x + cap, b.y), ImVec2(0, 0), ImVec2(1, 1), tint);
+    dl->AddImage(texture, ImVec2(a.x + cap, a.y), ImVec2(b.x - cap, b.y), ImVec2(15.5f/16, 0), ImVec2(15.5f/16, 1), tint);
+    dl->AddImage(texture, ImVec2(b.x - cap, a.y), b, ImVec2(1, 0), ImVec2(0, 1), tint);
+}
+
+static void draw_coop_plate(ImDrawList *dl, const CoopPlate &p, float scale) {
+    if (!p.visible) return;
+    float cx = (p.a.x + p.b.x) * 0.5f;
+    ImU32 colour = coop_player_colour(p.slot);
+    dl->AddLine(ImVec2(p.px, p.py), ImVec2(cx, p.b.y), colour, 2 * scale);
+    dl->AddCircleFilled(ImVec2(p.px, p.py), 3 * scale, colour, 12);
+    const CoopButtonTextures &textures = coop_button_textures();
+    if (textures.fill && textures.line) {
+        coop_button_slice(dl, textures.fill, p.a, p.b, colour);
+        coop_button_slice(dl, textures.line, p.a, p.b, IM_COL32(255, 255, 255, 245));
+    } else {
+        dl->AddRectFilled(p.a, p.b, colour, (p.b.y - p.a.y) * 0.5f);
+        dl->AddRect(p.a, p.b, IM_COL32_WHITE, (p.b.y - p.a.y) * 0.5f, 0, 1.5f * scale);
+    }
+    dl->AddText(ImGui::GetFont(), ImGui::GetFontSize() * 1.15f,
+                ImVec2(p.a.x + 12 * scale, p.a.y + 7 * scale), IM_COL32(36, 46, 44, 255), p.name);
+}
+
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), cfg = g_cfg.load(), kbd = g_kbd.load() == 1;
+    emote_wheel_available(fps60_social_overworld() && !open && !cfg && !kbd && !g_friends.load() && !coop_menu_visible());
     float fx, fy;
-    bool fdown, finger = !open && !cfg && input_finger_cursor(&fx, &fy, &fdown);
+    bool fdown, finger = !capturing() && input_finger_cursor(&fx, &fy, &fdown);
     CoopRemote peer = {};
     bool remote_peer = coop_net_enabled() && coop_net_remote(&peer);
-    if (!open && !cfg && !kbd && !g_settings.show_fps && !finger && !remote_peer) {
+    if (!open && !cfg && !kbd && !g_friends.load() && !g_settings.show_fps && !finger && !coop_net_enabled() && !fps60_world_active()) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -612,13 +757,81 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::PopStyleVar();
         ImGui::PopStyleColor(2);
     }
-    if (remote_peer) {
+    if (coop_net_enabled() && !remote_peer && !capturing() && !coop_menu_visible()) {
+        CoopSession session = {}; coop_net_session(&session);
+        ImGui::SetNextWindowPos(ImVec2(16*scale,16*scale),ImGuiCond_Always);
+        ImGui::SetNextWindowBgAlpha(.72f);
+        ImGui::Begin("##coop-status",NULL,ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoInputs);
+        if (session.connection == COOP_CONNECTED) ImGui::TextUnformatted("Online co-op | Waiting for a friend | Friends: F8");
+        else if (session.connection == COOP_ERROR) ImGui::TextUnformatted("Online co-op | Connection failed | Friends: F8");
+        else ImGui::Text("Online co-op | %s (%u/3) | Friends: F8",session.connection == COOP_RECONNECTING ? "Reconnecting" : "Connecting",session.attempt);
+        ImGui::End();
+    }
+    if (remote_peer && !capturing() && !coop_menu_visible()) {
         ImGui::SetNextWindowPos(ImVec2(16 * scale, 16 * scale), ImGuiCond_Always);
         ImGui::SetNextWindowBgAlpha(0.72f);
         ImGui::Begin("##coop-peer", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                              ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("Online co-op  |  %s", peer.name);
+        CoopNetStats net_stats = {};
+        coop_net_stats(&net_stats);
+        if (net_stats.relay_rtt_ms >= 0)
+            ImGui::Text("Online co-op  |  %s  |  Relay %.0f ms", peer.name, net_stats.relay_rtt_ms);
+        else
+            ImGui::Text("Online co-op  |  %s", peer.name);
+        CoopTeamUp team={};coop_net_teamup(&team);
+        if(team.state==1 && team.from_slot!=coop_net_local_slot())
+            ImGui::TextUnformatted("Tag-up invitation | Friends: F8 / Communicate");
+        else if(team.state==2)ImGui::TextUnformatted("Tagged up for travel | Individual battles");
         ImGui::End();
+
+        CoopPlate local_plate;
+        char local_name[25] = {};
+        float local_x, local_y, local_z, local_px, local_py;
+        bool local_on_screen = false;
+        if (fps60_world_active() && coop_net_local_head(&local_x, &local_y, &local_z, local_name) &&
+            renderer_world_to_screen(local_x, local_y, local_z, &local_px, &local_py, &local_on_screen) && local_on_screen)
+            local_plate = make_coop_plate(local_name, local_px, local_py, scale, coop_net_local_slot());
+
+        float px, py, head_x, head_y, head_z;
+        bool on_screen = false;
+        // The game hook publishes the rendered native avatar's head anchor, after pose
+        // correction. No marker is drawn before that model exists or in another room.
+        if (fps60_world_active() && coop_net_avatar_head(&head_x, &head_y, &head_z) &&
+            renderer_world_to_screen(head_x, head_y, head_z, &px, &py, &on_screen)) {
+            ImDrawList *dl = ImGui::GetForegroundDrawList();
+            float r = (on_screen ? 4 : 11) * scale;
+            ImVec2 at(px, py);
+            dl->AddCircleFilled(at, r, on_screen ? coop_player_colour(peer.slot) : IM_COL32(255, 170, 40, 230), 20);
+            dl->AddCircle(at, r, IM_COL32(255, 255, 255, 240), 20, 2.5f * scale);
+            if (!on_screen) {
+                // A chevron at the viewport edge points toward a peer outside the camera view.
+                float dx = px - io.DisplaySize.x * 0.5f, dy = py - io.DisplaySize.y * 0.5f;
+                float len = sqrtf(dx * dx + dy * dy);
+                if (len > 0) dx /= len, dy /= len;
+                float tx = -dy, ty = dx, tip = 15 * scale, wing = 8 * scale;
+                dl->AddTriangleFilled(ImVec2(px + dx * tip, py + dy * tip),
+                                      ImVec2(px - dx * tip + tx * wing, py - dy * tip + ty * wing),
+                                      ImVec2(px - dx * tip - tx * wing, py - dy * tip - ty * wing),
+                                      IM_COL32(255, 170, 40, 255));
+            }
+            CoopPlate remote_plate = make_coop_plate(peer.name, px, py, scale, peer.slot);
+            separate_coop_plates(local_plate, remote_plate, scale);
+            draw_coop_plate(dl, remote_plate, scale);
+            ImVec2 label_pos = remote_plate.a;
+
+            if (on_screen) emote_bubble_draw(peer.emote, peer.emote_received_ns, px, label_pos.y-8*scale, scale);
+        }
+        draw_coop_plate(ImGui::GetForegroundDrawList(), local_plate, scale);
+    }
+    if (fps60_social_overworld() && !capturing()) {
+        uint8_t emote=0; uint64_t at=0; float x,y,z,px,py; bool visible=false;
+        if (coop_net_local_emote(&emote,&at,&x,&y,&z) &&
+            renderer_world_to_screen(x,y,z,&px,&py,&visible) && visible) {
+            char name[25]; float hx,hy,hz;
+            float bottom=py-14*scale;
+            if (coop_net_local_head(&hx,&hy,&hz,name)) bottom=make_coop_plate(name,px,py,scale,coop_net_local_slot()).a.y-8*scale;
+            emote_bubble_draw(emote,at,px,bottom,scale);
+        }
     }
     if (finger) {  // the controller's finger on the touch screen (right stick moves it, ZR touches)
         ImDrawList *dl = ImGui::GetForegroundDrawList();
@@ -626,9 +839,19 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         dl->AddCircleFilled(ImVec2(fx, fy), r, fdown ? IM_COL32(255, 255, 255, 170) : IM_COL32(255, 255, 255, 60));
         dl->AddCircle(ImVec2(fx, fy), r, IM_COL32(255, 255, 255, 235), 0, 4 * scale);
     }
-    if (open) quit_draw(io, scale);
+    if (g_friends.load() && !kbd) {
+        ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0,0), io.DisplaySize, IM_COL32(0,0,0,90));
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x*.5f,io.DisplaySize.y*.5f), ImGuiCond_Always, ImVec2(.5f,.5f));
+        ImGui::SetNextWindowSize(ImVec2(fminf(io.DisplaySize.x*.92f,900*scale),io.DisplaySize.y*.88f), ImGuiCond_Always);
+        ImGui::Begin("Friends", NULL, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize);
+        coop_ui_page(false);
+        if (ui_button("Back to game (F8)" ) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false)) { g_friends = false; input_reset(); }
+        ImGui::End();
+    }
+    else if (open) quit_draw(io, scale);
     else if (cfg && !kbd) cfg_draw(io, scale);
     if (kbd) keyboard_draw(io, scale);
+    emote_wheel_draw(scale);
     ui_frame_end();
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering

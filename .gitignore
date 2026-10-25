@@ -11,10 +11,21 @@ extracted-*/
 generated/
 generated-*/
 Lets Go Eevee/
-assets/
+assets/*
+!assets/emotes/
+assets/emotes/*
+!assets/emotes/kindly-mark.png
+!assets/emotes/pumped-up-mark.png
+!assets/emotes/upbeat-mark.png
+!assets/emotes/joyful-mark.png
+!assets/emotes/flustered-mark.png
+!assets/emotes/teary-mark.png
+!assets/emotes/angry-mark.png
+!assets/emotes/sleepy-time-mark.png
 
 # Build
 build/
+/tests/
 
 # Repositórios de referência (clonados localmente)
 reference/
@@ -27,6 +38,7 @@ logs/
 cache/
 save/
 larecomp.ini
+coop.ini
 *.log
 mods/
 

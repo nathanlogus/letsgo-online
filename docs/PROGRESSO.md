@@ -7,6 +7,26 @@ O backlog priorizado para uma versão madura está em [ROADMAP.md](ROADMAP.md).
 _Atualizado em 17/10/2026._
 
 ## O que funciona
+
+**24/10/2026 — Configurações do PC nas Opções nativas:** Eevee 1.0.0 tem 21 opções
+extras na lista original: gráficos, imagem, áudio, depuração e batalhas selvagens.
+São linhas nativas, com valores, setas, descrições e botões de restauração; esquerda/direita
+aplicam e gravam as mudanças imediatamente. Não abrem o overlay. F12 continua disponível.
+Pikachu e atualizações ainda usam F12: os novos endereços
+e layouts nativos não foram validados nessas versões.
+
+**25/10/2026 — Combate clássico no Eevee 1.0.0:** captura pela Bolsa e XP
+por derrota usam as rotinas nativas. Captura, consumo de bolas/remédios, XP
+compartilhado e persistência foram verificados em uma cópia do save. Eevee
+parceiro entra com o modelo comum, preservando forma e stats; cura e captura
+com ele na liderança também foram verificadas.
+
+A captura em combate agora reutiliza o treinador e o modelo nativo da bola
+para um arremesso visível até o alvo. A cena mostra impacto, queda e balanço,
+restaura o Pokémon em caso de escape e aguarda a animação antes do resultado.
+O retorno ao campo após a captura foi corrigido: a sequência usa a limpeza
+nativa de recursos, incluindo no save inicial da Rota 1 e após subir de nível.
+
 | Área | Estado |
 |---|---|
 | Boot | completo: 4 módulos, SDK, construtores, threads, serviços do sistema |
@@ -24,8 +44,7 @@ _Atualizado em 17/10/2026._
 | Personagens e Pokémon | modelos com esqueleto corretos, com animação (correção do `LDC.64` no tradutor de shaders) |
 | Gameplay | andar, encontro com o Professor, captura do Pikachu (mira centralizada) |
 | Save | salvar e carregar funcionam (`save/save_0/savedata.bin`) |
-| Batalhas selvagens (experimental, opção no launcher, desligada por padrão; `wild_battle = 1`) | encostar num Pokémon selvagem abre uma batalha clássica contra ele (espécie, nível, gênero, IVs e golpes por nível reais) e, depois, a captura; o mundo volta com fade in. Desde 23/10/2026, o 5º botão CATCH (nativo, 9 idiomas): captura a qualquer momento, chance maior com o selvagem fraco ou com status, uma bola por vez (escapou → a batalha volta com a mesma vida), desmaiou = perdido, mas o time ganha a XP nativa (e evolui depois da batalha); sem o relógio de 5 minutos; também com o inicial andando sozinho; o selvagem derrotado desmaia; a música da batalha segue pela captura e pela volta (24/10/2026); "Back to battle" na captura e volta sem a
-abertura nem arremesso; testado por roteiro no Eevee e no Pikachu. Falta a abertura da captura, natureza/shiny, a espera de ~12 s ao sair da batalha e mais áreas (HISTORICO, [MODO-BATALHA.md](MODO-BATALHA.md), etapa 6) |
+| Batalhas selvagens (experimental, ligadas por padrão; `wild_battle = 1`) | Eevee 1.0.0: combate clássico sem cronômetro, XP por derrota e captura durante a batalha pela Bolsa, com quantidades reais de bolas e remédios. Capturas recebem os dados do treinador e vão para a equipe ou o armazenamento; o pós-batalha não abre a captura GO. Pikachu mantém batalha seguida de captura. A opção pode ser alterada nas Opções nativas do Eevee durante a partida. Mais áreas, natureza/shiny e paridade com Pikachu ainda precisam de validação ([MODO-BATALHA.md](MODO-BATALHA.md)) |
 
 ## O que falta
 1. **Validar o 3D em mais cenas** (batalhas, Pokémon grandes, cidades): a correção dos modelos com esqueleto foi

@@ -26,6 +26,7 @@
 #include "../hle.h"
 #include "../settings.h"
 #include "../coop_net.h"
+#include "coop_actor.h"
 
 void rt_register_fnhook(uint64_t addr, int (*fn)(Cpu *c, uint64_t addr));  // runtime/fnhook.c
 void rt_call_original(Cpu *c, uint64_t addr);
@@ -94,6 +95,8 @@ void fps60_scene_begin(void) {
 
 static bool g_field_ran;  // the world's update ran since the last present
 static bool g_played;     // the world has updated at least once (before: the controller screen, the title, loading)
+static _Atomic bool g_social_world;
+bool fps60_social_overworld(void) { return g_social_world; }
 static int field_hook(Cpu *c, uint64_t addr) {
     g_n_world++;
     if (g_mark_scene) { g_mark_scene = false; g_world_back = (long)renderer_game_frame(); LOG("[scene] world again %ld\n", g_world_back); }
@@ -102,8 +105,9 @@ static int field_hook(Cpu *c, uint64_t addr) {
     g_played = true;
     g_special = false;
     g_scene = false;
-    (void)c, (void)addr;
-    return 0;  // (the game's function runs as usual)
+    rt_call_original(c, addr);
+    coop_actor_field(c); // Local emote anchor also updates while playing solo.
+    return 1;
 }
 
 // The frame-step timers (the accessor's x0): entries of 16 bytes, step i at +0x10 + 16 i (setter f_7000039620)
@@ -152,6 +156,7 @@ int fps60_rate(void) { return g_rate; }  // the world's frame rate while on: 60 
 // rate, the rest at the game's 30
 uint64_t fps60_period_ns(void) { return g_on && g_world ? 1000000000ull / (uint64_t)g_rate : 33333333ull; }
 bool fps60_world(void) { return g_world; }
+bool fps60_world_active(void) { return g_played && !g_special && !g_scene; }
 // A menu (the Pokédex, the bag...): the world stopped and no battle or capture runs. Logic at 30, shown at 60 with the
 // in-between image (runtime/nvn/vulkan/exec.c); battles and captures get none (tried, left out: docs/HISTORICO.md 46).
 bool fps60_menu(void) { return g_on && g_played && !g_world && !g_special; }
@@ -177,10 +182,6 @@ int rt_present_interval(void);
 static __thread bool t_in_move;
 static __thread float t_move_k;
 static int move_hook(Cpu *c, uint64_t addr) {
-    if (coop_net_enabled() && c->x[0] >= 0x7000000000ull) {
-        float *pose = (float *)(uintptr_t)(c->x[0] + 0x70);
-        coop_net_publish_position(pose[0], pose[1], pose[2], 0.0f, 0, 0);
-    }
     float k = g_on && g_world ? (float)g_g1 / (float)G1_ORIGINAL : 1.0f;
     if (k >= 0.999f || c->x[0] < 0x7000000000ull) return 0;  // (the game's own step: as it is)
     float *p = (float *)(uintptr_t)(c->x[0] + 0x70), was[3] = {p[0], p[1], p[2]};
@@ -237,6 +238,16 @@ void fps60_present(void) {
 #endif
     follow_setting();
     fps60_probe_present();
+    bool field_ran = g_field_ran;
+    g_field_ran = false;
+    extern bool game_cutscene(void), menu_social_busy(void), wildbattle_active(void);
+    CoopActivity activity = !g_played ? COOP_LOADING : g_scene || g_special || wildbattle_active() ? COOP_BATTLE :
+        game_cutscene() ? COOP_STORY : menu_social_busy() || !field_ran ? COOP_MENU : COOP_OVERWORLD;
+    g_social_world = activity == COOP_OVERWORLD;
+    if (coop_net_enabled()) {
+        coop_net_activity(activity);
+    }
+    extern void coop_menu_tick(bool overworld); coop_menu_tick(activity==COOP_OVERWORLD);
     if (g_stats) {
         static uint64_t t0, p0;
         extern uint64_t plat_now_ns(void);
@@ -254,8 +265,7 @@ void fps60_present(void) {
     // and ran twice as fast (measured: the menu opened in 4 game frames instead of 8)
     static int menu_native = -1;  // (research, LARECOMP_FPS60_MENU_NATIVE=1: menus at 60 natively, as before HISTORICO 47)
     if (menu_native < 0) menu_native = getenv("LARECOMP_FPS60_MENU_NATIVE") != NULL;
-    bool w = !g_special && (g_field_ran || menu_native);
-    g_field_ran = false;
+    bool w = !g_special && (field_ran || menu_native);
     g_world = w;
     static int last = -1;  // 0 world, 1 menu (in-between images), 2 battle / capture
     int state = w ? 0 : fps60_menu() ? 1 : 2;
@@ -277,11 +287,14 @@ void fps60_configure(void) {
     g_rate = g_settings.fps == 120 ? 120 : 60, g_g1 = (uint32_t)(1000000000u / (uint32_t)g_rate);
     extern uint64_t rt_addr(uint64_t eevee);  // (runtime/fnhook.c: 0 in a build it doesn't know)
     if (!rt_addr(FIELD_UPDATE)) g_on = g_all60 = false;
-    if (getenv("LARECOMP_COOP_SERVER")) rt_register_fnhook(MOVE_FN, move_hook);
+    if (rt_addr(FIELD_UPDATE) && rt_addr(0x7000245750ull)) {
+        rt_register_fnhook(MOVE_FN, move_hook);
+        coop_actor_configure();
+    }
     if (g_on || g_stats || getenv("LARECOMP_INPUT_LOOP")) hook_all();
     // the world's update always: g_played tells the title screen (game_title) whatever the frame rate
     else if (rt_addr(FIELD_UPDATE)) rt_register_fnhook(FIELD_UPDATE, field_hook);
-    g_world = true, g_special = g_scene = g_played = false;
+    g_world = true, g_special = g_scene = g_played = g_social_world = false;
     if (g_on) LOG("[fps60] on: the world at %d, menus at 30 with in-between images, battles and captures at 30\n", g_rate);
 }
 
