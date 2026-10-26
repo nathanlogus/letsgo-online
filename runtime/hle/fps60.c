@@ -4,13 +4,13 @@
 //
 // The game keeps a table of frame durations G (main+0xf7eeb8: 16.67 ms, 33.33 ms, 50 ms, ...; read through the pointer
 // at main+0x15fb438). The world's update step comes from G[1] through the accessor f_7000039600; menus, battles and
-// captures count their own frames, so at 60 fps they run twice as fast (docs/PESQUISA-60FPS.md). A community "60 FPS"
+// captures count their own frames, so at 60 fps they run twice as fast (docs/RESEARCH-60FPS.md). A community "60 FPS"
 // patch changes G[1] for every reader; here:
 //  - the animation systems take "elapsed time" as a fixed 33.33 ms per update and divide it by G[1] to get frames: the
 //    time the accessor hands out is that elapsed time, so with 16.67 ms there they advance half a frame per update at
 //    60 fps - right, by time (menus, the world's animations);
 //  - battles and captures also count integer frames of their own: they keep the game's 33.33 ms and 30 fps (the entry
-//    points of both scenes, mapped in docs/MODO-BATALHA.md, switch to it until the world's update runs again).
+//    points of both scenes, mapped in docs/BATTLE-MODE.md, switch to it until the world's update runs again).
 // Scenes move from the 30 fps side to the 60 fps side one at a time, once their frame counters are fixed.
 //
 // LARECOMP_FPS60=1 turns it on (settings: fps = 60). LARECOMP_G1_READERS="<addr>[,<addr>...]" (research): G[1] is
@@ -158,7 +158,7 @@ uint64_t fps60_period_ns(void) { return g_on && g_world ? 1000000000ull / (uint6
 bool fps60_world(void) { return g_world; }
 bool fps60_world_active(void) { return g_played && !g_special && !g_scene; }
 // A menu (the Pokédex, the bag...): the world stopped and no battle or capture runs. Logic at 30, shown at 60 with the
-// in-between image (runtime/nvn/vulkan/exec.c); battles and captures get none (tried, left out: docs/HISTORICO.md 46).
+// in-between image (runtime/nvn/vulkan/exec.c); battles and captures get none (tried, left out: docs/HISTORY.md 46).
 bool fps60_menu(void) { return g_on && g_played && !g_world && !g_special; }
 // Before the world's first update this boot: the logos, the title screen (the logo with Pikachu or Eevee), loading
 // (runtime/nvn/vulkan/exec.c: SSAO at half its intensity, as in cutscenes)
@@ -263,7 +263,7 @@ void fps60_present(void) {
     if (!g_on) return;
     // 60 only while the world itself updates: menus, the Pokédex and other screens that stop it count their own frames
     // and ran twice as fast (measured: the menu opened in 4 game frames instead of 8)
-    static int menu_native = -1;  // (research, LARECOMP_FPS60_MENU_NATIVE=1: menus at 60 natively, as before HISTORICO 47)
+    static int menu_native = -1;  // (research, LARECOMP_FPS60_MENU_NATIVE=1: menus at 60 natively, as before HISTORY 47)
     if (menu_native < 0) menu_native = getenv("LARECOMP_FPS60_MENU_NATIVE") != NULL;
     bool w = !g_special && (field_ran || menu_native);
     g_world = w;

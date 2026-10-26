@@ -27,6 +27,7 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 - Anti-aliasing **SMAA**, **TAA** or **AMD FSR 3.1** (also upscales); **FSR 1** for a lower resolution
 - **Ambient occlusion (SSAO**, with contact shadows at Ultra**)** and **indirect light (GI)**, smooth shadows, 16x anisotropic filtering
 - The game's **30 fps**, or **60 / 120 fps** in the overworld (experimental), plus **frame generation** (2x / 3x / 4x, any GPU)
+- Experimental **day and night** (off by default; **Image & sound** page): the outdoors follow your clock or a fixed hour, with lit windows, glass doors and street lamps at night; battles keep the hour's light, interiors and caves are unchanged ([details](docs/DAYNIGHT.md))
 - **2x interface** images and sharper text
 - **Mods**: fan translations and other LayeredFS mods, several at once
 - Keyboard and mouse (aim Poké Balls, touch screen) and any controller, with the Nintendo or Xbox button layout; every key rebindable
@@ -88,7 +89,7 @@ one folder each.
 On the **Mods** page, **Install a mod...** takes the `.zip` / `.rar` / `.7z` as downloaded (Atmosphere LayeredFS
 packs: translations, textures, models). Tick the ones to use; where two change the same file, the higher one wins.
 Mods of the game's code (exefs, IPS, cheats) don't work. Tested with the Brazilian Portuguese fan translation by
-**Pokémon Switch Brasil** (not included; distributed by its authors).
+**Pokémon Switch Brasil** (not included; distributed by its authors). The launcher and settings are in English only.
 
 ## Known issues
 

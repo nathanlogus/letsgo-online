@@ -1,4 +1,4 @@
-"""catch_button.py: the battle menu with a fifth button, CATCH (wild battles, docs/MODO-BATALHA.md stage 6), made from
+"""catch_button.py: the battle menu with a fifth button, CATCH (wild battles, docs/BATTLE-MODE.md stage 6), made from
 the game's own files - the reference for runtime/hle/catch_button.c, which does the same at run time.
 
   catch_button.py <romfs> <out dir> [<art dir>]
@@ -6,7 +6,7 @@ the game's own files - the reference for runtime/hle/catch_button.c, which does 
 <romfs>/bin/app/battle/bin/{battle_command_00*.arc, layout_setting_battle_command_00.bin, uikit_setting_...bin} ->
 <out dir>/bin/app/battle/bin/... (the same paths). Art: catch_button_art.py's PNGs (made into <out dir>/art if not given).
 
-What changes (the menu's buttons: docs/MODO-BATALHA.md, stage 6):
+What changes (the menu's buttons: docs/BATTLE-MODE.md, stage 6):
 - each language archive: the BACK button's textures (pattern frame 4: only two-player battles show it) are redrawn as
   CATCH, same size and format; blyt/battle_command_button_catch.bflyt, a copy of the button's part layout that shows
   those textures and red colours without the pattern animation; in blyt/battle_command_00.bflyt the panes N_command_04 /

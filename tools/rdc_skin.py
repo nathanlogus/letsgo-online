@@ -1,4 +1,4 @@
-"""rdc_skin.py: what the GPU did with the skinned draws of RenderDoc captures (docs/PLANO-3D.md, fase 3).
+"""rdc_skin.py: what the GPU did with the skinned draws of RenderDoc captures (docs/PLAN-3D.md, fase 3).
 
 Runs inside qrenderdoc (it carries the `renderdoc` module and its own Python 3.8). qrenderdoc hangs at start-up
 when it finds the VS Code Python debugger in the user profile, so point USERPROFILE elsewhere:

@@ -30,7 +30,7 @@ the limit, cheaper SSAO and GI, the effects tuned by hand, and an optical flow f
   edge coming into view, and shadows that move a little softer. Frame generation "Auto" with it comes down a multiplier
   when the window images held for later run out (the driver gives 8): at 4K and 60 fps, 4x went 2 - 3 images to a
   refresh, 2x is on time 92 % of the intervals. Research: `LARECOMP_FLOW_MATCH`, `_RADIUS`, `_OCCLUSION`, `_SHARP`,
-  `_DEBUG` (docs/DEPURACAO.md).
+  `_DEBUG` (docs/DEBUGGING.md).
 - **Frame generation "Auto" keeps its level when the display's refresh reads wrong for a moment** (the compositor's
   timing read 206 - 222 Hz at 240 now and then with images presented in bursts): another refresh only after it holds
   for 60 presents; each reading had started the levels again from 4x.
@@ -218,7 +218,7 @@ the controller layout and the menus in the game's own style.
 - **Anti-aliasing: FSR 3.1 is its last choice** (Off, SMAA, TAA, FSR 3.1), its mode and sharpening shown under it when
   picked; the upscaler row is gone. With the others a lower internal resolution reaches the window bilinearly (FSR 1
   stays only as FSR 3.1's fallback when its DLL is missing; an older `upscaler = fsr1` now loads as bilinear).
-- **Frame generation research: the in-between images at a lower resolution** (`LARECOMP_FG_SCALE=<f>`, docs/DEPURACAO.md;
+- **Frame generation research: the in-between images at a lower resolution** (`LARECOMP_FG_SCALE=<f>`, docs/DEBUGGING.md;
   the game always renders them at full size - it was a setting for a while, left out).
   An in-between image renders the scene again, and at 4K that was most of its cost. Its replay can draw into smaller
   twins of the game's scaled render targets (the scene, its depth, bloom, the composite: `runtime/nvn/vulkan/textures.c`
@@ -236,7 +236,7 @@ the controller layout and the menus in the game's own style.
   (`[fg] auto: ...` in the log). Measured at 240 Hz (`LARECOMP_PRESENT_LOG`): 60 fps in a window, 4x throughout, 97.5 %
   of the images one refresh apart; 30 fps at 4K full screen, 4x throughout, 86 % two refreshes apart; 60 fps at 4K full
   screen, where 4x needs ~16.8 ms of GPU a frame (a fixed 4x drops the world to 50 fps and the images go uneven), 2x.
-  With a variable-refresh display, `LARECOMP_FG_VRR=1` drops the refresh grid (docs/DEPURACAO.md).
+  With a variable-refresh display, `LARECOMP_FG_VRR=1` drops the refresh grid (docs/DEBUGGING.md).
 - **Frame generation: no more shadows of bushes and trees where there are none** (walking right from Viridian's sign,
   starting to walk right in front of Pewter's gym, and elsewhere): an in-between image drew a shadow caster at another
   copy's place. Each draw of the frame before is now the partner of one draw of N only, the closest to it (once per
@@ -323,7 +323,7 @@ the controller layout and the menus in the game's own style.
 - **Frame generation: no more flickering tall grass, and repeated objects in general**: walking past tall grass, clumps
   went missing, squashed or shifted in the in-between images (holes showing the ground, every few frames). Found with
   a flicker detector (the in-between image against the real frames around it, motion-compensated) and research
-  switches (`LARECOMP_INTERP_TFIX`, `_DROP`, `_FAR_LOG`, `_SIG_LOG`: docs/DEPURACAO.md). Three causes, all fixed in
+  switches (`LARECOMP_INTERP_TFIX`, `_DROP`, `_FAR_LOG`, `_SIG_LOG`: docs/DEBUGGING.md). Three causes, all fixed in
   general rather than for the grass:
   - **A draw is paired with the previous frame by all its constant buffers together**, not by the first one. The 63
     grass clumps share the camera buffer and differ in the next (their offsets); deciding at the first one tied all
@@ -461,7 +461,7 @@ screen.
   (`tools/walk_speed.sh`): 391 cm/s at 30, 60 and 120 fps (before: 391 / 331 / 211). The functions are found by their
   code near Pikachu 1.0.0's address (Eevee's should be a few instructions away - not tested). Found with new research
   aids: `LARECOMP_CAM_LOG`, `LARECOMP_STEP_SCALE`, `LARECOMP_FARG_SCALE`, `LARECOMP_FIND_MOVER`, memwatch's
-  `LARECOMP_WATCH_LIKE` / `_AT` / `_MAX` (docs/DEPURACAO.md, docs/PESQUISA-60FPS.md).
+  `LARECOMP_WATCH_LIKE` / `_AT` / `_MAX` (docs/DEBUGGING.md, docs/RESEARCH-60FPS.md).
 - **Frame rate limit in the F12 menu**: 30 fps (original) / 60 fps / 120 fps (experimental), switched while playing.
   120 is the 60 fps mode with the world's step at 8.33 ms; menus stay at 30 with their in-between image (60), battles
   and captures at 30. The mode's hooks are now added when it is first turned on (on the game thread; a hook's function
@@ -704,8 +704,8 @@ other graphics cards** (AMD, Intel, integrated): feedback is welcome in an issue
 - **Dynamic resolution** (`resolution = dynamic`, ini only) judged a steady 30 fps as too slow and dropped to 0.60
   scale; it budgets by the scene's pace now.
 - For developers: a much faster regression battery (6 routes of both games in ~100 s, was ~30 min), an interleaved
-  A/B performance test with a confidence interval, per-draw GPU timing and a frame time CSV (docs/DEPURACAO.md,
-  docs/PESQUISA-GPU.md).
+  A/B performance test with a confidence interval, per-draw GPU timing and a frame time CSV (docs/DEBUGGING.md,
+  docs/RESEARCH-GPU.md).
 - Upgrading from 0.2.x: unzip over your install; no new setup (the game library is not rebuilt).
 - Tested with the zip built for this release, unzipped over 0.2.x installs of both games and started without MSYS2 on the PATH (no recompiling needed): Eevee loads a save and reaches the world (Route 2); Pikachu boots with the render thread on and plays the opening movie.
 
@@ -771,7 +771,7 @@ Also:
 - **Controller stick dead zone**, adjustable on the start screen ("Keyboard and mouse"): a stick at rest no longer
   moves the Poké Ball aim.
 - Known issue, also in 0.1.2: the colored aura of special wild Pokémon sometimes disappears for a single frame
-  ([docs/PROGRESSO.md](docs/PROGRESSO.md), item 6).
+  ([docs/PROGRESS.md](docs/PROGRESS.md), item 6).
 - Tested with the zip downloaded from this release, in a new folder without development tools on PATH: setup from a
   game folder with `exefs` and `romfs` (13 minutes to recompile on a 20-thread CPU), a new game through the controller
   screen, the title movie, Professor Oak and the character and name screens, and the Brazilian Portuguese fan

@@ -151,6 +151,11 @@ Testing found and fixed a launcher Host/Join ImGui stack imbalance, missing in-g
 | 3 turn | 52 | turn/sequence u32 each, remaining ms u16, party slot u8, four move IDs u16, four PP u8, four target masks u16, two species u16, two current/max HP pairs u16 |
 | 4 choice | 22 | turn/sequence u32 each, party slot u8, move index u8, move ID u16, target u8 |
 | 5 outcome | 18 | turn/sequence u32 each, outcome u8 (1 guest, 2 NPC this turn) |
-| 6 end | 10 | reason u8 |
+| 6 end | 10 / 18 | reason u8 (0 finished, 1 cancelled/declined, 2 peer disconnected or removed, 3 offer expired); a host's finished mirror battle appends its final command count u32 for trainer 0 and trainer 2 |
+| 7-9 mirror | 141 / 17 / 24 | host party chunks, battle seed, committed commands (see [the native battle notes](COOP-BATTLE-PROTOTYPE.md#guest-replay-prerequisites-and-experimental-bridge)) |
+| 10 desync | 10 | reason u8 (1 sequence gap, 2 invalid host party, 3 queue overflow, 4 turn digest mismatch); either side, once; the relay then stops relaying 7-9 and 11 |
+| 11 digest | 21 | round u32, state digest u64; host only, strictly increasing rounds |
+
+A guest replay ends normally only on a finished 18-byte end whose counts match the commands it received. Any other end, a desync notice, or losing the connection marks the replay aborted. The guest prompt closes min(2 x relay RTT, a quarter of the time) early so a last-moment choice still reaches the host before its deadline; a late choice is dropped and the NPC takes that turn.
 
 A deadline defaults to 30 seconds. NPC fallback closes only the current decision; the next eligible turn returns control to the guest. Guest disconnect lets the host continue with the NPC. No guest reward, inventory or story writes are performed. This is a host-engine prototype with a guest decision overlay; full guest battle presentation remains unfinished.

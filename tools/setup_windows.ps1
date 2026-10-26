@@ -1,4 +1,4 @@
-# Preparação única de uma máquina Windows para compilar o Let's Go Recomp (docs/COMPILAR-WINDOWS.md).
+# Preparação única de uma máquina Windows para compilar o Let's Go Recomp (docs/BUILD-WINDOWS.md).
 # Instala o MSYS2 (clang, lld, make, SDL3, FFmpeg, Vulkan, shaderc) e o Python 3.12, cria o .venv do gerador
 # (capstone, unicorn, lz4) e deixa o clone com fim de linha LF. Pode rodar de novo sem problema.
 # Adaptado de tools/setup_windows.ps1 do LAS Recomp (sem o randomizer).

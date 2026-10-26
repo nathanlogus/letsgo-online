@@ -1,4 +1,4 @@
-"""catch_button_art.py: the artwork of the battle menu's CATCH button (wild battles, docs/MODO-BATALHA.md stage 6),
+"""catch_button_art.py: the artwork of the battle menu's CATCH button (wild battles, docs/BATTLE-MODE.md stage 6),
 drawn from scratch in the style of the game's command buttons (none of the game's images is used).
 
   catch_button_art.py <out dir>     writes the PNGs (circle, icon mask, the two label textures per language) and a

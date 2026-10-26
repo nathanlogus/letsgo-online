@@ -1,26 +1,26 @@
-# Auditoria gráfica
+# Graphics audit
 
-_17/10/2026. Revisão de código e das capturas/medições já documentadas em `docs/HISTORICO.md`; sem nova captura RenderDoc nesta rodada._
+_2026-10-17. Review of the code and of the captures/measurements already documented in `docs/HISTORY.md`; no new RenderDoc capture in this round._
 
-> **Revisão de 17/10 (validação posterior):** o ini de teste desta auditoria (`build/audit-dynamic.ini`) foi escrito com CRLF, e o leitor de `larecomp.ini` só removia o CR de `mod` e `game_lang`: `resolution = dynamic` virou "Automática" e as execuções em jogo descritas abaixo **não tinham resolução dinâmica ligada** (o próprio código antigo também não registra `[dynres]` assim, nem forçado a 20 fps). Refeito com ini LF, mesma rota do Eevee 1.0.0 a 30 fps: código antigo 1,00 → 0,60; código novo entre 0,95 e 1,00 (só reage aos travamentos de carregamento); modo 60 no mundo a 60,49 fps de média. O leitor agora remove CR/LF de toda linha (HISTORICO 56). Prioridade revista: **P3**, porque a resolução dinâmica não aparece no launcher (só `resolution = dynamic` editado à mão).
+> **2026-10-17 review (later validation):** this audit's test ini (`build/audit-dynamic.ini`) was written with CRLF, and the `larecomp.ini` reader only stripped the CR from `mod` and `game_lang`: `resolution = dynamic` became "Automatic" and the in-game runs described below **did not have dynamic resolution on** (the old code itself also does not log `[dynres]` that way, even forced to 20 fps). Redone with an LF ini, same Eevee 1.0.0 route at 30 fps: old code 1.00 → 0.60; new code between 0.95 and 1.00 (it only reacts to loading stalls); 60 mode in the overworld at 60.49 fps average. The reader now strips CR/LF from every line (HISTORY 56). Revised priority: **P3**, because dynamic resolution does not appear in the launcher (only `resolution = dynamic` edited by hand).
 
-## Pipeline atual
+## Current pipeline
 
-Os comandos NVN são traduzidos em `runtime/nvn/cmdbuf.c` e executados em `runtime/nvn/vulkan/exec.c`. `runtime/nvn/vulkan/textures.c` dimensiona render targets escaláveis e mantém texturas preenchidas pela CPU no tamanho original. `runtime/nvn/output_scale.c` calcula escala interna separada do retângulo de apresentação. O backend aplica viewport e render targets na escala calculada; a apresentação ocupa o retângulo da janela. Assim, o caminho implementa **renderização interna ampliada**, além de ampliar a imagem final. A evidência anterior de passes e dimensões está em `docs/HISTORICO.md`, parte 8; a correção visual em 4K ainda requer capturas atuais.
+NVN commands are translated in `runtime/nvn/cmdbuf.c` and executed in `runtime/nvn/vulkan/exec.c`. `runtime/nvn/vulkan/textures.c` sizes scalable render targets and keeps CPU-filled textures at their original size. `runtime/nvn/output_scale.c` computes an internal scale separate from the presentation rectangle. The backend applies viewport and render targets at the computed scale; presentation fills the window rectangle. So the path implements **upscaled internal rendering**, not just upscaling of the final image. The earlier evidence of passes and dimensions is in `docs/HISTORY.md`, part 8; visual correctness at 4K still needs current captures.
 
-`runtime/nvn/vulkan/exec.c:post_view` aplica SMAA 1x na imagem do jogo em três passes (bordas, pesos, mistura). FSR 1 EASU/RCAS é usado apenas quando a imagem precisa ser ampliada até a janela. A apresentação com redução de resolução usa múltiplas amostras; texturas com mipmap e filtro linear podem receber anisotropia 16× (`textures.c`). O pipeline cache Vulkan é persistido periodicamente (`device.c`, `exec.c`).
+`runtime/nvn/vulkan/exec.c:post_view` applies SMAA 1x to the game image in three passes (edges, weights, blend). FSR 1 EASU/RCAS is used only when the image needs to be upscaled to the window. Downscaled presentation uses multiple samples; mipmapped textures with linear filtering can get 16× anisotropy (`textures.c`). The Vulkan pipeline cache is saved periodically (`device.c`, `exec.c`).
 
-## Problema corrigido
+## Fixed problem
 
-**P3 — Resolução dinâmica baixava a escala no ritmo nominal de 30 fps.** O comparador de 17,4 ms em `output_scale.c` refletia 60 Hz, mas o jogo normalmente apresenta a cada ~33,3 ms (`runtime/nvn/objects.c`). Em 180 amostras sintéticas, a escala ia de 1,00 a 0,70. Agora o orçamento acompanha 30/60 Hz, e uma mudança de cena descarta a janela de amostras anterior. O teste isolado mediu escala 1,00 a 33,33 ms e 0,70 a 45 ms. Uma execução roteirizada do Eevee mostrou o mundo em 1280×720 após 1450 presents a 30 fps, sem linha `[dynres]`. Ainda faltam Pikachu, transições e comparação visual pareada com a versão anterior.
+**P3 — Dynamic resolution lowered the scale at the nominal 30 fps rate.** The 17.4 ms comparison in `output_scale.c` reflected 60 Hz, but the game normally presents every ~33.3 ms (`runtime/nvn/objects.c`). Over 180 synthetic samples, the scale went from 1.00 to 0.70. Now the budget follows 30/60 Hz, and a scene change discards the previous sample window. The isolated test measured scale 1.00 at 33.33 ms and 0.70 at 45 ms. A scripted Eevee run showed the overworld at 1280×720 after 1450 presents at 30 fps, with no `[dynres]` line. Pikachu, transitions and a paired visual comparison with the previous version are still missing.
 
-## Limitações e riscos
+## Limitations and risks
 
-- A resolução dinâmica do Vulkan passa `gpu_ms = -1` em `device.c`; decide pela duração entre presents. Quedas por CPU, espera de shader ou loading podem provocar redução indevida. A heurística já ignora pausas acima de 250 ms, mas isso não separa todo hitch de GPU. **P2**, medir com timestamps de GPU antes de alterar.
-- O modo 60 experimental não é uniforme: mundo a 60, menus com quadro intermediário a partir de lógica 30, batalha/captura a 30. A resolução dinâmica deve ser inspecionada em cada transição. **P2**.
-- Resolução de sombra maior, TAA, LOD e precisão de render targets não foram adotados: faltam comparação visual e custo de GPU. O mapa de sombras 2048² e o risco de escalar alvos que não são 16:9 constam em `docs/HISTORICO.md`.
-- SMAA afeta a imagem já composta, inclusive interface. Avaliar arestas da UI e texturas finas por pares de captura antes de trocar por FXAA/TAA. TAA depende de motion vectors e tratamento de cortes/ghosting que este pipeline não oferece hoje.
+- Vulkan dynamic resolution passes `gpu_ms = -1` in `device.c`; it decides by the time between presents. Drops caused by CPU, shader waits or loading can cause an unwarranted reduction. The heuristic already ignores pauses above 250 ms, but that does not separate every GPU hitch. **P2**, measure with GPU timestamps before changing.
+- The experimental 60 mode is not uniform: overworld at 60, menus with an intermediate frame from 30 logic, battle/capture at 30. Dynamic resolution should be inspected at each transition. **P2**.
+- Higher shadow resolution, TAA, LOD and render target precision were not adopted: visual comparison and GPU cost are missing. The 2048² shadow map and the risk of scaling targets that are not 16:9 are recorded in `docs/HISTORY.md`.
+- SMAA affects the already composited image, including the interface. Evaluate UI edges and fine textures with capture pairs before switching to FXAA/TAA. TAA depends on motion vectors and handling of cuts/ghosting that this pipeline does not offer today.
 
-## Validação recomendada
+## Recommended validation
 
-Capturar `LARECOMP_SHOT_AT` e `LARECOMP_WINDOW_SHOT` em 1080p, 1440p e 4K com a mesma câmera. Conferir pixels e dimensões de RT HDR, depth, bloom e UI no `LARECOMP_DEBUG_FRAME`/RenderDoc; comparar com `LARECOMP_NO_SCALE=1`. Inspecionar viewport/scissor, alinhamento de sombras e pós-processamento. Repetir com SMAA on/off e anisotropia 1×/16× e medir custo por GPU timestamps. Executar em Eevee e Pikachu antes de release.
+Capture `LARECOMP_SHOT_AT` and `LARECOMP_WINDOW_SHOT` at 1080p, 1440p and 4K with the same camera. Check pixels and dimensions of the HDR RT, depth, bloom and UI in `LARECOMP_DEBUG_FRAME`/RenderDoc; compare with `LARECOMP_NO_SCALE=1`. Inspect viewport/scissor, shadow alignment and post-processing. Repeat with SMAA on/off and anisotropy 1×/16× and measure the cost with GPU timestamps. Run on Eevee and Pikachu before release.

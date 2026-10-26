@@ -1,7 +1,7 @@
-// Wild battles (experimental, docs/MODO-BATALHA.md): touching a wild Pokémon starts a battle (the game's "static
+// Wild battles (experimental, docs/BATTLE-MODE.md): touching a wild Pokémon starts a battle (the game's "static
 // encounter" process: Snorlax, the legendary birds, Mewtwo) instead of the Pokémon GO-style capture.
 //
-// How the game does a static battle (docs/MODO-BATALHA.md, stage 3c): a script command builds a process of class A
+// How the game does a static battle (docs/BATTLE-MODE.md, stage 3c): a script command builds a process of class A
 // (factory f_700017f0a0, constructor f_7000289ac0, object of 0xA8 bytes) whose [+0x98] holds the battle's 64-bit hash;
 // its state machine loads bin/script_event_data/event_encount.bin (0x40-byte records), looks the hash up
 // (f_70002bad00(table, &key) -> parsed record of 0x59 bytes), fills the battle configuration from the record
@@ -16,7 +16,7 @@
 // (a throw that doesn't hold brings the battle back, HP and status kept); a wild Pokémon that faints is lost.
 // LARECOMP_WILDBATTLE=1 turns it on. Test settings (until the touched Pokémon is read): LARECOMP_WILDBATTLE_SPECIES=<n>
 // (default 19), _LEVEL=<n> (3), _MOVES=<a,b,c,d> (33,45,0,0), _MAX=<n> (battles per run, default 1), _A6=1 (the "mode 3"
-// flag of the process), _STATE_LOG=1 (log the process' state changes); the catch's: docs/DEPURACAO.md.
+// flag of the process), _STATE_LOG=1 (log the process' state changes); the catch's: docs/DEBUGGING.md.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -82,7 +82,7 @@ static int g_mode_override = -1; // tests: -1 follows the live native/launcher s
 #define CFG_SIZE 0x2b8
 #define CONFIG_FROM_RECORD 0x70002f60c0ull  // (x0 = configuration, x1 = record)
 static uint8_t g_cfg[CFG_SIZE] __attribute__((aligned(16)));
-static bool g_cfg_valid, g_usecfg;  // (off: copying the builder's configuration crashed; see docs/MODO-BATALHA.md)
+static bool g_cfg_valid, g_usecfg;  // (off: copying the builder's configuration crashed; see docs/BATTLE-MODE.md)
 static uint8_t g_rec[0x60] __attribute__((aligned(16)));  // (the synthetic record, below)
 
 #define CONFIG_BUILD 0x70002f65d0ull         // (x0 = configuration object, x1 = allocator, x2 = struct, x8 = out): fills it
@@ -93,7 +93,7 @@ static uint8_t g_rec[0x60] __attribute__((aligned(16)));  // (the synthetic reco
 // Log what the game reads from it (species f_70002185d0, form f_70002186a0, and the raw fields the builder copies), to
 // compare with what the capture screen shows (species name, level).
 #define WILD_BUILDER 0x70003058f0ull
-// What the builder reads from the touched Pokémon's object P (docs/MODO-BATALHA.md): species f_70002185d0(P), form
+// What the builder reads from the touched Pokémon's object P (docs/BATTLE-MODE.md): species f_70002185d0(P), form
 // f_70002186a0(P), level = byte P+0xf0c, IVs = six bytes P+0xf18, +0xf1c, ... +0xf2c, gender = word P+0x40c (0 male, 1 female,
 // else none: the builder turns it into 1 / 2 / 0, the record's fixed-gender codes).
 static bool g_wild_valid;
@@ -529,7 +529,7 @@ static void log_record(const char *what, const uint8_t *r) {
         *(const uint32_t *)(r + 0x3c), *(const uint32_t *)(r + 0x40));
 }
 
-// Level-up moves from the game's own table: bin/archive/waza_oboe.gfpak (a GFLXPACK, docs/MODO-BATALHA.md) holds one file per
+// Level-up moves from the game's own table: bin/archive/waza_oboe.gfpak (a GFLXPACK, docs/BATTLE-MODE.md) holds one file per
 // species (the file's index is the species number): (move u16, level u16) pairs in level order, ended by 0xFFFFFFFF. A wild
 // Pokémon knows the last four it learns up to its level. Read from the romfs image, the pack parsed once (header: u32 files at
 // +0x10, i64 file-table offset at +0x18; 0x18-byte entries: type u8 at +2 (2 = LZ4 block), u32 sizes at +4 / +8, u32 offset at +0x10).
@@ -628,7 +628,7 @@ static int lookup_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// ---- Catching during the battle (docs/MODO-BATALHA.md, stage 6) ----
+// ---- Catching during the battle (docs/BATTLE-MODE.md, stage 6) ----
 // The player asks to catch; the battle ends as a run away (result 3), which the battle event turns into a win (1) when it
 // gets to its state 5: the after-battle process then starts the game's own capture (f_7000319bc0, state 0: a win of a
 // battle of kind 2 goes to f_700031a0e0). The wild Pokémon's HP and status come from the battle's last write-back of its
@@ -746,7 +746,7 @@ static int battle_event_hook(Cpu *c, uint64_t addr) {
 // battle the legendaries' kind: a time limit of 300 seconds at [+0x562] (the "MATCH TIME" at the top left), and in the
 // battle setup at [+0xe0] the flag 0x80 of [+0x574] and the byte [+0x584] - a knocked out Pokémon ends the battle on the
 // spot (no fainting: the capture follows) and no Exp. Points. Ours: no time limit (0 hides it). The flag stays for the
-// opening (cleared from the start, the game stopped: docs/HISTORICO.md), and goes once the command menu
+// opening (cleared from the start, the game stopped: docs/HISTORY.md), and goes once the command menu
 // is up (battle_event_hook): a knocked out wild Pokémon then faints as in the trainer battles ("Rattata fainted!", it
 // falls and is called back; model_joint_hook).
 #define STATIC_SETUP 0x700028c770ull
@@ -1100,7 +1100,7 @@ static int setup_hook(Cpu *c, uint64_t addr) {
     return 1;
 }
 
-// The battle's command menu (docs/MODO-BATALHA.md, stage 6). With the menu's files of runtime/hle/catch_button.c it has a
+// The battle's command menu (docs/BATTLE-MODE.md, stage 6). With the menu's files of runtime/hle/catch_button.c it has a
 // fifth button, CATCH (uikit hash g_catch_button_hash, after RUN), that the game doesn't know: f_7000ab2730 sets up the
 // four buttons' views (each f_7000ab2e60: the button found by hash, its pattern frame, and its decide callback written at
 // [button+0x150]: f_7000ab49f0 / ab4a20 / ab4a30 / ab4a50 with {view, event} stored at +0x170; on a decision it writes
@@ -1239,7 +1239,7 @@ static int capture_hook(Cpu *c, uint64_t addr) {
 }
 
 // Before each boot (runtime/main.c): the launcher's "Wild battles (experimental)" (larecomp.ini wild_battle = 1) turns the
-// mode on when LARECOMP_WILDBATTLE doesn't say otherwise. The research variables (docs/DEPURACAO.md) tune it.
+// mode on when LARECOMP_WILDBATTLE doesn't say otherwise. The research variables (docs/DEBUGGING.md) tune it.
 static bool g_enabled;
 extern bool wildbattle_classic_enabled(void);
 // runtime/services/fs.c: whether the battle menu's files are made with the CATCH button (the mode is on), and whether

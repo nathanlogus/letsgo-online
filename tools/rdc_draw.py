@@ -1,4 +1,4 @@
-"""rdc_draw.py: one skinned draw of a RenderDoc capture, vertex by vertex (docs/PLANO-3D.md, fase 3).
+"""rdc_draw.py: one skinned draw of a RenderDoc capture, vertex by vertex (docs/PLAN-3D.md, fase 3).
 
 Runs inside qrenderdoc like tools/rdc_skin.py (USERPROFILE pointed elsewhere):
   env RDC=<capture.rdc> EID=<event id> OUT=<text file> [N=64]

@@ -3,7 +3,7 @@
 // hook sets x0 etc. as the function would). rt_call_original runs the game's own function from inside a hook
 // (wrapping). Cost when no hook is registered: one predictable branch per call.
 //
-// Investigation (docs/MODO-BATALHA.md): LARECOMP_HOOK_DUMP="<addr>:<arg>,<arg>...[;<addr>:...]" logs, the first
+// Investigation (docs/BATTLE-MODE.md): LARECOMP_HOOK_DUMP="<addr>:<arg>,<arg>...[;<addr>:...]" logs, the first
 // LARECOMP_HOOK_DUMP_MAX (default 4) times each function is entered, the registers x0..x7 and the memory the args
 // name: "x2:30" = 0x30 bytes at x2, "*x0:400" = 0x400 bytes at the pointer stored at x0. LARECOMP_HOOK_DUMP_FRAMES=
 // <first>-<last> limits it to those presents (the count then starts there).

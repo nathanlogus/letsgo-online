@@ -5,8 +5,10 @@
 `tests/` is ignored by Git (see `tests/README.md`). Put everything a run produces there, never in the system temp
 folder, the scratchpad or the repo tree:
 
-- **Runs** (logs, screenshots, window captures, per-run settings and save copies): `tests/runs/<feature>/`, named
-  `<scenario>_<frame>.*` so a run is never overwritten by a different one. Keep them; do not delete old runs.
+- **Runs** (logs, screenshots, window captures, per-run settings and save copies): one folder per run,
+  `tests/runs/daynight/<run>/` or `tests/runs/<feature><N>/`. Only the 2 newest runs of each feature are kept:
+  `tests/scripts/prune_runs.py` deletes the rest and the run scripts call it. Images worth keeping go in
+  `tests/runs/daynight/results/` (never pruned).
 - **Build and tool logs**: `tests/logs/`.
 - **Scripts** that start runs: `tests/scripts/` (e.g. `run-daynight.sh <hour>`). Prefer extending these over one-off commands.
 - **Moving the player** (to test a town): `tests/scripts/save_pos.py` edits a save copy's position (see `docs/DAYNIGHT.md`);

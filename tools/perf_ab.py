@@ -28,7 +28,7 @@ FROM, TO = 1420, 2300
 
 def bring_to_front():
     """The game's window topmost and in the foreground. Behind another window (or smaller than the screen) Windows composes it
-    (DWM) instead of showing it directly, and the unlimited frame rate drops ~20-35% in Viridian City (HISTORICO): with the
+    (DWM) instead of showing it directly, and the unlimited frame rate drops ~20-35% in Viridian City (HISTORY): with the
     window left where it opens, runs of the same build came out bimodal. Returns whether the window was found."""
     u32 = ctypes.WinDLL("user32")
     found = []

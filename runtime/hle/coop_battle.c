@@ -295,34 +295,48 @@ static int rng_seed_hook(Cpu *c,uint64_t addr){
 static void hash_field(uint64_t *digest,uint64_t value,unsigned bytes){
     for(unsigned i=0;i<bytes;i++){*digest=(*digest^(value&255))*0x100000001b3ull;value>>=8;}
 }
-static void journal_turn_state(Cpu *cpu,uint64_t controller){
+// Pointer-free per-round fingerprint, compared host vs guest through the link.
+// Status words (+0xa0..+0xc7) are hashed explicitly; the rest of the battle
+// Pokemon (stat stages, volatile counters) is hashed as raw bytes, skipping
+// 8-byte slots that hold guest pointers, since heap addresses differ per client.
+static uint64_t journal_turn_state(Cpu *cpu,uint64_t controller){
     const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");
     uint64_t context=ptr(controller+0x58),pool=ptr(controller+0x70);
-    if(!dir || !guest(context,0xb0) || !guest(pool,0x140))return;
-    char path[1400];snprintf(path,sizeof path,"%s/battle.jsonl",dir);FILE *f=fopen(path,"a");if(!f)return;
+    if(!guest(context,0xb0) || !guest(pool,0x140))return 0;
+    FILE *f=NULL;if(dir && *dir){char path[1400];snprintf(path,sizeof path,"%s/battle.jsonl",dir);f=fopen(path,"a");}
     uint64_t rng[2]={ptr(context+0x98),ptr(context+0xa0)},digest=0xcbf29ce484222645ull;
-    hash_field(&digest,rng[0],8);hash_field(&digest,rng[1],8);
-    fprintf(f,"{\"event\":\"turn_state\",\"turn\":%u,\"rng\":[\"%016llx\",\"%016llx\"],\"combatants\":[",ally_round,
+    hash_field(&digest,rng[0],8);hash_field(&digest,rng[1],8);uint64_t partial=digest;
+    if(f)fprintf(f,"{\"event\":\"turn_state\",\"turn\":%u,\"rng\":[\"%016llx\",\"%016llx\"],\"combatants\":[",ally_round,
         (unsigned long long)rng[0],(unsigned long long)rng[1]);
     Cpu call=*cpu;
     for(unsigned trainer=0;trainer<4;trainer++){
-        uint16_t species=0,hp=0,maxhp=0,moves[4]={0};uint8_t pp[4]={0};
+        uint16_t species=0,hp=0,maxhp=0,moves[4]={0};uint8_t pp[4]={0},status[5]={0};uint64_t raw=0xcbf29ce484222645ull;
         if(*(uint8_t *)(uintptr_t)(pool+0x60+0x38*trainer+0x30)){
             call.x[0]=pool;call.x[1]=trainer;call.x[2]=0;rt_call_original(&call,0x70009e14c0ull);uint64_t mon=call.x[0];
             if(guest(mon,0x2e1)){
                 species=*(uint16_t *)(uintptr_t)(mon+0x78);hp=*(uint16_t *)(uintptr_t)(mon+0x7e);maxhp=*(uint16_t *)(uintptr_t)(mon+0x7c);
+                for(unsigned i=0;i<5;i++)status[i]=*(uint8_t *)(uintptr_t)(mon+0xa0+8*i)&7;
                 for(unsigned i=0;i<4;i++){
                     call.x[0]=mon;call.x[1]=i;rt_call_original(&call,0x70009e4950ull);moves[i]=(uint16_t)call.x[0];
                     call.x[0]=mon;call.x[1]=i;rt_call_original(&call,0x70009e4a80ull);pp[i]=(uint8_t)call.x[0];
                 }
+                for(unsigned o=0x78;o<0x2e0;o+=8){uint64_t v=*(uint64_t *)(uintptr_t)(mon+o);if(!guest(v,1))hash_field(&raw,v,8);}
             }
         }
+        hash_field(&partial,trainer,1);hash_field(&partial,species,2);hash_field(&partial,hp,2);hash_field(&partial,maxhp,2);
+        for(unsigned i=0;i<4;i++){hash_field(&partial,moves[i],2);hash_field(&partial,pp[i],1);}
         hash_field(&digest,trainer,1);hash_field(&digest,species,2);hash_field(&digest,hp,2);hash_field(&digest,maxhp,2);
         for(unsigned i=0;i<4;i++){hash_field(&digest,moves[i],2);hash_field(&digest,pp[i],1);}
-        fprintf(f,"%s{\"trainer\":%u,\"species\":%u,\"hp\":%u,\"max_hp\":%u,\"moves\":[%u,%u,%u,%u],\"pp\":[%u,%u,%u,%u]}",trainer?",":"",trainer,species,hp,maxhp,
-            moves[0],moves[1],moves[2],moves[3],pp[0],pp[1],pp[2],pp[3]);
+        for(unsigned i=0;i<5;i++)hash_field(&digest,status[i],1);
+        hash_field(&digest,raw,8);
+        if(f)fprintf(f,"%s{\"trainer\":%u,\"species\":%u,\"hp\":%u,\"max_hp\":%u,\"moves\":[%u,%u,%u,%u],\"pp\":[%u,%u,%u,%u],\"status\":[%u,%u,%u,%u,%u],\"raw\":\"%016llx\"}",trainer?",":"",trainer,species,hp,maxhp,
+            moves[0],moves[1],moves[2],moves[3],pp[0],pp[1],pp[2],pp[3],status[0],status[1],status[2],status[3],status[4],(unsigned long long)raw);
     }
-    fprintf(f,"],\"digest\":\"%016llx\"}\n",(unsigned long long)digest);fclose(f);
+    // QA fault injection: corrupt the guest's report for one round to exercise the abort path.
+    const char *corrupt=ENV("LARECOMP_COOP_MIRROR_CORRUPT_ROUND");
+    if(mirrored_guest && corrupt && strtoul(corrupt,NULL,10)==ally_round)digest^=1;
+    if(f){fprintf(f,"],\"partial_digest\":\"%016llx\",\"digest\":\"%016llx\"}\n",(unsigned long long)partial,(unsigned long long)digest);fclose(f);}
+    return digest;
 }
 static unsigned ally_timeout(void){const char *p=ENV("LARECOMP_COOP_ALLY_TIMEOUT_SECONDS");unsigned n=p?(unsigned)strtoul(p,NULL,10):30;return (n<1?1:n>60?60:n)*1000;}
 static void ally_event(const char *event,const CoopBattleMove *m){
@@ -330,6 +344,19 @@ static void ally_event(const char *event,const CoopBattleMove *m){
     char path[1400];snprintf(path,sizeof path,"%s/battle.jsonl",dir);FILE *f=fopen(path,"a");if(!f)return;
     fprintf(f,"{\"event\":\"%s\",\"frame\":%llu,\"turn\":%u,\"move\":%u,\"target\":%u}\n",event,
         (unsigned long long)renderer_game_frame(),ally_wait.turn,m?m->move:0,m?m->target:0);fclose(f);
+}
+// A broken replay never falls back silently: journal the reason once, stop
+// taking commands and let the native AI finish locally. The mirrored result
+// phase and partner writes stay discarded, so the guest save is untouched.
+static bool mirror_aborted;
+static void mirror_abort(const CoopBattleMirrorSetup *status,bool ready){
+    if(mirror_aborted)return;
+    mirror_aborted=true;
+    unsigned reason=status->aborted?status->reason:!ready?COOP_MIRROR_LINK_LOST:status->ended?COOP_MIRROR_INCOMPLETE_END:COOP_MIRROR_DIGEST;
+    LOG("[coop-battle] mirrored replay aborted, reason %u; finishing locally without results\n",reason);
+    const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");if(!dir)return;
+    char path[1400];snprintf(path,sizeof path,"%s/battle.jsonl",dir);FILE *f=fopen(path,"a");
+    if(f){fprintf(f,"{\"event\":\"mirror_aborted\",\"frame\":%llu,\"round\":%u,\"reason\":%u}\n",(unsigned long long)renderer_game_frame(),ally_round,reason);fclose(f);}
 }
 static bool ally_choices(Cpu *cpu,uint64_t controller,CoopBattleChoices *out,uint16_t species[2],uint16_t hp[2],uint16_t maxhp[2]){
     Cpu call=*cpu;uint64_t mon=ptr(controller+0x78),pool=ptr(controller+0x70),ctx=ptr(controller+0x58);
@@ -383,8 +410,9 @@ static int remote_player_test_hook(Cpu *c,uint64_t addr){
         if(!remote_waiting){remote_waiting=true;remote_round++;battle_seen=true;}
         CoopBattleCanonical canonical;CoopBattleMirrorSetup status;
         bool ready=coop_battle_link_mirror_setup(&status);
-        if(coop_battle_link_mirror_take(native_mirror.battle,0,remote_round,&canonical))move=canonical.move;
-        else if(ready && !status.aborted && !status.ended){c->x[0]=0;return 1;}
+        if(!mirror_aborted && coop_battle_link_mirror_take(native_mirror.battle,0,remote_round,&canonical))move=canonical.move;
+        else if(!mirror_aborted && ready && !status.aborted && !status.ended){c->x[0]=0;return 1;}
+        else mirror_abort(&status,ready);
     }
     if(!move.move){
         CoopBattleChoices choices;uint16_t species[2],hp[2],maxhp[2];unsigned index=choice?(unsigned)strtoul(choice,NULL,10):0;
@@ -440,13 +468,15 @@ static int mirror_ally_select(Cpu *c,uint64_t controller,uint64_t state){
         call.x[0]=ptr(controller+0x368);rt_call_original(&call,0x7000a6d310ull);
         call.x[0]=ptr(controller+0x368);rt_call_original(&call,0x7000a6d230ull);
         if(!(call.x[0]&1)){c->x[0]=0;return 1;}
-        ally_prepared=true;ally_round++;journal_turn_state(c,controller);ally_event("mirror_ally_waiting",NULL);
+        ally_prepared=true;ally_round++;ally_event("mirror_ally_waiting",NULL);
+        CoopBattleMirrorSetup status;bool ready=coop_battle_link_mirror_setup(&status);
+        if(!coop_battle_link_mirror_digest(ally_round,journal_turn_state(c,controller)))mirror_abort(&status,ready);
     }
     CoopBattleCanonical canonical;CoopBattleMirrorSetup status;
     bool ready=coop_battle_link_mirror_setup(&status);
-    if(!coop_battle_link_mirror_take(native_mirror.battle,2,ally_round,&canonical)){
-        if(ready && !status.aborted && !status.ended){c->x[0]=0;return 1;}
-        ally_native=true;return 0;
+    if(mirror_aborted || !coop_battle_link_mirror_take(native_mirror.battle,2,ally_round,&canonical)){
+        if(!mirror_aborted && ready && !status.aborted && !status.ended){c->x[0]=0;return 1;}
+        mirror_abort(&status,ready);ally_native=true;return 0;
     }
     if(!native_command_valid(c,controller,&canonical.move)){ally_event("mirror_command_rejected",&canonical.move);c->x[0]=0;return 1;}
     if(canonical.native_ai){
@@ -484,7 +514,12 @@ static int ally_select_hook(Cpu *c,uint64_t addr){
         if(!coop_ally_begin(&ally_wait,link.battle,ally_round,ally_round,&choices,now,ally_timeout())){ally_native=true;return 0;}
         ally_prepared=true;
         if(!coop_battle_link_request(&ally_wait,species,hp,maxhp))ally_wait.deadline_ns=now;
-        journal_turn_state(c,controller);
+        coop_battle_link_mirror_digest(ally_round,journal_turn_state(c,controller));
+        CoopBattleMirrorSetup status;
+        if(coop_battle_link_mirror_setup(&status) && status.aborted && !mirror_aborted){
+            // The host keeps its battle and NPC fallback; only log the guest replay failure.
+            mirror_aborted=true;LOG("[coop-battle] guest replay reported aborted, reason %u\n",status.reason);ally_event("mirror_aborted_host",NULL);
+        }
         ally_event("ally_waiting",NULL);LOG("[coop-ally] waiting for guest, turn %u, timeout %u ms\n",ally_round,ally_timeout());
     }
     CoopBattleMove command;uint64_t received;
@@ -671,6 +706,7 @@ void coop_battle_field(Cpu *c) {
         trainer_process=0;battle_seen=trial_active=false;
         if(mirrored_guest){coop_battle_link_mirror_clear();mirrored_guest=remote_waiting=false;}
         else coop_battle_link_end();
+        mirror_aborted=false;
     }
     if(world_return_frame && renderer_game_frame()>=world_return_frame+30) {
         // The factory-only QA has no story script to perform its final FadeIn.
@@ -718,5 +754,5 @@ void coop_battle_install_hooks(void) {
         rt_register_fnhook_chain(0x70009e0940ull,battle_party_hook,&previous_battle_party);
     }
 }
-void coop_battle_configure(int build){supported=build==GAME_BUILD_EEVEE_100;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;mirrored_guest=remote_waiting=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=false;memset(&ally_wait,0,sizeof ally_wait);memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}
-RT_ON_RESET(coop_battle_reset){supported=false;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;mirrored_guest=remote_waiting=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=false;memset(&ally_wait,0,sizeof ally_wait);memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}
+void coop_battle_configure(int build){supported=build==GAME_BUILD_EEVEE_100;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;mirrored_guest=remote_waiting=mirror_aborted=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=false;memset(&ally_wait,0,sizeof ally_wait);memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}
+RT_ON_RESET(coop_battle_reset){supported=false;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;mirrored_guest=remote_waiting=mirror_aborted=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=false;memset(&ally_wait,0,sizeof ally_wait);memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}

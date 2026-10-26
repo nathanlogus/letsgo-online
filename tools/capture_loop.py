@@ -1,4 +1,4 @@
-"""capture_loop.py: unattended captures in the grass, to reproduce what breaks the world after a capture (HISTORICO 60).
+"""capture_loop.py: unattended captures in the grass, to reproduce what breaks the world after a capture (HISTORY 60).
 
   capture_loop.py run <name> [--game eevee|pikachu] [--frames N] [--save <savedata.bin>] [--fps 60|30] [--turbo 0|1] [--leg <frames>]
                   [VAR=value ...]          one session: walks back and forth in the grass, looped; inside an encounter

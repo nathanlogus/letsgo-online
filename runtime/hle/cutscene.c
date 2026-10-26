@@ -1,4 +1,4 @@
-// Cutscenes: the game's event scripts (AMX, docs/MODO-BATALHA.md) take the camera with the native EvCameraStart and give
+// Cutscenes: the game's event scripts (AMX, docs/BATTLE-MODE.md) take the camera with the native EvCameraStart and give
 // it back with EvCameraEnd - a talk with someone doesn't, a scene with the camera moving around does. Between the two
 // game_cutscene() is true (runtime/nvn/vulkan/exec.c: SSAO at half its intensity there and on the title screen).
 // Natives found by name in the image (the table of names and functions: LARECOMP_IMAGE_DUMP and a scan); Eevee 1.0.0

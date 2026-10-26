@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bateria.sh <eevee|pikachu|ambos> <mundo|menus|saida|todas> [VAR=valor ...]: the regression battery (docs/DEPURACAO.md).
+# bateria.sh <eevee|pikachu|ambos> <mundo|menus|saida|todas> [VAR=valor ...]: the regression battery (docs/DEBUGGING.md).
 #
 # Each route is a fixed input script from the same save (a copy of build/user-save: Pewter City), run in turbo (same
 # frames every run). The frames go straight to ONE raw file (LARECOMP_SHOT_RAW, 480x270 RGB per frame, no PNG, no ffmpeg),

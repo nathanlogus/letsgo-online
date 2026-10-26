@@ -7,7 +7,7 @@ addresses belong to that game's executable. Let's Go patches (widescreen etc.) g
 PATCHES = {}
 
 
-# 60 fps: the frame counters the capture and battle scenes' timelines run on (found with the store tracer, docs/PESQUISA-60FPS.md).
+# 60 fps: the frame counters the capture and battle scenes' timelines run on (found with the store tracer, docs/RESEARCH-60FPS.md).
 # Each steps once per update; at 60 fps they step on every other one (rt_scene_tick, runtime/hle/fps60.c) so those scenes
 # keep the game's 30 steps a second. Everywhere else rt_scene_tick() is 1 and the store is the game's own.
 def _scene_counter(addr_expr, reg):

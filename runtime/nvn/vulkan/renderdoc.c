@@ -1,4 +1,4 @@
-// RenderDoc frame capture on demand (docs/PLANO-3D.md, fase 3). Run the game under RenderDoc
+// RenderDoc frame capture on demand (docs/PLAN-3D.md, fase 3). Run the game under RenderDoc
 // (`renderdoccmd capture -w ./build/lasrecomp.exe ...`, see tools/repro.sh RENDERDOC=1) with
 // LARECOMP_RENDERDOC_AT=<frame>: the frames after that one are captured into build/rdc/ (LARECOMP_RENDERDOC_FRAMES of
 // them, default 4: the game doesn't draw its scene on every present). Without RenderDoc loaded this does nothing.

@@ -15,6 +15,7 @@ static const Key keys[] = {  // (night: ssrecomp's ambient 0.40 / 0.45 / 0.70 - 
 };
 
 float daynight_hour(void) {
+    if (g_settings.daynight_hour >= 0) return (float)g_settings.daynight_hour;  // (the menu's fixed hour wins over LARECOMP_HOUR)
     const char *e = getenv("LARECOMP_HOUR");
     if (e && *e) return fmodf(fabsf((float)atof(e)), 24.0f);
     static time_t t0;
@@ -45,13 +46,13 @@ static Key sample(void) {
 
 float daynight_night(void) { return g_settings.daynight || getenv("LARECOMP_HOUR") ? sample().night : 0; }
 
-extern bool fps60_world_active(void);  // runtime/hle/fps60.c
+extern bool game_title(void);         // runtime/hle/fps60.c: before the world's first update (logos, title, loading)
 extern int fs_env_set(void);          // runtime/services/fs.c: the light set the game loaded last (2 room, 3 dungeon: not the outdoors)
 
 bool daynight_tint(float rgb[3]) {
     static int env = -1;
     if (env < 0) env = getenv("LARECOMP_HOUR") != NULL;
-    if (!(g_settings.daynight || env) || !fps60_world_active()) return false;
+    if (!(g_settings.daynight || env) || game_title()) return false;  // (battles and captures keep the hour's light: they follow the overworld's light set)
     if (fs_env_set() == 2 || fs_env_set() == 3) return false;  // (interiors and caves look the same at any hour)
     Key k = sample();
     // (the grade was set in display values; the scene is linear, the game's tone mapping and encoding follow)

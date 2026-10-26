@@ -16,14 +16,7 @@ extern "C" {
 
 // ------------------------------------------------------------------ language
 int g_ui_lang;
-void ui_pick_language(void) {
-    const char *e = getenv("LARECOMP_LANG"), *lang = e && *e ? e : "";
-    SDL_Locale **l = NULL;
-    int n = 0;
-    if (!*lang && (l = SDL_GetPreferredLocales(&n)) && n > 0 && l[0]->language) lang = l[0]->language;
-    g_ui_lang = !strncmp(lang, "pt", 2) ? 1 : !strncmp(lang, "ru", 2) ? 2 : 0;
-    SDL_free(l);
-}
+void ui_pick_language(void) { g_ui_lang = 0; }  // English only, whatever the system's language (the pt / ru strings are unused)
 
 // ------------------------------------------------------------------ look
 // After the game's own menus (its Options screen): a lime background with big pale gears, slow diagonal stripes and
@@ -621,8 +614,9 @@ void ui_page_image_sound(void) {
     const char *l_vol = UI_T("Volume", "Volume", "Громкость"), *l_bri = UI_T("Brightness", "Brilho", "Яркость"),
                *l_con = UI_T("Contrast", "Contraste", "Контраст"), *l_sat = UI_T("Saturation", "Saturação", "Насыщенность"),
                *l_shp = UI_T("Sharpness (TAA)", "Nitidez (TAA)", "Резкость (TAA)");
-    const char *labels[] = {l_vol, l_bri, l_con, l_sat, l_shp};
-    float x = ui_label_x(labels, 5);
+    const char *l_dn = "Day and night", *l_tod = "Time of day";  // (English only, as asked)
+    const char *labels[] = {l_vol, l_bri, l_con, l_sat, l_shp, l_dn, l_tod};
+    float x = ui_label_x(labels, 7);
     struct Row { const char *label; float *v, lo, hi; } rows[] = {
         {l_vol, &g_settings.volume, 0.0f, 2.0f}, {l_bri, &g_settings.brightness, 0.5f, 1.5f},
         {l_con, &g_settings.contrast, 0.5f, 1.5f}, {l_sat, &g_settings.saturation, 0.0f, 2.0f}};
@@ -641,6 +635,21 @@ void ui_page_image_sound(void) {
         if (ui_slider("##taa_s", &pct, 0, 100, "%.0f%%", 5)) g_settings.taa_sharpness = pct / 100;
     }
     ImGui::EndDisabled();
+    ui_group_gap();
+    // the day/night grade (runtime/daynight.c): the clock's hour, or one fixed hour, applied live
+    ui_toggle("##daynight", l_dn, x, &g_settings.daynight);
+    ui_tip("The outdoors' light follows the time of day: dawn, day, dusk and night with lit windows and lamps.");
+    {
+        static char hrs[24][8];
+        const char *tod[25] = {"Clock"};
+        for (int i = 0; i < 24; i++) snprintf(hrs[i], sizeof hrs[i], "%02d:00", i), tod[i + 1] = hrs[i];
+        int cur = g_settings.daynight_hour + 1;
+        ImGui::BeginDisabled(!g_settings.daynight);
+        ui_row(l_tod, x);
+        if (ui_combo("##tod", &cur, tod, 25)) g_settings.daynight_hour = cur - 1;
+        ImGui::EndDisabled();
+        ui_tip("Clock: the computer's time. Or one hour, kept fixed.");
+    }
     ui_group_gap();
     if (ui_button(UI_T("Reset", "Restaurar", "Сбросить"))) {
         g_settings.volume = g_settings.brightness = g_settings.contrast = g_settings.saturation = 1.0f;

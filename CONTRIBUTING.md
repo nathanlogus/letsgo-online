@@ -26,10 +26,10 @@ Open an issue with:
 
 ## Code
 
-- Build and test as in [docs/COMPILAR-WINDOWS.md](docs/COMPILAR-WINDOWS.md).
-- Every fix gets a line in [docs/HISTORICO.md](docs/HISTORICO.md) (symptom, diagnosis, cause, fix), and
-  [docs/PROGRESSO.md](docs/PROGRESSO.md) tracks the current state.
-- New debugging variables and tools go in [docs/DEPURACAO.md](docs/DEPURACAO.md).
+- Build and test as in [docs/BUILD-WINDOWS.md](docs/BUILD-WINDOWS.md).
+- Every fix gets a line in [docs/HISTORY.md](docs/HISTORY.md) (symptom, diagnosis, cause, fix), and
+  [docs/PROGRESS.md](docs/PROGRESS.md) tracks the current state.
+- New debugging variables and tools go in [docs/DEBUGGING.md](docs/DEBUGGING.md).
 - The runtime came from LAS Recomp, made for Zelda. Before blaming the game, check whether one of the runtime's
   assumptions holds for Let's Go (formats, controller styles, return codes, reported resolution).
 - To change the game's behavior without rebuilding the game code library, use the function hooks

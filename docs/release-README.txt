@@ -36,7 +36,10 @@ How to play
 Experimental options (start screen; version 1.0.0 of either game: greyed out for updated games)
 - Frame rate limit (Graphics page, also in the F12 menu): 30 (the game's), 60 or 120 fps - the overworld at that rate
   without speed-ups; menus and the Pokedex smoothed; battles and captures stay at 30.
-- Wild battles (Game page, off by default): touching a wild Pokemon starts a classic battle against it, then the capture.
+- Wild battles (Game page, on by default): touching a wild Pokemon starts a classic battle against it, then the capture.
+- Day and night (Image and sound page, also in the F12 menu; off by default): the outdoors follow your clock, or a
+  fixed hour picked under "Time of day"; at night windows, glass doors and street lamps light up. Battles keep the
+  hour's light; interiors and caves are unchanged.
 The controller stick dead zone is on the Controls page.
 
 Both games: one folder holds one set-up game, so unzip this twice (e.g. LetsGoRecomp-Eevee and LetsGoRecomp-Pikachu)
@@ -52,11 +55,11 @@ came; packs made for Atmosphere / LayeredFS work: translations, textures, models
 at once (where two replace the same file, the higher one in the list wins).
 Mods of the game's code (exefs, IPS patches, cheats) don't work in this port.
 
-Portugues (Brasil): para jogar em portugues, baixe a traducao PT-BR de fas do grupo Pokemon Switch Brasil, abra a pagina
-"Mods", clique em "Instalar mod..." e escolha o arquivo baixado (.rar ou .zip, do jeito que veio). Ela ja vem marcada
-na lista.
-A traducao substitui os textos em ingles e espanhol: num jogo novo, escolha English ou Espanol na tela de idioma do
-jogo. O programa abre em portugues quando o Windows esta em portugues.
+Brazilian Portuguese: to play in Portuguese, download the PT-BR fan translation by Pokemon Switch Brasil, open the
+"Mods" page, click "Install a mod..." and pick the downloaded file (.rar or .zip, as it came). It comes ticked in the
+list.
+The translation replaces the English and Spanish texts: in a new game, pick English or Espanol on the game's language
+screen. The launcher and settings are in English only.
 
 Controls
 --------

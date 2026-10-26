@@ -1,4 +1,4 @@
-// Research tools of the 60 fps work (docs/PESQUISA-60FPS.md, docs/DEPURACAO.md), kept out of runtime/hle/fps60.c: each
+// Research tools of the 60 fps work (docs/RESEARCH-60FPS.md, docs/DEBUGGING.md), kept out of runtime/hle/fps60.c: each
 // one is off unless its LARECOMP_* variable is set.
 #include <stdatomic.h>
 #include <stdbool.h>

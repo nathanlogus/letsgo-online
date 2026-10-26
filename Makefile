@@ -1,6 +1,6 @@
 # Let's Go Recomp build (from LAS Recomp's).
 # Windows (the supported platform): MSYS2 UCRT64 shell or Git Bash with MSYS2 on PATH, clang + Vulkan renderer
-# (docs/COMPILAR-WINDOWS.md). The Linux branch is LAS Recomp's, kept but untested here.
+# (docs/BUILD-WINDOWS.md). The Linux branch is LAS Recomp's, kept but untested here.
 #   make gen           translate your own game files (extracted/exefs) into generated/
 #   make -j20          build/lasrecomp.exe (runtime) and build/lasgame.dll (the game code)
 #   make jogo          a copy to play while build/ is rebuilt (build/jogo/)
@@ -96,7 +96,7 @@ GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
 GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
 endif
 
-# Research build (docs/DEPURACAO.md, LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.
+# Research build (docs/DEBUGGING.md, LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.
 # Every store of the game reports its instruction to runtime/storetrace.c.
 ifdef TRACE
 GENFLAGS += -DSTORE_TRACE

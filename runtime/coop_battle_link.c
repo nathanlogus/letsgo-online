@@ -19,10 +19,20 @@ static bool mirror_seed_ready,mirror_party_sent;
 static uint16_t mirror_chunks;
 static uint32_t mirror_received[2],mirror_published[2];
 static struct {bool used;CoopBattleCanonical command;} mirror_commands[32];
+// shortcut: 16 rounds of digests; a guest replay lagging further skips comparisons.
+static struct {uint32_t round;uint64_t value[2];uint8_t have;} digests[16];
+static uint32_t digest_sent;
+static bool abort_unsent;
+static unsigned link_rtt_ms;
 static void clear_mirror(void){
-    memset(&mirror,0,sizeof mirror);mirror_seed_ready=mirror_party_sent=false;mirror_chunks=0;
+    memset(&mirror,0,sizeof mirror);mirror_seed_ready=mirror_party_sent=abort_unsent=false;mirror_chunks=0;
     memset(mirror_received,0,sizeof mirror_received);memset(mirror_published,0,sizeof mirror_published);
-    memset(mirror_commands,0,sizeof mirror_commands);
+    memset(mirror_commands,0,sizeof mirror_commands);memset(digests,0,sizeof digests);digest_sent=0;
+}
+// Called under the link mutex. notify queues one B10 so the peer stops too.
+static void mirror_abort(uint8_t reason,bool notify){
+    if(mirror.aborted)return;
+    mirror.aborted=true;mirror.reason=reason;abort_unsent=notify && view.phase==COOP_LINK_ACTIVE;
 }
 static uint16_t u16(const uint8_t *p){return p[0]|(uint16_t)p[1]<<8;}
 static uint32_t u32(const uint8_t *p){return u16(p)|(uint32_t)u16(p+2)<<16;}
@@ -36,13 +46,17 @@ static bool enqueue(const uint8_t *p,size_t n){
 }
 bool coop_battle_link_enabled(void){const char *p=getenv("LARECOMP_COOP_GUEST_CONTROL");return p && atoi(p)>0;}
 void coop_battle_link_reset(void){
-    pthread_mutex_lock(&lock);memset(&view,0,sizeof view);clear_mirror();chunks=0;accepted=pending=have_party=false;first=count=0;
+    pthread_mutex_lock(&lock);memset(&view,0,sizeof view);
+    // A guest replay still owns its native battle; keep it so the native side sees the lost link.
+    if(mirror.available && !mirror.host){if(!mirror.ended)mirror_abort(COOP_MIRROR_LINK_LOST,false);abort_unsent=false;}
+    else clear_mirror();
+    chunks=0;accepted=pending=have_party=false;first=count=0;
     pthread_mutex_unlock(&lock);
 }
 void coop_battle_link_tick(void){
     pthread_mutex_lock(&lock);
     if((view.phase==COOP_LINK_OFFER || view.phase==COOP_LINK_PREPARING) && plat_now_ns()>=view.deadline_ns){
-        uint8_t p[10]={6};p64(p+1,view.battle);enqueue(p,sizeof p);
+        uint8_t p[10]={6};p64(p+1,view.battle);p[9]=COOP_END_EXPIRED;enqueue(p,sizeof p);
         memset(&view,0,sizeof view);chunks=0;accepted=pending=false;
     }
     pthread_mutex_unlock(&lock);
@@ -58,7 +72,8 @@ bool coop_battle_link_local_lead(uint8_t lead[COOP_PB7_BYTES]){
 void coop_battle_link_view(CoopBattleLinkView *out){pthread_mutex_lock(&lock);*out=view;out->party_ready=have_party;pthread_mutex_unlock(&lock);}
 bool coop_battle_link_pop(uint8_t body[255],size_t *n){
     pthread_mutex_lock(&lock);bool ok=count>0;
-    if(ok){*n=queue[first].size;memcpy(body,queue[first].data,*n);first=(first+1)%16;count--;}
+    if(abort_unsent){uint8_t p[10]={10};p64(p+1,mirror.battle);p[9]=mirror.reason;memcpy(body,p,sizeof p);*n=sizeof p;abort_unsent=false;ok=true;}
+    else if(ok){*n=queue[first].size;memcpy(body,queue[first].data,*n);first=(first+1)%16;count--;}
     pthread_mutex_unlock(&lock);return ok;
 }
 bool coop_battle_link_offer(uint64_t id,unsigned timeout,unsigned trainer){
@@ -113,7 +128,13 @@ void coop_battle_link_complete(bool ai){
     pending=false;pthread_mutex_unlock(&lock);
 }
 void coop_battle_link_end(void){
-    pthread_mutex_lock(&lock);if(view.phase!=COOP_LINK_NONE){uint8_t p[10]={6};p64(p+1,view.battle);enqueue(p,sizeof p);}
+    pthread_mutex_lock(&lock);
+    if(view.phase!=COOP_LINK_NONE){
+        uint8_t p[18]={6};p64(p+1,view.battle);p[9]=view.host && view.phase==COOP_LINK_ACTIVE?COOP_END_FINISHED:COOP_END_CANCELLED;
+        // Final per-actor counts let the guest prove it received every command.
+        if(view.host && mirror.available){p32(p+10,mirror_published[0]);p32(p+14,mirror_published[1]);enqueue(p,18);}
+        else enqueue(p,10);
+    }
     memset(&view,0,sizeof view);clear_mirror();pending=accepted=false;chunks=0;pthread_mutex_unlock(&lock);
 }
 bool coop_battle_link_mirror_enabled(void){
@@ -154,7 +175,7 @@ bool coop_battle_link_mirror_commit(const CoopBattleMove *m,bool ai){
         m->battle==mirror.battle && mirror_published[actor]!=UINT32_MAX && m->sequence==mirror_published[actor]+1;
     if(ok){uint8_t p[24]={9};p64(p+1,m->battle);p32(p+9,m->turn);p32(p+13,m->sequence);
         p[17]=m->trainer;p[18]=m->party_index;p[19]=m->move_index;p16(p+20,m->move);p[22]=m->target;p[23]=ai;
-        ok=enqueue(p,sizeof p);if(ok)mirror_published[actor]=m->sequence;else mirror.aborted=true;
+        ok=enqueue(p,sizeof p);if(ok)mirror_published[actor]=m->sequence;else mirror_abort(COOP_MIRROR_OVERFLOW,true);
     }
     pthread_mutex_unlock(&lock);return ok;
 }
@@ -164,11 +185,28 @@ bool coop_battle_link_mirror_setup(CoopBattleMirrorSetup *out){
 bool coop_battle_link_mirror_take(uint64_t battle,unsigned trainer,uint32_t sequence,CoopBattleCanonical *out){
     if(!out || !battle || (trainer!=0 && trainer!=2))return false;
     pthread_mutex_lock(&lock);bool ok=false;
-    for(unsigned i=0;i<32;i++)if(mirror_commands[i].used && mirror_commands[i].command.move.battle==battle && mirror_commands[i].command.move.trainer==trainer &&
+    if(!mirror.aborted)for(unsigned i=0;i<32;i++)if(mirror_commands[i].used && mirror_commands[i].command.move.battle==battle && mirror_commands[i].command.move.trainer==trainer &&
         mirror_commands[i].command.move.sequence==sequence){*out=mirror_commands[i].command;mirror_commands[i].used=false;ok=true;break;}
     pthread_mutex_unlock(&lock);return ok;
 }
 void coop_battle_link_mirror_clear(void){pthread_mutex_lock(&lock);clear_mirror();pthread_mutex_unlock(&lock);}
+// side 0 is this guest's replay, 1 the host's authoritative value.
+static void digest_record(unsigned side,uint32_t round,uint64_t value){
+    unsigned i=round%16;
+    if(digests[i].round!=round){memset(&digests[i],0,sizeof digests[i]);digests[i].round=round;}
+    digests[i].value[side]=value;digests[i].have|=1u<<side;
+    if(digests[i].have==3 && digests[i].value[0]!=digests[i].value[1])mirror_abort(COOP_MIRROR_DIGEST,true);
+}
+bool coop_battle_link_mirror_digest(uint32_t round,uint64_t digest){
+    if(!coop_battle_link_mirror_enabled() || !round)return false;
+    pthread_mutex_lock(&lock);bool ok=mirror.available && !mirror.aborted;
+    if(ok && mirror.host){
+        ok=view.phase==COOP_LINK_ACTIVE && round>digest_sent;
+        if(ok){uint8_t p[21]={11};p64(p+1,mirror.battle);p32(p+9,round);p64(p+13,digest);ok=enqueue(p,sizeof p);if(ok)digest_sent=round;}
+    } else if(ok){digest_record(0,round,digest);ok=!mirror.aborted;}
+    pthread_mutex_unlock(&lock);return ok;
+}
+void coop_battle_link_latency(unsigned rtt_ms){pthread_mutex_lock(&lock);link_rtt_ms=rtt_ms>60000?60000:rtt_ms;pthread_mutex_unlock(&lock);}
 // Called under the link mutex, only for an accepted current battle.
 static void mirror_message(const uint8_t *p,size_t n,uint64_t id){
     if(view.host || view.phase!=COOP_LINK_ACTIVE || !accepted)return;
@@ -178,7 +216,7 @@ static void mirror_message(const uint8_t *p,size_t n,uint64_t id){
         if(mirror.battle!=id || mirror.host_party.count!=p[9] || (mirror_chunks&(1u<<p[10])))return;
         memcpy((uint8_t *)mirror.host_party.pokemon+130*p[10],p+11,130);mirror_chunks|=1u<<p[10];
         if(mirror_chunks==((1u<<(2*p[9]))-1)){
-            if(!coop_party_valid(&mirror.host_party)){mirror.aborted=true;return;}
+            if(!coop_party_valid(&mirror.host_party)){mirror_abort(COOP_MIRROR_BAD_PARTY,true);return;}
             mirror_party_sent=true;mirror.available=mirror_seed_ready;
         }
     } else if(p[0]==8 && n==17 && !mirror_seed_ready){
@@ -191,36 +229,43 @@ static void mirror_message(const uint8_t *p,size_t n,uint64_t id){
         if(p[23]>1 || !canonical_valid(&command.move,command.native_ai))return;
         unsigned actor=command.move.trainer/2;
         if(command.move.sequence<=mirror_received[actor])return;
-        if(mirror_received[actor]==UINT32_MAX || command.move.sequence!=mirror_received[actor]+1){mirror.aborted=true;return;}
+        if(mirror_received[actor]==UINT32_MAX || command.move.sequence!=mirror_received[actor]+1){mirror_abort(COOP_MIRROR_GAP,true);return;}
         for(unsigned i=0;i<32;i++)if(!mirror_commands[i].used){
             mirror_commands[i].used=true;mirror_commands[i].command=command;mirror_received[actor]=command.move.sequence;return;
         }
-        mirror.aborted=true;
-    }
+        mirror_abort(COOP_MIRROR_OVERFLOW,true);
+    } else if(p[0]==11 && n==21 && mirror.available && !mirror.aborted && u32(p+9))digest_record(1,u32(p+9),u64(p+13));
 }
 void coop_battle_link_message(const uint8_t *p,size_t n){
     if(!coop_battle_link_enabled() || n<9)return;
     uint64_t id=u64(p+1),now=plat_now_ns();if(!id)return;
     pthread_mutex_lock(&lock);
-    if(p[0]==0 && n==13 && view.phase==COOP_LINK_NONE && u16(p+9)>=1000 && u16(p+9)<=60000){
+    // A finished replay may still be draining; a new offer must not wipe it.
+    if(p[0]==0 && n==13 && view.phase==COOP_LINK_NONE && u16(p+9)>=1000 && u16(p+9)<=60000 && !(mirror.available && !mirror.host && !mirror.aborted)){
         clear_mirror();view=(CoopBattleLinkView){.phase=COOP_LINK_OFFER,.battle=id,.timeout_ms=u16(p+9),.trainer=u16(p+11),.deadline_ns=now+45000000000ull};
     } else if(id==view.battle && view.phase!=COOP_LINK_NONE){
         if(p[0]==1 && n==9 && view.host && view.phase==COOP_LINK_PREPARING)accepted=true;
         else if(p[0]==2 && n==140 && view.host && accepted && p[9]<2 && !(chunks&(1u<<p[9]))){memcpy(peer_lead+130*p[9],p+10,130);chunks|=1u<<p[9];}
         else if(p[0]==3 && n==52 && !view.host && accepted && u32(p+9)>view.turn && u32(p+13)>view.sequence && u16(p+17)>0 && u16(p+17)<=60000 && p[19]<6){
-            view.turn=u32(p+9);view.sequence=u32(p+13);view.deadline_ns=now+(uint64_t)u16(p+17)*1000000;
+            // The host's deadline started a one-way trip ago and the choice needs another to return.
+            unsigned ms=u16(p+17),margin=2*link_rtt_ms;if(margin>ms/4)margin=ms/4;
+            view.turn=u32(p+9);view.sequence=u32(p+13);view.deadline_ns=now+(uint64_t)(ms-margin)*1000000;
             view.choices.party_index=p[19];for(unsigned i=0;i<4;i++){view.choices.moves[i]=u16(p+20+2*i);view.choices.pp[i]=p[28+i];view.choices.targets[i]=u16(p+32+2*i);}
             for(unsigned i=0;i<2;i++){view.opponents[i]=u16(p+40+2*i);view.hp[i]=u16(p+44+4*i);view.max_hp[i]=u16(p+46+4*i);}
             view.waiting=true;view.submitted=false;view.outcome=0;
-        } else if(p[0]==4 && n==22 && view.host && view.waiting && !pending && u32(p+9)==view.turn && u32(p+13)==view.sequence && p[18]<4 && p[21]<16){
+        } else if(p[0]==4 && n==22 && view.host && view.waiting && !pending && !view.submitted && u32(p+9)==view.turn && u32(p+13)==view.sequence && p[18]<4 && p[21]<16){
             decision=(CoopBattleMove){.battle=id,.turn=u32(p+9),.sequence=u32(p+13),.trainer=2,.party_index=p[17],.move_index=p[18],.move=u16(p+19),.target=p[21]};
-            received_at=now;pending=true;
+            received_at=now;pending=view.submitted=true;
         } else if(p[0]==5 && n==18 && !view.host && u32(p+9)==view.turn && u32(p+13)==view.sequence && (p[17]==1 || p[17]==2)){
             view.waiting=false;view.submitted=false;view.outcome=p[17];view.toast_until_ns=now+3000000000ull;
-        } else if(p[0]==6 && n==10){
-            if(mirror.battle==id && mirror.available && !mirror.host)mirror.ended=true;
-            else clear_mirror();
+        } else if(p[0]==6 && (n==10 || n==18)){
+            if(mirror.battle==id && mirror.available && !mirror.host){
+                if(n==18 && p[9]==COOP_END_FINISHED && u32(p+10)==mirror_received[0] && u32(p+14)==mirror_received[1])mirror.ended=!mirror.aborted;
+                else mirror_abort(COOP_MIRROR_INCOMPLETE_END,false);
+            } else clear_mirror();
             memset(&view,0,sizeof view);accepted=pending=false;chunks=0;
+        } else if(p[0]==10 && n==10 && mirror.battle==id){
+            if(!mirror.aborted){mirror.aborted=true;mirror.reason=p[9];}
         } else if(coop_battle_link_mirror_enabled())mirror_message(p,n,id);
     }
     pthread_mutex_unlock(&lock);

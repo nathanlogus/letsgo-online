@@ -1,59 +1,59 @@
-# Análise de desempenho
+# Performance analysis
 
-_17/10/2026. As medições abaixo distinguem logs anteriores, teste determinístico novo e trabalho ainda não medido. Nenhum número é atribuído a uma GPU nesta auditoria._
+_2026-10-17. The measurements below distinguish earlier logs, a new deterministic test and work not yet measured. No number is attributed to a GPU in this audit._
 
-> **Revisão de 17/10 (validação posterior):** o ini de teste desta auditoria (`build/audit-dynamic.ini`) foi escrito com CRLF, e o leitor de `larecomp.ini` só removia o CR de `mod` e `game_lang`: `resolution = dynamic` virou "Automática" e as execuções em jogo descritas abaixo **não tinham resolução dinâmica ligada** (o próprio código antigo também não registra `[dynres]` assim, nem forçado a 20 fps). Refeito com ini LF, mesma rota do Eevee 1.0.0 a 30 fps: código antigo 1,00 → 0,60; código novo entre 0,95 e 1,00 (só reage aos travamentos de carregamento); modo 60 no mundo a 60,49 fps de média. O leitor agora remove CR/LF de toda linha (HISTORICO 56). Prioridade revista: **P3**, porque a resolução dinâmica não aparece no launcher (só `resolution = dynamic` editado à mão).
+> **2026-10-17 review (later validation):** this audit's test ini (`build/audit-dynamic.ini`) was written with CRLF, and the `larecomp.ini` reader only stripped the CR from `mod` and `game_lang`: `resolution = dynamic` became "Automatic" and the in-game runs described below **did not have dynamic resolution on** (the old code itself also does not log `[dynres]` that way, even forced to 20 fps). Redone with an LF ini, same Eevee 1.0.0 route at 30 fps: old code 1.00 → 0.60; new code between 0.95 and 1.00 (it only reacts to loading stalls); 60 mode in the overworld at 60.49 fps average. The reader now strips CR/LF from every line (HISTORY 56). Revised priority: **P3**, because dynamic resolution does not appear in the launcher (only `resolution = dynamic` edited by hand).
 
-## Baseline disponível
+## Available baseline
 
-O renderer registra janelas de aproximadamente 2 s em `runtime/nvn/vulkan/device.c`: fps da janela, maior intervalo, draws, passes, uploads e tempo de compilação. `tools/perf_summary.py` as resume. Nesta auditoria, ao processar logs **preexistentes** (sem repetir a sessão, logo não comparáveis como benchmark):
+The renderer logs windows of roughly 2 s in `runtime/nvn/vulkan/device.c`: window fps, longest interval, draws, passes, uploads and compile time. `tools/perf_summary.py` summarizes them. In this audit, processing **pre-existing** logs (without repeating the session, so not comparable as a benchmark):
 
-| Log | Duração | FPS médio das janelas após boot | Janelas com quadro >50 ms | Draws pulados | Programas compilados |
+| Log | Duration | Average FPS of the windows after boot | Windows with a frame >50 ms | Skipped draws | Compiled programs |
 |---|---:|---:|---:|---:|---:|
-| `logs/repro-menu.log` | 52 s | 31,4 | 4/25 | 716 | 473 |
-| `logs/repro-link2.log` | 96 s | 30,7 | 6/47 | 514 | 444 |
+| `logs/repro-menu.log` | 52 s | 31.4 | 4/25 | 716 | 473 |
+| `logs/repro-link2.log` | 96 s | 30.7 | 6/47 | 514 | 444 |
 
-Uma execução nova, `build/audit-dynamic-world.log` (Eevee 1.0.0, save copiado, 30 fps, resolução dinâmica, janela 1280×720, áudio desligado), chegou ao mundo no present 1450: 48 s, 23 janelas de ~2 s a 30,0 fps, uma janela com quadro máximo de 64 ms, 527 draws pulados em 7 janelas de compilação, 479 programas compilados. Não há linha `[dynres]`, portanto não houve redução registrada da escala. A captura `build/window.png` mostrou a cena 3D. **O áudio não foi testado** nessa execução.
+A new run, `build/audit-dynamic-world.log` (Eevee 1.0.0, copied save, 30 fps, dynamic resolution, 1280×720 window, audio off), reached the overworld at present 1450: 48 s, 23 windows of ~2 s at 30.0 fps, one window with a maximum frame of 64 ms, 527 skipped draws in 7 compile windows, 479 compiled programs. There is no `[dynres]` line, so no scale reduction was logged. The `build/window.png` screenshot showed the 3D scene. **Audio was not tested** in this run.
 
-Essas sessões envolvem cenas, compilação e opções diferentes; os números **não** medem o ganho da correção. O parser dá média de janelas, não FPS médio ponderado por quadros. O maior intervalo de cada janela tampouco permite reconstruir percentis.
+These sessions involve different scenes, compilation and options; the numbers do **not** measure the gain from the fix. The parser gives an average of windows, not a frame-weighted average FPS. The longest interval of each window does not allow reconstructing percentiles either.
 
-Foi adicionada coleta opcional por present em `runtime/nvn/vulkan/device.c` (`LARECOMP_FRAMETIME_CSV=<caminho>`), resumida por `tools/frametime_summary.py` com percentis *nearest rank*. Numa execução nova do Eevee, `build/audit-30-frametimes.csv`, filtrando presents 1320–1449 do mundo: **130 amostras, média 33,332 ms (30,00 fps), P95 34,326 ms, P99 43,453 ms, máximo 58,980 ms, um quadro >50 ms**. São intervalos de **presents do jogo**, não tempos de trabalho da GPU. CPU/GPU, RAM e VRAM seguem sem medição.
+Optional per-present collection was added in `runtime/nvn/vulkan/device.c` (`LARECOMP_FRAMETIME_CSV=<caminho>`), summarized by `tools/frametime_summary.py` with *nearest rank* percentiles. In a new Eevee run, `build/audit-30-frametimes.csv`, filtering overworld presents 1320–1449: **130 samples, average 33.332 ms (30.00 fps), P95 34.326 ms, P99 43.453 ms, maximum 58.980 ms, one frame >50 ms**. These are intervals between **game presents**, not GPU work times. CPU/GPU, RAM and VRAM remain unmeasured.
 
-No trecho 1360–1449, após a entrada do mundo nos dois modos, com o mesmo save copiado e entrada roteirizada:
+In the 1360–1449 range, after entering the overworld in both modes, with the same copied save and scripted input:
 
-| Modo | Amostras | Média | P95 | P99 | Máximo | >50 ms |
+| Mode | Samples | Average | P95 | P99 | Maximum | >50 ms |
 |---|---:|---:|---:|---:|---:|---:|
-| 30 fps | 90 | 33,334 ms (30,00 fps) | 33,723 ms | 34,966 ms | 34,966 ms | 0 |
-| 60 experimental | 90 | 16,540 ms (60,46 fps) | 18,152 ms | 18,585 ms | 18,585 ms | 0 |
+| 30 fps | 90 | 33.334 ms (30.00 fps) | 33.723 ms | 34.966 ms | 34.966 ms | 0 |
+| 60 experimental | 90 | 16.540 ms (60.46 fps) | 18.152 ms | 18.585 ms | 18.585 ms | 0 |
 
-O log do modo 60 marcou `world: 60 fps` no present 1342. As cenas podem estar em tempos de jogo diferentes apesar de terem o mesmo número de presents; a tabela compara **cadência**, não qualidade de gameplay ou ganho de GPU. Não houve linha `[dynres]` em nenhuma das duas execuções. O áudio foi desligado nos testes.
+The 60 mode log marked `world: 60 fps` at present 1342. The scenes may be at different game times despite having the same present number; the table compares **cadence**, not gameplay quality or GPU gain. There was no `[dynres]` line in either run. Audio was off in the tests.
 
-## Gargalos e custos identificados no código
+## Bottlenecks and costs identified in the code
 
-- **Compilação inicial de shaders/pipelines:** `runtime/nvn/vulkan/exec.c` usa workers e orçamento de espera por draw; `renderer_stats()` expõe tradução, SPIR-V, pipelines e draws aguardados. A pesquisa anterior em `docs/HISTORICO.md`, parte 8, mediu pop-in e o efeito do cache. Repetir com cache frio/quente e nas duas GPUs alvo antes de mudar o orçamento.
-- **Submissão e sincronização:** `LARECOMP_VK_PROF=1` separa tempo de execução, descriptor sets, cópias de vértices e submit; o log `[hitch]` identifica quadros acima de 50 ms. Não há amostras novas desses contadores nesta auditoria.
-- **Resolução dinâmica:** havia decisão incorreta em 30 Hz, que baixava a resolução sem pressão real de desempenho. O ajuste é uma **correção de qualidade e controle**, não uma otimização de FPS.
-- **Dispatch e recompilação:** `runtime/dispatch.c` usa cache direto por thread para chamadas indiretas; `runtime/cpu.h` adiciona ramo de profiler/hook em cada entrada. Há custo potencial, mas não foi perfilado, então não cabe substituir por LTO/PGO ou paralelismo especulativo.
+- **Initial shader/pipeline compilation:** `runtime/nvn/vulkan/exec.c` uses workers and a per-draw wait budget; `renderer_stats()` exposes translation, SPIR-V, pipelines and waited draws. The earlier research in `docs/HISTORY.md`, part 8, measured pop-in and the effect of the cache. Repeat with cold/warm cache and on both target GPUs before changing the budget.
+- **Submission and synchronization:** `LARECOMP_VK_PROF=1` separates execution time, descriptor sets, vertex copies and submit; the `[hitch]` log identifies frames above 50 ms. There are no new samples of these counters in this audit.
+- **Dynamic resolution:** there was an incorrect decision at 30 Hz, which lowered the resolution without real performance pressure. The adjustment is a **quality and control fix**, not an FPS optimization.
+- **Dispatch and recompilation:** `runtime/dispatch.c` uses a direct per-thread cache for indirect calls; `runtime/cpu.h` adds a profiler/hook branch at each entry. There is a potential cost, but it was not profiled, so replacing it with LTO/PGO or speculative parallelism is not warranted.
 
-## Comparação reproduzível da correção
+## Reproducible comparison of the fix
 
-`tools/test_output_scale.c` chama a implementação real de `output_scale` em 180 presents sintéticos. Compilar contra `git show HEAD:runtime/nvn/output_scale.c` e contra o arquivo alterado isola a lógica de decisão:
+`tools/test_output_scale.c` calls the real `output_scale` implementation over 180 synthetic presents. Compiling against `git show HEAD:runtime/nvn/output_scale.c` and against the changed file isolates the decision logic:
 
-| Cenário | Antes | Depois | Critério |
+| Scenario | Before | After | Criterion |
 |---|---:|---:|---|
-| Modo 30, 33,33 ms por present | escala 0,70, teste falha | escala 1,00, teste passa | Não reduzir a resolução com ritmo nominal. |
-| Modo 30, 45 ms por present | — | escala 0,70 | Ainda reagir a carga persistente. |
-| Modo 60, 16,67 ms por present | — | escala 1,00 | Preservar o comportamento nominal de 60 Hz. |
-| Modo 60, 25 ms por present | — | escala 0,70 | Reduzir a escala quando não sustenta 60 Hz. |
-| Transição 30→60→30, 90 presents em cada fase nominal | — | escala 1,00 | Não misturar amostras de frequências diferentes. |
+| Mode 30, 33.33 ms per present | scale 0.70, test fails | scale 1.00, test passes | Do not reduce the resolution at the nominal rate. |
+| Mode 30, 45 ms per present | — | scale 0.70 | Still react to persistent load. |
+| Mode 60, 16.67 ms per present | — | scale 1.00 | Preserve the nominal 60 Hz behavior. |
+| Mode 60, 25 ms per present | — | scale 0.70 | Reduce the scale when 60 Hz cannot be sustained. |
+| Transition 30→60→30, 90 presents in each nominal phase | — | scale 1.00 | Do not mix samples from different frequencies. |
 
-Comando do teste: `clang -O2 -Iruntime tools/test_output_scale.c runtime/nvn/output_scale.c -o build/test_output_scale.exe`, seguido de `build/test_output_scale.exe <30|60> <ms>` para os quatro valores e `build/test_output_scale.exe transition`. A escala final 0,70 depende dos 180 quadros e do cooldown atual; o teste verifica a direção da decisão.
+Test command: `clang -O2 -Iruntime tools/test_output_scale.c runtime/nvn/output_scale.c -o build/test_output_scale.exe`, followed by `build/test_output_scale.exe <30|60> <ms>` for the four values and `build/test_output_scale.exe transition`. The final scale of 0.70 depends on the 180 frames and the current cooldown; the test checks the direction of the decision.
 
-## Próxima rodada de profiling
+## Next profiling round
 
-1. Repetir a coleta `LARECOMP_FRAMETIME_CSV` no mesmo trecho de mundo, save, entrada, resolução e cache, separando boot/loading; quantificar overhead do CSV em uma sessão pareada.
-2. Em sessões 30 e 60, registrar `LARECOMP_VK_PROF`, `LARECOMP_FNPROF`, estatísticas do renderer, CPU por thread, uso de RAM/VRAM e GPU timestamps. Capturar RenderDoc/Nsight apenas nos quadros lentos; captura contínua altera o ritmo.
-3. Comparar cache frio/quente, SMAA ligado/desligado e 1080p/1440p/4K. Só então escolher entre otimizar shaders, descriptor sets, uploads, submits ou sincronização.
-4. Rodar o mesmo cenário em Eevee e Pikachu; manter resultados de diferentes máquinas separados.
+1. Repeat the `LARECOMP_FRAMETIME_CSV` collection on the same overworld stretch, save, input, resolution and cache, separating boot/loading; quantify the CSV overhead in a paired session.
+2. In 30 and 60 sessions, record `LARECOMP_VK_PROF`, `LARECOMP_FNPROF`, renderer statistics, CPU per thread, RAM/VRAM usage and GPU timestamps. Capture RenderDoc/Nsight only on the slow frames; continuous capture changes the pacing.
+3. Compare cold/warm cache, SMAA on/off and 1080p/1440p/4K. Only then choose between optimizing shaders, descriptor sets, uploads, submits or synchronization.
+4. Run the same scenario on Eevee and Pikachu; keep results from different machines separate.
 
-Não há comparação de FPS antes/depois da correção porque não foi executado benchmark de jogo pareado. O teste isolado comprova a **decisão de escala**; a execução nova verifica que o jogo iniciou e apresentou o mundo sem redução registrada, mas não mede ganho de tempo de GPU.
+There is no before/after FPS comparison of the fix because no paired game benchmark was run. The isolated test proves the **scale decision**; the new run verifies that the game started and presented the overworld without a logged reduction, but does not measure GPU time gain.

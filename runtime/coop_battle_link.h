@@ -34,6 +34,15 @@ void coop_battle_link_end(void);
 // Only the connected worker consumes the queue or supplies received payloads.
 bool coop_battle_link_pop(uint8_t body[255], size_t *size);
 void coop_battle_link_message(const uint8_t *body, size_t size);
+// Measured relay round trip; the guest's prompt closes early by this margin.
+void coop_battle_link_latency(unsigned rtt_ms);
+
+// B6 end reasons. Only a host FINISHED end carrying its final command counts
+// lets a guest replay drain; every other end aborts it.
+enum { COOP_END_FINISHED, COOP_END_CANCELLED, COOP_END_DISCONNECTED, COOP_END_EXPIRED };
+// B10 desync reasons, also CoopBattleMirrorSetup.reason.
+enum { COOP_MIRROR_OK, COOP_MIRROR_GAP, COOP_MIRROR_BAD_PARTY, COOP_MIRROR_OVERFLOW, COOP_MIRROR_DIGEST,
+       COOP_MIRROR_INCOMPLETE_END, COOP_MIRROR_LINK_LOST };
 
 // Experimental native battle presentation. All fields are copied values; no
 // native pointers or complete saves cross this channel.
@@ -41,6 +50,7 @@ typedef struct {
     uint64_t battle,seed;
     unsigned trainer;
     bool host,available,ended,aborted;
+    uint8_t reason; // COOP_MIRROR_* once aborted
     CoopParty host_party;
 } CoopBattleMirrorSetup;
 typedef struct {CoopBattleMove move;bool native_ai;} CoopBattleCanonical;
@@ -49,5 +59,8 @@ bool coop_battle_link_mirror_party(const CoopParty *);
 bool coop_battle_link_mirror_seed(uint64_t seed);
 bool coop_battle_link_mirror_commit(const CoopBattleMove *,bool native_ai);
 bool coop_battle_link_mirror_setup(CoopBattleMirrorSetup *);
+// Both sides report the same per-round state digest. A mismatch aborts the
+// replay on both clients (false on the guest). Aborted replays stop yielding commands.
+bool coop_battle_link_mirror_digest(uint32_t round,uint64_t digest);
 bool coop_battle_link_mirror_take(uint64_t battle,unsigned trainer,uint32_t sequence,CoopBattleCanonical *);
 void coop_battle_link_mirror_clear(void);

@@ -42,6 +42,7 @@ typedef struct {
     float saturation;
     bool daynight;        // day/night colour grade from the clock (runtime/daynight.c; default off)
     float daynight_speed; // 1 = real time, N = N times faster
+    int daynight_hour;    // -1 = the clock (default), 0..23 = that hour, fixed (F12 menu, Image & sound)
     int ssao_level;       // FX_*: SSAO quality (default off); ssao and its parameters follow it
     int gi_level;         // FX_*: GI quality (default off); gi and its parameters follow it
     bool fx_custom;       // the SSAO / contact shadow / GI parameters below set by hand (F12 Advanced, saved): the levels

@@ -101,20 +101,23 @@ class Room:
     mirror_chunks: int = 0
     mirror_seed: bool = False
     mirror_sequences: list[int] = field(default_factory=lambda: [0, 0])
+    mirror_aborted: bool = False
+    mirror_digest: int = 0
 
 
 class Relay:
-    def clear_battle(self, room: Room) -> None:
+    # B6 reasons: 0 finished, 1 cancelled, 2 peer disconnected, 3 offer expired.
+    def clear_battle(self, room: Room, reason: int = 2, body: bytes = b"") -> None:
         if room.battle_id:
-            body=b"\x06"+struct.pack('<QB',room.battle_id,0)
+            body=body or b"\x06"+struct.pack('<QB',room.battle_id,reason)
             for p in room.peers:p.send(b"B",body)
         room.battle_id=room.battle_phase=room.battle_turn=room.battle_sequence=room.battle_chunks=0
         room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b""
-        room.mirror_count=room.mirror_chunks=0;room.mirror_seed=False;room.mirror_sequences=[0,0]
+        room.mirror_count=room.mirror_chunks=room.mirror_digest=0;room.mirror_seed=room.mirror_aborted=False;room.mirror_sequences=[0,0]
 
     async def expire_battle_offer(self, room: Room, battle: int) -> None:
         await asyncio.sleep(45)
-        if room.battle_id==battle and room.battle_phase==1:self.clear_battle(room)
+        if room.battle_id==battle and room.battle_phase==1:self.clear_battle(room,3)
 
     def battle_action(self, peer: Peer, body: bytes) -> None:
         if len(body)<9:return
@@ -149,8 +152,17 @@ class Relay:
         elif op==5 and len(body)==18 and host and room.battle_phase==2:
             if struct.unpack_from('<II',body,9)!=(room.battle_turn,room.battle_sequence) or body[17] not in (1,2):return
             room.battle_deadline=0;room.battle_sent=True
-        elif op==6 and len(body)==10:
-            self.clear_battle(room);return
+        elif op==6 and (len(body)==10 and body[9]<=3 or len(body)==18 and host and body[9]==0):
+            # The host's final command counts reach the guest unchanged.
+            self.clear_battle(room,body=body);return
+        elif op==10 and len(body)==10 and body[9] and room.battle_phase==2 and room.mirror_count:
+            if room.mirror_aborted:return
+            room.mirror_aborted=True
+        elif op==11 and len(body)==21 and host and room.battle_phase==2 and room.mirror_seed and not room.mirror_aborted:
+            digest_round=struct.unpack_from('<I',body,9)[0]
+            if digest_round<=room.mirror_digest:return
+            room.mirror_digest=digest_round
+        elif room.mirror_aborted and op in (7,8,9):return
         elif op==7 and len(body)==141 and host and room.battle_phase==2 and room.battle_chunks==3:
             count,index=body[9:11]
             if not 1<=count<=6 or index>=2*count or room.mirror_seed:return
@@ -418,6 +430,7 @@ class Relay:
                 elif op == b"D" and len(body) == 1 and peer.identity == room.owner and body[0] != slot:
                     target = next((p for p in room.peers if p.slot == body[0]), None)
                     if target:
+                        if room.battle_id:self.clear_battle(room)
                         if room.team_state:self.clear_team(room,6)
                         room.removed.add(target.identity)
                         await self.reject(target.writer, "Removed by the host")

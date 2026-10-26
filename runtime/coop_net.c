@@ -355,6 +355,7 @@ static void process_message(const uint8_t *p, size_t n) {
         pthread_mutex_lock(&g_lock);
         g_stats.relay_rtt_ms = (float)elapsed;
         pthread_mutex_unlock(&g_lock);
+        coop_battle_link_latency(elapsed);
         return;
     }
     if (p[0] == 'A' && n >= 3) {

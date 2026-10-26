@@ -1,4 +1,4 @@
-// The battle menu with a fifth button, CATCH (wild battles: runtime/hle/wildbattle.c, docs/MODO-BATALHA.md stage 6),
+// The battle menu with a fifth button, CATCH (wild battles: runtime/hle/wildbattle.c, docs/BATTLE-MODE.md stage 6),
 // made at run time from the player's own game files - tools/catch_button.py is the same in Python (the reference, and
 // what the art was checked with). runtime/services/fs.c serves the results while one of our wild battles runs and the
 // game's own files otherwise (trainer and two-player battles keep their four buttons).
