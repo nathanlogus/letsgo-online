@@ -26,6 +26,8 @@ bool input_remote_avatar_refresh(void);
 #define COOP_MODE 0x7000142720ull
 #define PARTY_SELECTION 0x70002462e0ull
 #define P2_EJECT 0x700026cf40ull
+#define RECORD_ADD 0x70001cad40ull // x0 = record block, w1 = record id
+#define RECORD_P2_JOIN 0x1e9      // save CaptureRecord +0x7A4; added by the controller-mode update (0x7000142840)
 
 static _Atomic uint64_t g_p2;
 static CoopAppearance g_model_appearance;
@@ -227,6 +229,14 @@ static int social_eject_hook(Cpu *c, uint64_t addr) {
     return coop_net_enabled() && input_remote_avatar_active();
 }
 
+static int social_record_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    // The social P2 is the other player's trainer, not a local 2-player session: keep this save's record unchanged.
+    if (!coop_net_enabled() || (uint32_t)c->x[1] != RECORD_P2_JOIN) return 0;
+    LOG("[coop-social] skipped the native 2-player join record\n");
+    c->x[0] = 0; return 1;
+}
+
 void coop_actor_configure(void) {
     atomic_store(&g_p2, 0);
     g_had_remote = false; g_missing_since = 0;
@@ -239,4 +249,5 @@ void coop_actor_configure(void) {
     rt_register_fnhook(PARTY_SELECTION, social_party_hook);
     rt_register_fnhook(COOP_MODE, social_mode_hook);
     rt_register_fnhook(P2_EJECT, social_eject_hook);
+    rt_register_fnhook(RECORD_ADD, social_record_hook);
 }

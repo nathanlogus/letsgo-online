@@ -322,7 +322,9 @@ static uint64_t journal_turn_state(Cpu *cpu,uint64_t controller){
                     call.x[0]=mon;call.x[1]=i;rt_call_original(&call,0x70009e4950ull);moves[i]=(uint16_t)call.x[0];
                     call.x[0]=mon;call.x[1]=i;rt_call_original(&call,0x70009e4a80ull);pp[i]=(uint8_t)call.x[0];
                 }
-                for(unsigned o=0x78;o<0x2e0;o+=8){uint64_t v=*(uint64_t *)(uintptr_t)(mon+o);if(!guest(v,1))hash_field(&raw,v,8);
+                // (+0x218 skipped: the same seeded battle shows bit 3 there or not from run to run on one engine,
+                // likely a controller running in parallel with this snapshot; it aborted otherwise identical replays.)
+                for(unsigned o=0x78;o<0x2e0;o+=8){uint64_t v=*(uint64_t *)(uintptr_t)(mon+o);if(!guest(v,1) && o!=0x218)hash_field(&raw,v,8);
                     if(dir && ENV("LARECOMP_COOP_TURN_RAW") && !guest(v,1)){char rp[1400];snprintf(rp,sizeof rp,"%s/turn-raw.txt",dir);FILE *r=fopen(rp,"a");
                         if(r){fprintf(r,"%u %u %03x %016llx\n",ally_round,trainer,o,(unsigned long long)v);fclose(r);}}}
             }
@@ -546,6 +548,9 @@ static bool native_menu(Cpu *c,uint64_t controller){
     uint64_t out=ptr(controller+0x80);uint32_t packet=guest(out,4)?*(uint32_t *)(uintptr_t)out:0;
     unsigned move=(packet>>8)&0xffff,target=(packet>>4)&15,index=0;
     while(index<4 && v.choices.moves[index]!=move)index++;
+    // The menu's cursor may rest on a fainted foe (the engine would redirect): with one foe left, that one.
+    unsigned mask=index<4?v.choices.targets[index]:0;
+    if(mask && !(mask&(1u<<target)) && !(mask&(mask-1)))for(target=0;!(mask&(1u<<target));target++){}
     bool sent=!menu_forced && (packet&15)==1 && coop_battle_link_choose(index,target);
     lend_ui(c,controller,0);
     memcpy(ctl+0x1e0,menu_saved,sizeof menu_saved);memcpy(ctl+0x288,menu_saved_commands,sizeof menu_saved_commands);
