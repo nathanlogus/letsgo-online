@@ -52,6 +52,8 @@ typedef struct {
     // vertex: TAA's sub-pixel jitter (exec.c taa_*): clip xy += jit.xy * w, from a uniform at binding 20, after the
     // positions the velocity is computed from (the velocity carries no jitter)
     uint8_t jitter;
+    uint8_t glowck;   // fragment: day/night - the glass pixels of a lit texture's draw (pale cyan) are multiplied by gck.rgb, a uniform at binding 21
+    uint8_t zoom;     // LARECOMP_ZOOM: the main scene's vertex shaders scale gl_Position.xy by zoom / 100 (0: off)
 } ShaderKey;
 
 typedef struct {

@@ -75,6 +75,16 @@ static void push(const QEvent &e) {
     pthread_mutex_unlock(&q_lock);
 }
 
+// SDL events are handled on the window thread. Preserve independent physical
+// d-pad and synthesized stick directions when either source is released.
+static bool nav_pad[4],nav_stick[4];
+static const ImGuiKey nav_direction_keys[4]={ImGuiKey_GamepadDpadLeft,ImGuiKey_GamepadDpadRight,ImGuiKey_GamepadDpadUp,ImGuiKey_GamepadDpadDown};
+static int nav_direction(ImGuiKey key){for(int i=0;i<4;i++)if(key==nav_direction_keys[i])return i;return -1;}
+static void nav_stick_direction(int direction,bool down){
+    nav_stick[direction]=down;QEvent q={};q.kind=QEvent::KEY;q.key=nav_direction_keys[direction];
+    q.down=nav_stick[direction] || nav_pad[direction];push(q);
+}
+
 bool menu_is_open(void) { return g_open.load(); }
 static void set_open(bool open) {
     if (open == g_open.load()) return;
@@ -161,7 +171,7 @@ extern "C" void menu_copy_text(const char *text) {
     g_copy_pending = true; pthread_mutex_unlock(&q_lock);
 }
 static int g_kbd_max = 8;
-static bool capturing() { return emote_wheel_open() || g_open.load() || g_cfg.load() || g_friends.load() || g_kbd.load() == 1; }
+static bool capturing() { return coop_battle_ui_captures() || emote_wheel_open() || g_open.load() || g_cfg.load() || g_friends.load() || g_kbd.load() == 1; }
 // The game gets no input while this is true (runtime/hle/input.c): the question, the settings or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
 // Friends is a social overlay over a still-running overworld. Keep the trainer
@@ -192,6 +202,12 @@ bool menu_handle_event(const SDL_Event *e) {
         g_kbd = 2;
         return true;
     }
+    // Battle prompts own Escape too; it must not open the quit dialog while
+    // declining an invitation or returning from target selection.
+    if(coop_battle_ui_captures() && e->type==SDL_EVENT_KEY_DOWN && e->key.scancode==SDL_SCANCODE_ESCAPE){
+        QEvent q={};q.kind=QEvent::KEY;q.key=ImGuiKey_Escape;q.down=true;push(q);
+        q.down=false;push(q);return true;
+    }
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN:
         if (!typing && !e->key.repeat && (e->key.scancode == SDL_SCANCODE_F8 ||
@@ -217,8 +233,11 @@ bool menu_handle_event(const SDL_Event *e) {
         }
         /* fallthrough */
     case SDL_EVENT_KEY_UP: {
-        if (!capturing()) return false;
+        bool captured=capturing();
         bool down = e->type == SDL_EVENT_KEY_DOWN;
+        // A confirm can hide its overlay on key-down. Still deliver the later
+        // release to ImGui, or the next prompt sees a permanently held key.
+        if (!captured && down) return false;
         // This overlay feeds ImGui directly rather than through the launcher's
         // SDL backend. Modifier events are required for paste, select-all, etc.
         const ImGuiKey mods[] = {ImGuiMod_Ctrl,ImGuiMod_Shift,ImGuiMod_Alt,ImGuiMod_Super};
@@ -232,7 +251,7 @@ bool menu_handle_event(const SDL_Event *e) {
         }
         ImGuiKey k = key_from_scancode(e->key.scancode);
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
-        return true;
+        return captured;
     }
     case SDL_EVENT_TEXT_INPUT:
         if (!capturing()) return false;
@@ -247,28 +266,37 @@ bool menu_handle_event(const SDL_Event *e) {
             set_open(!g_open.load());
             return true;
         }
-        if (!capturing()) return false;
+        bool captured=capturing();
+        if (!captured && down) return false;
         ImGuiKey k = key_from_pad(e->gbutton.button);
+        int direction=nav_direction(k);
+        if(direction>=0){nav_pad[direction]=down;down=down || nav_stick[direction];}
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
-        return true;
+        return captured;
     }
     case SDL_EVENT_GAMEPAD_AXIS_MOTION: {
-        if (!capturing()) return false;
-        float v = e->gaxis.value / 32767.0f;
+        bool captured=capturing();
+        // Neutralize navigation on releases after an overlay has closed too.
+        float v = captured ? e->gaxis.value / 32767.0f : 0;
+        bool battle_nav=captured && coop_battle_ui_captures();
         QEvent q = {};
         q.kind = QEvent::ANALOG;
         switch (e->gaxis.axis) {
         case SDL_GAMEPAD_AXIS_LEFTX:
+            nav_stick_direction(0,battle_nav && v<-.3f);nav_stick_direction(1,battle_nav && v>.3f);
+            if(battle_nav)v=0; // ImGui otherwise uses the stick for scrolling.
             q.key = ImGuiKey_GamepadLStickLeft; q.value = v < -0.3f ? -v : 0; push(q);
             q.key = ImGuiKey_GamepadLStickRight; q.value = v > 0.3f ? v : 0; push(q);
             break;
         case SDL_GAMEPAD_AXIS_LEFTY:
+            nav_stick_direction(2,battle_nav && v<-.3f);nav_stick_direction(3,battle_nav && v>.3f);
+            if(battle_nav)v=0;
             q.key = ImGuiKey_GamepadLStickUp; q.value = v < -0.3f ? -v : 0; push(q);
             q.key = ImGuiKey_GamepadLStickDown; q.value = v > 0.3f ? v : 0; push(q);
             break;
         default: break;
         }
-        return true;
+        return captured;
     }
     case SDL_EVENT_MOUSE_MOTION:
         if (!capturing()) return false;
@@ -720,13 +748,15 @@ static void draw_coop_plate(ImDrawList *dl, const CoopPlate &p, float scale) {
 
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), cfg = g_cfg.load(), kbd = g_kbd.load() == 1;
-    emote_wheel_available(fps60_social_overworld() && !open && !cfg && !kbd && !g_friends.load() && !coop_menu_visible());
+    emote_wheel_available(fps60_social_overworld() && !coop_battle_ui_captures() && !open && !cfg && !kbd && !g_friends.load() && !coop_menu_visible());
     float fx, fy;
     bool fdown, finger = !capturing() && input_finger_cursor(&fx, &fy, &fdown);
     CoopRemote peer = {};
     bool remote_peer = coop_net_enabled() && coop_net_remote(&peer);
     if (!open && !cfg && !kbd && !g_friends.load() && !g_settings.show_fps && !finger && !coop_net_enabled() && !fps60_world_active()) {
-        if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
+        // Keep releases queued in ImGui even when no overlay needs drawing.
+        // Discarding them here leaves the previous confirm held on reopening.
+        if (g_inited) drain_events(ImGui::GetIO());
         return;
     }
     if (!g_inited) init();
@@ -852,6 +882,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     else if (cfg && !kbd) cfg_draw(io, scale);
     if (kbd) keyboard_draw(io, scale);
     emote_wheel_draw(scale);
+    coop_battle_ui_draw(scale);
     ui_frame_end();
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering

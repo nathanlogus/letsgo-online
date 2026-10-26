@@ -1907,6 +1907,8 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[65]; };\n", set);
         info->uses_rscale = true;
     }
+    bool glowck = stage == STAGE_FRAGMENT && !dbg && key && key->glowck && (c->omap_target & 0x7) == 0x7 && key->rt_kind[0] == 0;
+    if (glowck) sp(&s, "layout(std140, set = %d, binding = 21) uniform GlowCk { vec4 gck; };" "\n", set);
     bool tint = stage == STAGE_FRAGMENT && !dbg && (c->omap_target & 0x7) == 0x7 && (!key || key->rt_kind[0] == 0);
     if (tint) {
         sp(&s, "layout(std140, set = %d, binding = 19) uniform Tint { vec4 ltint[2]; };\n", set);
@@ -1999,6 +2001,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     free(pre.buf);
     free(body.buf);
     if (stage == STAGE_VERTEX) {
+        if (key && key->zoom && !dbg) sp(&s, "  gl_Position.xy *= %.4ff;\n", key->zoom / 100.0);
         if (key && key->jitter && !dbg) sp(&s, "  gl_Position.xy += jit.xy * gl_Position.w;\n");
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
         if (key && key->depth_minus_one) sp(&s, "  gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5f;\n");
@@ -2023,6 +2026,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 r++;
             }
         }
+        if (glowck)  // (pale cyan - glass - in a texture's draw: Mart's door is part of its wall texture)
+            sp(&s, "  { float gb_ = c0.g / max(c0.b, 1e-4f), br_ = c0.b / max(c0.r, 1e-4f), lu_ = dot(c0.rgb, vec3(0.2126f, 0.7152f, 0.0722f));"
+                   "    float m_ = smoothstep(0.55f, 0.68f, gb_) * (1.0f - smoothstep(0.95f, 1.05f, gb_)) * smoothstep(1.25f, 1.5f, br_) * smoothstep(0.15f, 0.25f, lu_);"
+                   "    c0.rgb *= mix(vec3(1.0f), gck.rgb, m_); }\n");
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
                    "    c0.rgb = mix(g, ltint[0].rgb * pow(l, ltint[1].w) + ltint[1].rgb * l, ltint[0].w); }\n");
@@ -2400,8 +2407,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     size_t len = (size_t)(code - blob) + code_end(code, (max_size - (code - blob)) / 8) * 8;
     uint64_t h[2] = {0xcbf29ce484222325ull, 0x9e3779b97f4a7c15ull};
     uint32_t meta[8] = {(uint32_t)stage, (uint32_t)len, key->vs_out_mask, (uint32_t)(getenv("LARECOMP_NO_DISCARD") != NULL),
-                        (uint32_t)(getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0)};
-    uint8_t kb[48] = {key->depth_minus_one, key->flip_y, key->glsl, key->velocity, key->vel_vs, key->vel_rt, key->jitter};
+                        (uint32_t)(getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0), (uint32_t)key->glowck};
+    uint8_t kb[48] = {key->depth_minus_one, key->flip_y, key->glsl, key->velocity, key->vel_vs, key->vel_rt, key->jitter, key->zoom};
     memcpy(kb + 8, key->attr_kind, 32);
     memcpy(kb + 40, key->rt_kind, 8);
     uint64_t heap[2] = {maxwell_gmem_base, maxwell_gmem_size};

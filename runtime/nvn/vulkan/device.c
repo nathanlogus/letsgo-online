@@ -737,6 +737,14 @@ static void present_image(TexBackend *b, bool final, int image, int nimg, uint64
                 snprintf(lpath, sizeof lpath, "%s/%s_%ld.png", frames_dir, final ? "fin" : mid, list[i]);
                 path = lpath;
             }
+        // A live input-test script can capture a transient menu without
+        // guessing its presentation frame. This never changes exit-after-shot.
+        extern bool input_test_take_capture(char *out, size_t capacity);
+        char requested[80];static char requested_path[1500];
+        if(final && custom_capture_dir && input_test_take_capture(requested,sizeof requested)){
+            snprintf(requested_path,sizeof requested_path,"%s/%s.png",capture_dir,requested);
+            path=requested_path;
+        }
         extern void vk_present_log_tag(uint64_t frame, int image, int nimg);
         vk_present_log_tag(frame, image, nimg);
         vk_frame_end(path);

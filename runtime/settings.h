@@ -40,6 +40,8 @@ typedef struct {
     float brightness;    // colour of the game image (F12 menu, runtime/ui/menu.mm; post pass in runtime/nvn/vulkan/exec.c):
     float contrast;      // 1 = unchanged for all three; brightness / contrast 0.5..1.5, saturation 0..2
     float saturation;
+    bool daynight;        // day/night colour grade from the clock (runtime/daynight.c; default off)
+    float daynight_speed; // 1 = real time, N = N times faster
     int ssao_level;       // FX_*: SSAO quality (default off); ssao and its parameters follow it
     int gi_level;         // FX_*: GI quality (default off); gi and its parameters follow it
     bool fx_custom;       // the SSAO / contact shadow / GI parameters below set by hand (F12 Advanced, saved): the levels

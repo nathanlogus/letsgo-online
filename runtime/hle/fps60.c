@@ -291,7 +291,7 @@ void fps60_configure(void) {
         rt_register_fnhook(MOVE_FN, move_hook);
         coop_actor_configure();
     }
-    if (g_on || g_stats || getenv("LARECOMP_INPUT_LOOP")) hook_all();
+    if (g_on || g_stats || getenv("LARECOMP_INPUT_LOOP") || g_settings.daynight || getenv("LARECOMP_HOUR")) hook_all();  // (daynight: battles end the tint)
     // the world's update always: g_played tells the title screen (game_title) whatever the frame rate
     else if (rt_addr(FIELD_UPDATE)) rt_register_fnhook(FIELD_UPDATE, field_hook);
     g_world = true, g_special = g_scene = g_played = g_social_world = false;

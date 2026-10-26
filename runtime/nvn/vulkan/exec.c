@@ -3,6 +3,7 @@
 #include <immintrin.h>
 #include <SDL3/SDL_timer.h>
 #include <float.h>
+#include "../../daynight.h"
 #include <math.h>
 #include <stdarg.h>
 #include <pthread.h>
@@ -1250,6 +1251,8 @@ static bool fsr3_on(void);
 // In steps of 0.25 (a sampler each), -2 .. 0. LARECOMP_MIP_BIAS=<offset> (research) replaces the -1 / -0.5; 0: none.
 static float g_mip_bias;
 static void ssao_run(void);
+static float g_gck[4];  // day / night: the glass multiplier of the draw being recorded (glow_ck_draw; binding 21)
+static float cam_zoom(void);  // LARECOMP_ZOOM (research): the camera's field of view scaled - below 1 shows more of the world
 static void sun_probe(void);  // (contact shadows: the shadow pass's light)
 // The debug views (F12: the occlusion alone, the motion vectors) replace the game image at the present, after the
 // game's own passes (fog, bloom, tone mapping): written into the scene they came out white or washed out.
@@ -1405,7 +1408,8 @@ static void begin_pass(void) {
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
     ao.qual = false;
-    if ((g_settings.ssao || g_settings.gi || g_settings.contact_on || mv_wanted()) && pass_ncolor && ca[0].imageView && has_d && pass_samples == 1 && st.rt.color[0]) {  // (TAA: mv_wanted)
+    float dn_rgb[3];  // (day/night: the scene hook below tints the scene, so the interface drawn after it stays clean)
+    if ((g_settings.ssao || g_settings.gi || g_settings.contact_on || mv_wanted() || daynight_tint(dn_rgb) || cam_zoom() != 1.0f) && pass_ncolor && ca[0].imageView && has_d && pass_samples == 1 && st.rt.color[0]) {  // (TAA: mv_wanted)
         TexBackend *c0 = st.rt.color[0]->backend;
         VkFormat f = pass_color[0];
         if (c0 && c0->scalable && (f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || f == VK_FORMAT_R16G16B16A16_SFLOAT ||
@@ -3056,11 +3060,13 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     }
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
-        if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || (b->binding != 18 && b->binding != 19 && b->binding != 20)) continue;
+        if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || (b->binding != 18 && b->binding != 19 && b->binding != 20 && b->binding != 21)) continue;
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == 20) {  // (TAA: this frame's jitter)
             bi[n] = ubo_span(vk_transient_copy(taa_jitter(), 16, 256), 16);
+        } else if (b->binding == 21) {  // (day / night: the glass multiplier of this draw, glow_ck_draw)
+            bi[n] = ubo_span(vk_transient_copy(g_gck, 16, 256), 16);
         } else if (b->binding == 18) {
             for (int t = 0; t < si->ntex && t < 64; t++) { rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; }
             bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
@@ -3442,6 +3448,11 @@ static bool cam_at_origin(const float *p) {
     return fabsf(v[3]) < 1 && fabsf(v[7]) < 1 && fabsf(v[11]) < 1;
 }
 
+static float cam_zoom(void) {
+    static float z = -1;
+    if (z < 0) { z = getenv("LARECOMP_ZOOM") ? (float)atof(getenv("LARECOMP_ZOOM")) : 1.0f; if (z <= 0.05f || z > 4) z = 1.0f; }
+    return z;
+}
 // The scene's projection, from the vertex constant buffers of its draws: where it was last found, else a scan (once
 // per frame). Let's Go: row-major, near 32, far 10000 (cm).
 static void ssao_find_projection(void) {
@@ -3539,6 +3550,121 @@ static void vb_bind(VkCommandBuffer cb, int s, VkBuffer b, VkDeviceSize off, Vtx
     if (vm) vm->vb[s] = b, vm->voff[s] = off, vm->vck[s] = span_chunk(b, &vm->vep[s]);
 }
 
+// Research (day/night): LARECOMP_DRAWLOG=<present> logs that present's depth-tested draws - fragment shader hash, blend / depth
+// write, raw draw arguments, the textures they sample - and saves each texture once as build/tex/<addr>_<w>x<h>.png, to find
+// the windows, lamps and signs. LARECOMP_SKIP_TEX=<addr>,... (hex) leaves out the draws sampling those textures, to see where
+// one is on the screen. (Saving a texture ends the pass: begin_pass starts it again.)
+// A texture's content key (day/night: which textures glow): FNV-1a over the first 16 KB of its texel bytes as the game laid them
+// out - the same asset gives the same key in every run and area, unlike its address. Cached by object and address.
+// (the bytes it hashes: up to 16 KB, but no more than the first level's texels - a small texture must not hash its neighbours)
+static uint64_t tex_key_bytes(NvnTexture *t) {
+    const FormatInfo *fi = nvn_format_info(t->format);
+    if (!fi || !fi->bpb || !fi->bw || !fi->bh) return 256;
+    uint64_t n = (uint64_t)((t->width + fi->bw - 1) / fi->bw) * ((t->height + fi->bh - 1) / fi->bh) * fi->bpb;
+    return n < 16384 ? n : 16384;
+}
+static uint64_t tex_content_key(NvnTexture *t) {
+    static struct { NvnTexture *t; uint64_t addr, key; } cache[1024];
+    unsigned slot = (unsigned)(((uintptr_t)t >> 4) * 2654435761u) & 1023;
+    if (cache[slot].t == t && cache[slot].addr == t->addr) return cache[slot].key;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)t->addr;
+    uint64_t h = 1469598103934665603ull ^ ((uint64_t)t->width << 32 | t->height) ^ t->format;
+    uint64_t n = tex_key_bytes(t);
+    for (uint64_t i = 0; p && i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
+    cache[slot].t = t, cache[slot].addr = t->addr, cache[slot].key = h;
+    return h;
+}
+
+// Night lights (runtime/daynight.c daynight_glow): a draw sampling a glowing texture is multiplied by M / T through the blend
+// constant, so after the scene tint T (ssao_run) it ends at M of its daylight colour - brighter than the dark town around it,
+// and over the game's bloom threshold. Opaque draws only (blended ones are left alone).
+// Day/night, glass that is a region of a bigger texture (the Mart's door is part of its wall): a draw sampling one of those textures gets the
+// fragment shader's colour key (ShaderKey.glowck, binding 21 = M / T) instead of a whole-draw boost.
+static float g_gck[4];
+static bool glow_ck_draw(Prog *pr) {
+    float t[3], m[3];
+    if (!daynight_tint(t)) return false;
+    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+        NvnTexture *tx = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!tx || !tx->addr || !daynight_glow_colorkey((unsigned)(tex_content_key(tx) >> 32), m)) continue;
+        for (int k = 0; k < 3; k++) g_gck[k] = fminf(m[k] / fmaxf(t[k], 0.02f), 24.0f);
+        g_gck[3] = 1;
+        return true;
+    }
+    return false;
+}
+
+static bool glow_draw(Prog *pr, float pre[3]) {
+    float t[3], m[3];
+    if (!daynight_tint(t)) return false;
+    static int mode = -1;  // LARECOMP_GLOW_MODE=hash: glass by its fragment shader (the game's window shader), no colour key
+    if (mode < 0) mode = getenv("LARECOMP_GLOW_MODE") && !strcmp(getenv("LARECOMP_GLOW_MODE"), "hash");
+    static uint64_t fsh = 0x3b6ffffc84936523ull;  // (LARECOMP_GLOW_FSHASH=<hex>: another shader to try)
+    static int fsh_init;
+    if (!fsh_init++ && getenv("LARECOMP_GLOW_FSHASH")) fsh = strtoull(getenv("LARECOMP_GLOW_FSHASH"), NULL, 16);
+    if (mode && g_cur_fs_hash == fsh && daynight_glow(0xFFFFFFFFu, m)) {
+        for (int k = 0; k < 3; k++) pre[k] = fminf(m[k] / fmaxf(t[k], 0.02f), 24.0f);
+        return true;
+    }
+    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+        NvnTexture *tx = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!tx || !tx->addr || !daynight_glow((unsigned)(tex_content_key(tx) >> 32), m)) continue;
+        for (int k = 0; k < 3; k++) pre[k] = fminf(m[k] / fmaxf(t[k], 0.02f), 24.0f);
+        return true;
+    }
+    return false;
+}
+
+static bool drawlog(Prog *pr, CmdRec *r, bool indexed) {
+    static uint64_t skip[256];
+    static int nskip = -1;
+    static long at = -2;
+    if (nskip < 0) {
+        nskip = 0;
+        at = getenv("LARECOMP_DRAWLOG") ? atol(getenv("LARECOMP_DRAWLOG")) : -1;
+        for (const char *p = getenv("LARECOMP_SKIP_TEX"); p && *p && nskip < 256;) {
+            skip[nskip++] = strtoull(p, (char **)&p, 16);
+            while (*p == ',') p++;
+        }
+    }
+    bool log = at >= 0 && (long)renderer_present_count() == at && !ip_replaying && st.rt.depth && st.ds[0];
+    static uint64_t saved[4096];
+    static int nsaved, ord;
+    static int only_lo = -2, only_hi;  // LARECOMP_ONLY_DRAW=<a>-<b>: of that present's logged draws, only those numbered a..b are drawn
+    if (only_lo == -2) { only_lo = -1; if (getenv("LARECOMP_ONLY_DRAW")) sscanf(getenv("LARECOMP_ONLY_DRAW"), "%d-%d", &only_lo, &only_hi); }
+    bool outside = log && only_lo >= 0 && (ord < only_lo || ord > only_hi);
+    static int skip_lo = -2, skip_hi;  // LARECOMP_SKIP_DRAW=<a>-<b>: the logged draws numbered a..b are left out (the others stay: depth and context)
+    if (skip_lo == -2) { skip_lo = -1; if (getenv("LARECOMP_SKIP_DRAW")) sscanf(getenv("LARECOMP_SKIP_DRAW"), "%d-%d", &skip_lo, &skip_hi); }
+    if (log && skip_lo >= 0 && ord >= skip_lo && ord <= skip_hi) outside = true;
+    if (at < 0 && !nskip) return false;
+    char line[600];
+    int len = 0;
+    if (log)
+        len = snprintf(line, sizeof line, "[drawlog] #%d fs %016llx blend %d zwrite %d obj %llx args", ord++, (unsigned long long)g_cur_fs_hash,
+                       st.color_state[0] & 1, st.ds[1], (unsigned long long)st.obj);
+    for (int i = 0; log && i < draw_nargs(indexed); i++) len += snprintf(line + len, sizeof line - len, " %llx", (unsigned long long)r->x[i]);
+    bool hit = false;
+    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!t) continue;
+        for (int k = 0; k < nskip; k++) if (t->addr == skip[k]) hit = true;
+        if (!log || len >= 480) continue;
+        len += snprintf(line + len, sizeof line - len, " | tex %llx %ux%u f%x k%08x n%u", (unsigned long long)t->addr, t->width, t->height, t->format,
+                        (unsigned)(tex_content_key(t) >> 32), (unsigned)tex_key_bytes(t));
+        bool seen = false;
+        for (int k = 0; k < nsaved; k++) if (saved[k] == t->addr) seen = true;
+        if (!seen && nsaved < 4096 && only_lo < 0 && skip_lo < 0 && t->backend && !is_attachment(t)) {
+            char path[160];
+            saved[nsaved++] = t->addr;
+            mkdir("build/tex", 0755);
+            snprintf(path, sizeof path, "build/tex/%llx_%ux%u_k%08x.png", (unsigned long long)t->addr, t->width, t->height, (unsigned)(tex_content_key(t) >> 32));
+            renderer_save_texture_tex((TexBackend *)t->backend, path);
+        }
+    }
+    if (log) LOG("%s\n", line);
+    return hit || outside;
+}
+
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
     mvo_draw = 0;
@@ -3596,6 +3722,7 @@ static void draw_(CmdRec *r, bool indexed) {
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.jitter = jitter_on() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (TAA, FSR 3)
+    vkey.zoom = cam_zoom() != 1.0f && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0] ? (uint8_t)lroundf(cam_zoom() * 100.0f) : 0;  // (LARECOMP_ZOOM)
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -3610,11 +3737,11 @@ static void draw_(CmdRec *r, bool indexed) {
             last_fs = fs;
             last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
         }
-        static uint64_t skip[16];
+        static uint64_t skip[64];
         static int nskip = -1;
         if (nskip < 0) {
             nskip = 0;
-            for (const char *p = getenv("LARECOMP_SKIP_FSHASH"); p && *p && nskip < 16;) {
+            for (const char *p = getenv("LARECOMP_SKIP_FSHASH"); p && *p && nskip < 64;) {
                 skip[nskip++] = strtoull(p, (char **)&p, 16);
                 while (*p == ',') p++;
             }
@@ -3622,6 +3749,16 @@ static void draw_(CmdRec *r, bool indexed) {
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
+    }
+    if (drawlog(pr, r, indexed)) return;  // (research: LARECOMP_DRAWLOG, LARECOMP_SKIP_TEX)
+    float glow_pre[3];
+    bool glow = st.rt.depth && st.ds[0] && !(st.color_state[0] & 1) && glow_draw(pr, glow_pre);  // (night lights)
+    if (!glow && st.rt.depth && st.ds[0] && !(st.color_state[0] & 1) && glow_ck_draw(pr)) {  // (night lights: glass inside a texture)
+        ShaderKey fk3 = fkey;
+        fk3.glowck = 1;
+        Prog *pg = get_program(st.program, &vkey, &fk3);
+        if (pg) wait_built(&pg->state);
+        if (pg && atomic_load(&pg->state) == 1) pr = pg, fkey.glowck = 1;
     }
     {   // (research, LARECOMP_COUNT_TEX=<w>x<h>: per frame, the draws and instances sampling a fragment texture of that size)
         static int tw = -1, th;
@@ -3739,6 +3876,11 @@ static void draw_(CmdRec *r, bool indexed) {
             memcpy(k.blend[i], st.blend[i], 8);
         }
     }
+    if (glow && k.ncolor && k.write_mask[0]) {  // (night lights: colour * the blend constant, alpha as written)
+        static const uint8_t b[8] = {0, 0x61, 1, 2, 1, 1, 1, 0};
+        k.blend_on |= 1;
+        memcpy(k.blend[0], b, 8);
+    }
     if (ao.vel && ao.vel_rt < 8) {  // (the velocity target: written by the velocity draws only)
         k.color[ao.vel_rt] = VK_FORMAT_R16G16B16A16_SFLOAT;
         k.write_mask[ao.vel_rt] = wvel ? 0xF : 0;
@@ -3797,7 +3939,8 @@ static void draw_(CmdRec *r, bool indexed) {
             vkCmdSetStencilReference(cb, face, st.stencil_ref[f]);
         }
     }
-    vkCmdSetBlendConstants(cb, st.blend_color);
+    if (glow && k.ncolor && k.write_mask[0]) { float bc[4] = {glow_pre[0], glow_pre[1], glow_pre[2], 1}; vkCmdSetBlendConstants(cb, bc); }
+    else vkCmdSetBlendConstants(cb, st.blend_color);
 
     // ---- rasterizer
     uint8_t cull = st.poly[0];
@@ -4537,8 +4680,8 @@ static VkPipeline post_pipeline(const char *fs) { return post_pipeline_ex(fs, VK
 // sized for them, they were made again at every switch between a real frame and an in-between image, and the real
 // frames' histories (SSAO, GI, TAA) went with them.
 static TexBackend *post_image_fmt(int i, uint32_t w, uint32_t h, VkFormat fmt) {
-    static TexBackend img[96];
-    TexBackend *d = &img[i + (vk_tex_lo_active() ? 48 : 0)];
+    static TexBackend img[128];
+    TexBackend *d = &img[i + (vk_tex_lo_active() ? 64 : 0)];
     if (d->image && (d->width != w || d->height != h || d->format != fmt)) {
         vk_views_forget(d);
         vk_defer_image(d->image, d->mem);
@@ -5008,6 +5151,60 @@ static void ssao_run(void) {
         VkImageView src[4] = {post_view(mv)};
         post_pass_view(cb, post_pipeline("mv_show.frag"), src, 1, post_view(enc), w, h, ps, 32, false, false);
         debug_view = enc, debug_view_frame = fr;
+    }
+    float dn[3];  // day/night (runtime/daynight.c): the scene multiplied by the hour's tint, overworld only
+    if (daynight_tint(dn)) {
+        float night = daynight_night();
+        static int hash_mode = -1;
+        if (hash_mode < 0) hash_mode = !(getenv("LARECOMP_GLOW_MODE") && !strcmp(getenv("LARECOMP_GLOW_MODE"), "color"));  // (default: the textures' own draws glow; "color": the old colour key + light spill)
+        if (night > 0.05f && !hash_mode) {  // (night lights: glass glows - a colour key on a copy of the scene, tint-or-glow in one pass)
+            TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            post_pass_view(cb, post_pipeline_ex("copy.frag", ao.cfmt, 0), src, 1, post_view(cp), ao.cw, ao.ch, pk, 32, false, false);
+            vk_full_barrier(cb);
+            float pt[8] = {dn[0], dn[1], dn[2], night, 2.3f, 1.45f, 0.55f, (float)ao.ch / 720.0f};  // (glass: warm, 2.3 / 1.45 / 0.55 x its daylight colour; [7]: the pools' scale)
+            if (getenv("LARECOMP_GLOW_DEBUG")) pt[4] = 6, pt[5] = 0, pt[6] = 6;  // (research: the key's matches in magenta)
+            VkImageView ci[4] = {post_view(cp)};
+            post_pass_view(cb, post_pipeline_ex("tint_glow.frag", ao.cfmt, 1), ci, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
+        } else if (night > 0.05f && getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "1")) {  // off until retested
+            // dynamic lights: the lit pixels (colour, intensity, depth) -> a light map at 1/4 size -> the apply pass (pools below sources, halos around)
+            TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            post_pass_view(cb, post_pipeline_ex("copy.frag", ao.cfmt, 0), src, 1, post_view(cp), ao.cw, ao.ch, pk, 32, false, false);
+            float t0 = (getenv("LARECOMP_FIREFLIES") && !strcmp(getenv("LARECOMP_FIREFLIES"), "0")) ? 0.0f : (float)(SDL_GetTicks() % 1000000) / 1000.0f + 0.01f;  // seconds, for the fireflies (0: off)
+            uint32_t lw[4], lh[4];
+            TexBackend *lv[4];
+            lw[0] = (ao.cw + 3) / 4, lh[0] = (ao.ch + 3) / 4;
+            lv[0] = post_image_fmt(48, lw[0], lh[0], VK_FORMAT_R16G16B16A16_SFLOAT);
+            float pe[8] = {ao.proj[2], ao.proj[3], mo, 0, (float)ao.cw, (float)ao.ch};
+            VkImageView ei[4] = {post_view(cp), dv};
+            post_pass_view(cb, post_pipeline_ex("dl_extract.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ei, 2, post_view(lv[0]), lw[0], lh[0], pe, 32, false, false);
+            static float flip = 99;  // LARECOMP_DL_FLIP=1: the other row direction (the pools run the wrong way)
+            if (flip == 99) flip = getenv("LARECOMP_DL_FLIP") ? (float)atof(getenv("LARECOMP_DL_FLIP")) : -1.0f;
+            static float gain = -1;  // LARECOMP_DL_GAIN: the lights' strength (default 1.8)
+            if (gain < 0) gain = getenv("LARECOMP_DL_GAIN") ? (float)atof(getenv("LARECOMP_DL_GAIN")) : 1.8f;
+            static float zw = -1;  // LARECOMP_DL_ZW: the depth window of the pools (1 = the default 220 cm)
+            if (zw < 0) zw = getenv("LARECOMP_DL_ZW") ? (float)atof(getenv("LARECOMP_DL_ZW")) : 1.0f;
+            static float rt_shadows = -1;  // LARECOMP_LIGHTS_RT=0: no shadows from the depth (default on)
+            if (rt_shadows < 0) rt_shadows = getenv("LARECOMP_LIGHTS_RT") && !strcmp(getenv("LARECOMP_LIGHTS_RT"), "0") ? 0.0f : 1.0f;
+            float pa[16] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows};
+            for (int k = 1; k < 4; k++) {  // the pyramid: each level half the size of the one above, depth-weighted
+                lw[k] = (lw[k - 1] + 1) / 2, lh[k] = (lh[k - 1] + 1) / 2;
+                lv[k] = post_image_fmt(48 + k, lw[k], lh[k], VK_FORMAT_R16G16B16A16_SFLOAT);
+                vk_full_barrier(cb);
+                VkImageView di[4] = {post_view(lv[k - 1])};
+                float pd[8] = {0, 0, 0, 0, 1.0f / (float)lw[k], 1.0f / (float)lh[k], 1.0f / (float)lw[k - 1], 1.0f / (float)lh[k - 1]};
+                post_pass_view(cb, post_pipeline_ex("dl_down.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), di, 1, post_view(lv[k]), lw[k], lh[k], pd, 32, false, false);
+            }
+            vk_full_barrier(cb);
+            VkImageView ai[6] = {post_view(cp), dv, post_view(lv[0]), post_view(lv[1]), post_view(lv[2]), post_view(lv[3])};
+            post_pass_view(cb, post_pipeline_ex("dl_apply.frag", ao.cfmt, getenv("LARECOMP_DL_DEBUG") ? 2 : 1), ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
+        } else {
+            float pt[8] = {dn[0], dn[1], dn[2]};
+            post_pass_view(cb, post_pipeline_ex("tint_apply.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
+        }
     }
     vk_full_barrier(cb);
     ao.busy = false;

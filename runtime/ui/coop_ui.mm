@@ -6,7 +6,87 @@
 #include "coop_ui.h"
 extern "C" {
 #include "../coop_net.h"
+#include "../coop_battle_link.h"
+#include "../coop_battle_names.h"
 uint64_t plat_now_ns(void);
+void input_reset(void);
+void input_quarantine_pad(void);
+}
+
+bool coop_battle_ui_captures(void) {
+    CoopBattleLinkView v;coop_battle_link_view(&v);
+    return !v.host && plat_now_ns()<v.deadline_ns &&
+        (v.phase==COOP_LINK_OFFER || (v.phase==COOP_LINK_ACTIVE && v.waiting));
+}
+
+void coop_battle_ui_draw(float scale) {
+    CoopBattleLinkView v;coop_battle_link_view(&v);uint64_t now=plat_now_ns();
+    bool offer=v.phase==COOP_LINK_OFFER && now<v.deadline_ns;
+    bool prepare=v.host && v.phase==COOP_LINK_PREPARING && now<v.deadline_ns;
+    bool choosing=!v.host && v.phase==COOP_LINK_ACTIVE && v.waiting;
+    bool toast=v.outcome==2 && now<v.toast_until_ns;
+    static bool was_captured;bool capture=!v.host && now<v.deadline_ns && (offer || choosing);
+    if(was_captured && !capture){input_quarantine_pad();input_reset();}was_captured=capture;
+    if(!offer && !prepare && !choosing && !v.waiting && !toast)return;
+    ImGuiIO &io=ImGui::GetIO();
+    ImGui::SetNextWindowPos(v.host?ImVec2(24*scale,24*scale):ImVec2(io.DisplaySize.x*.5f,24*scale),ImGuiCond_Always,ImVec2(v.host?0:.5f,0));
+    ImGui::SetNextWindowSize(ImVec2((v.host?430:510)*scale,0),ImGuiCond_Always);
+    ImGuiWindowFlags flags=ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_AlwaysAutoResize;
+    if(v.host || toast)flags|=ImGuiWindowFlags_NoInputs|ImGuiWindowFlags_NoFocusOnAppearing;
+    static uint64_t focused_battle;static uint32_t focused_turn;static bool focused_offer;
+    bool new_prompt=capture && (focused_battle!=v.battle || focused_turn!=v.turn || focused_offer!=offer);
+    if(new_prompt){ImGui::SetNavCursorVisible(true);ImGui::SetNextWindowFocus();focused_battle=v.battle;focused_turn=v.turn;focused_offer=offer;}
+    ImGui::Begin("Battle team-up",nullptr,flags);
+    unsigned seconds=now<v.deadline_ns?(unsigned)((v.deadline_ns-now+999999999)/1000000000):0;
+    bool back=ImGui::IsKeyPressed(ImGuiKey_Escape,false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight,false);
+    if(offer && back){input_quarantine_pad();input_reset();coop_battle_link_end();ImGui::End();return;}
+    if(offer){
+        ImGui::TextWrapped("Join your friend's battle with your lead Pokemon?");
+        ImGui::TextWrapped("Your story progress stays independent.");
+        ImGui::BeginDisabled(!v.party_ready);
+        if(new_prompt && v.party_ready)ImGui::SetKeyboardFocusHere();
+        if(ui_button("Join battle")){input_quarantine_pad();input_reset();coop_battle_link_accept();}
+        ImGui::EndDisabled();ImGui::SameLine();
+        if(ui_button("Decline")){input_quarantine_pad();input_reset();coop_battle_link_end();}
+    } else if(prepare)ImGui::Text("Waiting for ally to join... %us",seconds);
+    else if(toast)ImGui::TextWrapped(v.host?"Ally did not answer. The NPC chose for this turn.":"Time ran out. The NPC chose this turn. You can choose again next turn.");
+    else if(v.host){
+        CoopRemote peer;const char *name=coop_net_remote(&peer)?peer.name:"your ally";
+        ImGui::Text("Waiting for %s... %us",name,seconds);
+        ImGui::TextWrapped("If time runs out, the NPC chooses this turn. Your ally can choose again next turn.");
+        ImGui::ProgressBar(v.timeout_ms ? (float)(seconds*1000)/v.timeout_ms : 0,ImVec2(-1,8*scale),"");
+    } else if(v.submitted)ImGui::TextWrapped("Choice sent. Waiting for the turn...");
+    else if(!seconds)ImGui::TextWrapped("Time is up. The NPC will choose this turn.");
+    else {
+        static uint64_t battle;static uint32_t turn;static int selected=-1;static bool focus_target,focus_move;
+        if(battle!=v.battle || turn!=v.turn){battle=v.battle;turn=v.turn;selected=-1;focus_move=true;focus_target=false;}
+        if(back && selected>=0){selected=-1;focus_move=true;}
+        ImGui::Text("Choose your move - %us",seconds);
+        if(selected<0){
+            for(unsigned i=0;i<4;i++){
+                char label[100];snprintf(label,sizeof label,"%s  (%u PP)##ally-move-%u",coop_battle_move_name(v.choices.moves[i]),v.choices.pp[i],i);
+                bool available=v.choices.moves[i] && v.choices.pp[i] && v.choices.targets[i];
+                ImGui::BeginDisabled(!available);
+                if(focus_move && available){ImGui::SetKeyboardFocusHere();focus_move=false;}
+                if(ui_button(label)){
+                    unsigned mask=v.choices.targets[i];selected=(int)i;focus_target=true;
+                    if(mask && !(mask&(mask-1))){unsigned t=0;while(!(mask&(1u<<t)))t++;input_quarantine_pad();input_reset();coop_battle_link_choose(i,t);}
+                }
+                ImGui::EndDisabled();
+            }
+        } else {
+            ImGui::Text("%s - choose a target",coop_battle_move_name(v.choices.moves[selected]));
+            for(unsigned i=0;i<2;i++){
+                unsigned t=1+2*i;if(!(v.choices.targets[selected]&(1u<<t)))continue;
+                char label[120];snprintf(label,sizeof label,"%s  %u/%u HP##ally-target-%u",coop_battle_species_name(v.opponents[i]),v.hp[i],v.max_hp[i],t);
+                if(focus_target){ImGui::SetKeyboardFocusHere();focus_target=false;}
+                if(ui_button(label)){input_quarantine_pad();input_reset();coop_battle_link_choose(selected,t);}
+            }
+            if(ui_button("Back")){selected=-1;focus_move=true;}
+        }
+        ImGui::TextWrapped("No answer before time runs out: the NPC chooses only this turn.");
+    }
+    ImGui::End();
 }
 
 static const char *activity_name(CoopActivity a) {

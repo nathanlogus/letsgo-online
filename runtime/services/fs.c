@@ -373,7 +373,22 @@ bool wildbattle_menu_active(void);  // runtime/hle/wildbattle.c
 bool wildbattle_quick_intro(void);
 static bool made_on(uint8_t sel) { return sel ? wildbattle_quick_intro() : wildbattle_menu_active(); }
 
+// Which light set the game loaded last (field/draw_env/<set>/Env*Light*.gfblt, read at each map change): "default" is the outdoors, "room" an
+// interior, "dungeon" a cave. Day / night (runtime/daynight.c) stays out of anything but the outdoors.
+#include <stdatomic.h>
+const char *romfs_file_at(uint64_t off);
+static _Atomic int g_env_set;  // 0 none yet, 1 default, 2 room, 3 dungeon, 4 test
+int fs_env_set(void) { return g_env_set; }
+static void note_env(const char *path) {
+    const char *e = strstr(path, "draw_env/");
+    if (!e) return;
+    e += 9;
+    int v = !strncmp(e, "default/", 8) ? 1 : !strncmp(e, "room/", 5) ? 2 : !strncmp(e, "dungeon/", 8) ? 3 : !strncmp(e, "test/", 5) ? 4 : 0;
+    if (v && v != g_env_set) { g_env_set = v; LOG("[fs] light set: %.*s\n", (int)strcspn(e, "/"), e); }
+}
+
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
+    if (size < 4096) { const char *rp = romfs_file_at(off); if (rp) note_env(rp); }  // (the light tables are tiny files)
     if (!ov_n) return pread(fd, dst, size, (off_t)off);
     uint64_t done = 0;
     while (done < size) {
@@ -416,6 +431,7 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
 }
 
 // Path of the RomFS file containing image offset `off` (NULL if none).
+const char *romfs_file_at(uint64_t off);
 const char *romfs_file_at(uint64_t off) {
     int lo = 0, hi = rom_nfiles - 1;
     while (lo <= hi) {
@@ -531,6 +547,7 @@ static uint32_t errno_result(void) {
     return MAKE_RESULT(2, 4000);
 }
 
+uint64_t g_savedata_guest;  // in-memory save image, for co-op QA diffs
 static void file(Service *s, IpcReq *req, IpcResp *resp) {
     HostFile *f = s->state;
     switch (req->cmd) {
@@ -541,6 +558,7 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
         touch_pages(b->addr, n);
         if (strstr(f->path, "savedata")) {
+            if (off == 0 && size == 1048576) g_savedata_guest = b->addr;
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;

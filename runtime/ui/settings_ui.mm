@@ -352,7 +352,7 @@ bool ui_button(const char *label, float width) {
     float x0 = win->DC.IsSameLine ? p.x : p.x - in;  // (beside another item: where it ends, plus the spacing)
     float w = width < 0 ? win->WorkRect.Max.x - x0 : width > 0 ? width : ts.x + in * 2;
     ImGui::SetCursorScreenPos(ImVec2(x0, p.y));
-    bool hit = ImGui::InvisibleButton(label, ImVec2(w, h));
+    bool hit = ImGui::InvisibleButton(label, ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     bool hot = ui_hot(a, b) || ImGui::IsItemActive();
     ui_pill(win->DrawList, a, b, hot);

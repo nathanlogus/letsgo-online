@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Small, ephemeral TCP relay for Let's Go Recomp's social co-op prototype.
 
-The relay forwards presence snapshots, emotes and voluntary social invitations. It never receives save data,
-Pokémon, inventory, or story state. See docs/COOP-ONLINE.md for the wire format.
+The relay forwards presence, emotes and voluntary invitations. The opt-in battle prototype
+exchanges a temporary serialized lead Pokemon and bounded turn decisions after consent.
+The experimental mirror extension also exchanges the host's temporary battle party,
+initial battle seed and committed commands so a guest can replay the native battle.
+It never receives entire saves, inventory or story state. See docs/COOP-ONLINE.md.
 
 Environment:
   COOP_RELAY_HOST       bind address (default 127.0.0.1)
@@ -86,9 +89,90 @@ class Room:
     team_id: int = 0
     team_from: int = 255
     team_until: float = 0
+    battle_id: int = 0
+    battle_phase: int = 0
+    battle_turn: int = 0
+    battle_sequence: int = 0
+    battle_deadline: float = 0
+    battle_sent: bool = False
+    battle_chunks: int = 0
+    battle_choices: bytes = b""
+    mirror_count: int = 0
+    mirror_chunks: int = 0
+    mirror_seed: bool = False
+    mirror_sequences: list[int] = field(default_factory=lambda: [0, 0])
 
 
 class Relay:
+    def clear_battle(self, room: Room) -> None:
+        if room.battle_id:
+            body=b"\x06"+struct.pack('<QB',room.battle_id,0)
+            for p in room.peers:p.send(b"B",body)
+        room.battle_id=room.battle_phase=room.battle_turn=room.battle_sequence=room.battle_chunks=0
+        room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b""
+        room.mirror_count=room.mirror_chunks=0;room.mirror_seed=False;room.mirror_sequences=[0,0]
+
+    async def expire_battle_offer(self, room: Room, battle: int) -> None:
+        await asyncio.sleep(45)
+        if room.battle_id==battle and room.battle_phase==1:self.clear_battle(room)
+
+    def battle_action(self, peer: Peer, body: bytes) -> None:
+        if len(body)<9:return
+        room=peer.room;op=body[0];battle=struct.unpack_from('<Q',body,1)[0]
+        others=[p for p in room.peers if p is not peer and p.connected]
+        if not battle or not others:return
+        other=others[0];host=peer.identity==room.owner;now=time.monotonic()
+        if op==0 and len(body)==13 and host and not room.battle_id:
+            timeout,trainer=struct.unpack_from('<HH',body,9)
+            if not 1000<=timeout<=60000 or not 1<=trainer<=601 or not self.team_near(peer,other):return
+            room.battle_id=battle;room.battle_phase=1;room.battle_chunks=0
+            asyncio.create_task(self.expire_battle_offer(room,battle))
+        elif battle!=room.battle_id:return
+        elif op==1 and len(body)==9 and not host and room.battle_phase==1:room.battle_phase=2
+        elif op==2 and len(body)==140 and not host and room.battle_phase==2 and body[9]<2:
+            bit=1<<body[9]
+            if room.battle_chunks&bit:return
+            room.battle_chunks|=bit
+        elif op==3 and len(body)==52 and host and room.battle_phase==2 and room.battle_chunks==3:
+            turn,sequence,timeout=struct.unpack_from('<IIH',body,9)
+            if turn<=room.battle_turn or sequence<=room.battle_sequence or not 1<=timeout<=60000 or body[19]>=6:return
+            room.battle_turn=turn;room.battle_sequence=sequence;room.battle_deadline=now+timeout/1000
+            room.battle_sent=False;room.battle_choices=body
+        elif op==4 and len(body)==22 and not host and room.battle_phase==2:
+            turn,sequence=struct.unpack_from('<II',body,9)
+            if room.battle_sent or now>=room.battle_deadline or turn!=room.battle_turn or sequence!=room.battle_sequence:return
+            choice=room.battle_choices;index=body[18];target=body[21]
+            if not choice or index>=4 or target>=16 or body[17]!=choice[19]:return
+            move=struct.unpack_from('<H',body,19)[0]
+            if not move or move!=struct.unpack_from('<H',choice,20+2*index)[0] or not choice[28+index] or not (struct.unpack_from('<H',choice,32+2*index)[0]&(1<<target)):return
+            room.battle_sent=True
+        elif op==5 and len(body)==18 and host and room.battle_phase==2:
+            if struct.unpack_from('<II',body,9)!=(room.battle_turn,room.battle_sequence) or body[17] not in (1,2):return
+            room.battle_deadline=0;room.battle_sent=True
+        elif op==6 and len(body)==10:
+            self.clear_battle(room);return
+        elif op==7 and len(body)==141 and host and room.battle_phase==2 and room.battle_chunks==3:
+            count,index=body[9:11]
+            if not 1<=count<=6 or index>=2*count or room.mirror_seed:return
+            if room.mirror_count and room.mirror_count!=count:return
+            if room.mirror_chunks&(1<<index):return
+            room.mirror_count=count;room.mirror_chunks|=1<<index
+        elif op==8 and len(body)==17 and host and room.battle_phase==2:
+            if room.mirror_seed or not room.mirror_count or room.mirror_chunks!=(1<<(2*room.mirror_count))-1:return
+            room.mirror_seed=True
+        elif op==9 and len(body)==24 and host and room.battle_phase==2 and room.mirror_seed:
+            turn,sequence=struct.unpack_from('<II',body,9);trainer,party,index=body[17:20];move=struct.unpack_from('<H',body,20)[0];target,ai=body[22:24]
+            if trainer not in (0,2) or not turn or not sequence or party>=6 or index>=4 or not 1<=move<=742 or target>=4 or ai>1 or (ai and trainer!=2):return
+            actor=trainer//2
+            if sequence!=room.mirror_sequences[actor]+1:return
+            if trainer==2:
+                choice=room.battle_choices
+                if not choice or (turn,sequence)!=(room.battle_turn,room.battle_sequence) or party!=choice[19]:return
+                if move!=struct.unpack_from('<H',choice,20+2*index)[0] or not choice[28+index] or not (struct.unpack_from('<H',choice,32+2*index)[0]&(1<<target)):return
+            room.mirror_sequences[actor]=sequence
+        else:return
+        other.send(b"B",body)
+
     def team_status(self, room: Room, reason: int = 0, target: Peer | None = None) -> None:
         remaining=max(0,int((room.team_until-time.monotonic())*1000)) if room.team_state==1 else 0
         body=struct.pack('<BBBII',room.team_state,room.team_from,reason,room.team_id,remaining)
@@ -318,6 +402,8 @@ class Relay:
                             other.send(b"E", bytes([slot]) + body)
                 elif op == b"Q" and len(body) == 4:
                     peer.send(b"q", body)
+                elif op == b"B":
+                    self.battle_action(peer,body)
                 elif op == b"U" and len(body)==5 and body[0]<=3:
                     self.team_action(peer,body[0],struct.unpack_from('<I',body,1)[0])
                 elif op == b"L" and not body:
@@ -348,6 +434,7 @@ class Relay:
             if peer:
                 room = peer.room
                 if peer in room.peers:
+                    if room.battle_id:self.clear_battle(room)
                     if room.team_state:
                         self.clear_team(room,6)
                     peer.connected = False

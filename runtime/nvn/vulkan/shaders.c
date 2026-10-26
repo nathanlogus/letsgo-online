@@ -1433,6 +1433,257 @@ static const char *builtin_src(const char *name, int *stage) {
     // The occlusion onto the scene: multiplied by the pipeline's blending (exec.c), or shown alone (the debug view and
     // LARECOMP_SSAO_DUMP). b.xy = 1 / the output's size (the occlusion is at the depth's size: sampled, not fetched);
     // b.z = a scale when shown alone (the scene is HDR: 1.0 is far past white after the game's tone mapping), 0: none.
+    // Day/night lights on window and lantern glass: a colour key on a copy of the scene; the output multiplies the scene
+    // (blend 1): the tint, or for glass a warm glow (exec.c ssao_run). a.rgb = the tint (linear), a.w = night 0..1,
+    // b.rgb = the glow's multiplier of the glass's daylight colour.
+    if (!strcmp(name, "tint_glow.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               // b.w = the picture's height / 720 (the light pools' radii)
+               // Pale cyan-blue pixels (green close to blue, red well below it): window and lantern glass. Measured in
+               // Viridian: glass g/b 0.8-0.9, b/r 1.4-2; pond water g/b 0.4 (and sat 0.9); roofs and walls are red or green led.
+               "float key(vec3 c) {\n"
+               "  float mx = max(c.r, max(c.g, c.b)), mn = min(c.r, min(c.g, c.b));\n"
+               "  float sat = (mx - mn) / max(mx, 1e-4), lum = dot(c, vec3(0.2126, 0.7152, 0.0722));\n"
+               "  float gb = c.g / max(c.b, 1e-4), br = c.b / max(c.r, 1e-4);\n"
+               "  return smoothstep(0.55, 0.68, gb) * (1.0 - smoothstep(0.95, 1.05, gb)) * smoothstep(1.25, 1.5, br)\n"
+               "       * smoothstep(0.15, 0.25, lum) * (1.0 - smoothstep(0.62, 0.75, sat));\n"
+               "}\n"
+               "vec3 at(ivec2 p) { return texelFetch(t, clamp(p, ivec2(0), textureSize(t, 0) - 1), 0).rgb; }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  float m = key(at(p));\n"
+               // water foam is the same pale blue: leave out pixels with deep-blue water close by (8 taps, 7 px out)
+               "  float water = 0.0;\n"
+               "  for (int i = 0; i < 8; i++) {\n"
+               "    vec2 d = vec2(cos(float(i) * 0.7854), sin(float(i) * 0.7854)) * 7.0;\n"
+               "    vec3 n = at(p + ivec2(d));\n"
+               "    float ns = (max(n.r, max(n.g, n.b)) - min(n.r, min(n.g, n.b))) / max(max(n.r, max(n.g, n.b)), 1e-4);\n"
+               "    water = max(water, step(0.75, ns) * step(n.g / max(n.b, 1e-4), 0.55));\n"
+               "  }\n"
+               "  m *= 1.0 - water;\n"
+               // light spilling out of the glass: three rings of taps (10, 26, 56 px at 720p) average the key; the ground
+               // there is multiplied up so it keeps its own colours (a light pool, not fog)
+               "  float spill = 0.0;\n"
+               "  for (int r = 0; r < 3; r++) {\n"
+               "    float rad = (r == 0 ? 10.0 : r == 1 ? 26.0 : 56.0) * pc.b.w, wt = r == 0 ? 0.45 : r == 1 ? 0.35 : 0.2;\n"
+               "    for (int i = 0; i < 8; i++) {\n"
+               "      float a = (float(i) + 0.5 * float(r)) * 0.7854;\n"
+               "      spill += wt * 0.125 * key(at(p + ivec2(vec2(cos(a), sin(a)) * rad)));\n"
+               "    }\n"
+               "  }\n"
+               "  spill = clamp(spill * 3.0, 0.0, 1.0);\n"
+               "  vec3 lit = pc.a.rgb * (1.0 + pc.a.w * 3.2 * spill * vec3(1.0, 0.72, 0.38));\n"
+               "  vec3 glow = mix(vec3(1.0), pc.b.rgb, pc.a.w);\n"
+               "  o = vec4(mix(lit, glow, m), 1.0);\n"
+               "}\n";
+    }
+    // Day/night dynamic lights (exec.c ssao_run): the lit pixels of the scene (what the tint will leave brighter than night: c * tint above
+    // a threshold) become a light map at 1/4 size, a blur pyramid of it, and an apply pass that lights ground and objects near them.
+    // dl_extract: a.rgb = tint, b.x = threshold. Out rgb = light colour (the pixel's hue, half toward warm) x intensity, averaged over 4x4.
+    if (!strcmp(name, "dl_extract.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"  // a = (A, B, depth mode, -), b.xy = the scene's size
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy) * 4, sz = textureSize(t, 0), dsz = textureSize(dep, 0);\n"
+               "  vec3 col = vec3(0.0);\n"
+               "  float bi = 0.0, bz = 0.0;\n"
+               "  for (int y = 0; y < 4; y++)\n"
+               "    for (int x = 0; x < 4; x++) {\n"
+               "      ivec2 q = min(p + ivec2(x, y), sz - 1);\n"
+               "      vec3 e = texelFetch(t, q, 0).rgb;\n"
+               "      float I = clamp(log2(max(dot(e, vec3(0.2126, 0.7152, 0.0722)), 1e-3) / 1.5) * 0.8, 0.0, 1.2);\n"
+               "      if (e.b - max(e.r * 1.6, e.g * 1.1) > 0.12) I = 0.0;\n"  // (water foam and glints are not lights)
+               "      if (I > bi) {\n"
+               "        bi = I;\n"
+               "        col = mix(e / max(max(e.r, max(e.g, e.b)), 1e-3), vec3(1.0, 0.72, 0.38), 0.5) * I;\n"
+               "        float d = texelFetch(dep, clamp(ivec2((vec2(q) + 0.5) / pc.b.xy * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
+               "        bz = pc.a.y / ((pc.a.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.a.x);\n"
+               "      }\n"
+               "    }\n"
+               "  o = vec4(col, bi > 0.0 ? bz : 0.0);\n"  // rgb = colour x intensity; a = the source's view depth (0: none) - read back by nearest texel
+               "}\n";
+    }
+    // dl_down: the next (half-size) pyramid level, a 4x4 box of the one above: colour averaged, depth (alpha) weighted by each
+    // source's intensity (a texel without a source has alpha 0 and no weight).
+    if (!strcmp(name, "dl_down.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  ivec2 n = textureSize(t, 0), p = ivec2(gl_FragCoord.xy) * 2 - 1;\n"
+               "  vec3 c = vec3(0.0);\n"
+               "  float zs = 0.0, ws = 0.0;\n"
+               "  for (int y = 0; y < 4; y++)\n"
+               "    for (int x = 0; x < 4; x++) {\n"
+               "      vec4 v = texelFetch(t, clamp(p + ivec2(x, y), ivec2(0), n - 1), 0);\n"
+               "      float i = v.a > 0.0 ? max(v.r, max(v.g, v.b)) : 0.0;\n"
+               "      c += v.rgb; zs += v.a * i; ws += i;\n"
+               "    }\n"
+               "  o = vec4(c / 16.0, ws > 0.0 ? zs / ws : 0.0);\n"
+               "}\n";
+    }
+    // dl_apply: the scene copy (0), the depth (1), the light pyramid (2..5). a.rgb = tint, a.w = night; b = (A, B, depth mode, y sign);
+    // c = (P00, P11, width, height); d.x = the threshold. Output multiplies the scene (blend 1): the tint, and for what is not itself lit,
+    // (1 + the light that reaches it): a pool on the ground below each source (the map looked up where the source is above the pixel:
+    // a lamp 230 cm up) and a halo around it, so the ground keeps its own colours.
+    if (!strcmp(name, "dl_apply.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 2) uniform sampler2D l0;\n"
+               "layout(set = 0, binding = 3) uniform sampler2D l1;\n"
+               "layout(set = 0, binding = 4) uniform sampler2D l2;\n"
+               "layout(set = 0, binding = 5) uniform sampler2D l3;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec4 lvl(int k, vec2 uv) {\n"
+               "  return k == 0 ? texture(l0, uv) : k == 1 ? texture(l1, uv) : k == 2 ? texture(l2, uv) : texture(l3, uv);\n"
+               "}\n"
+               // a light-map sample's colour, kept only where its source is about as far away as the pixel (the pool must not run down the
+               // screen below a lamp, nor halos leak across depth): rgb = colour x intensity, a = intensity x depth
+               // Ray-traced shadows, in screen space: march 7 points from the pixel to the light through the depth; a point behind the scene's
+               // surface (by 20..450 cm: a wall, a tree, the lamp post) blocks the light. d.w = 1 turns it on.
+               "float lin(float d) { return pc.b.y / ((pc.b.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.b.x); }\n"
+               "float vis(vec2 uvp, float zp, vec2 uvs, float zs, float jit) {\n"
+               "  vec2 k = vec2(2.0 / pc.c.x, 2.0 / pc.c.y);\n"
+               "  vec3 A = vec3((uvp - 0.5) * k * zp, zp), B = vec3((uvs - 0.5) * k * zs, zs);\n"
+               "  ivec2 dsz = textureSize(dep, 0);\n"
+               "  float v = 1.0;\n"
+               "  for (int i = 0; i < 7; i++) {\n"
+               "    vec3 Q = mix(A, B, (float(i) + 1.0 + fract(jit * 7.0)) / 8.5);\n"
+               "    vec2 q = Q.xy / (Q.z * k) + 0.5;\n"
+               "    if (q.x < 0.0 || q.y < 0.0 || q.x > 1.0 || q.y > 1.0) continue;\n"
+               "    float zq = lin(texelFetch(dep, clamp(ivec2(q * vec2(dsz)), ivec2(0), dsz - 1), 0).r), gap = Q.z - zq;\n"
+               "    if (gap > 20.0 && gap < 450.0) v = min(v, 0.15);\n"
+               "  }\n"
+               "  return v;\n"
+               "}\n"
+               "vec3 near(vec4 s, float z, float width) {\n"
+               "  float q = (s.a - z) / width;\n"
+               "  return s.a > 0.0 ? s.rgb * exp(-q * q) : vec3(0.0);\n"
+               "}\n"
+               "vec4 lm(vec2 uv) { ivec2 n = textureSize(l0, 0); return texelFetch(l0, clamp(ivec2(uv * vec2(n)), ivec2(0), n - 1), 0); }\n"
+               "vec4 lf(int k, ivec2 i) {\n"
+               "  if (k == 0) return texelFetch(l0, clamp(i, ivec2(0), textureSize(l0, 0) - 1), 0);\n"
+               "  if (k == 1) return texelFetch(l1, clamp(i, ivec2(0), textureSize(l1, 0) - 1), 0);\n"
+               "  if (k == 2) return texelFetch(l2, clamp(i, ivec2(0), textureSize(l2, 0) - 1), 0);\n"
+               "  return texelFetch(l3, clamp(i, ivec2(0), textureSize(l3, 0) - 1), 0);\n"
+               "}\n"
+               // pyramid level k, bilinear, each of the 4 texels kept by its own source depth first (smooth, never mixes depths)
+               "vec3 lvb(int k, vec2 uv, float z, float width) {\n"
+               "  ivec2 n = k == 0 ? textureSize(l0, 0) : k == 1 ? textureSize(l1, 0) : k == 2 ? textureSize(l2, 0) : textureSize(l3, 0);\n"
+               "  vec2 f = uv * vec2(n) - 0.5, w = fract(f);\n"
+               "  ivec2 i = ivec2(floor(f));\n"
+               "  vec3 c = vec3(0.0);\n"
+               "  for (int j = 0; j < 4; j++) {\n"
+               "    ivec2 o = ivec2(j & 1, j >> 1);\n"
+               "    c += near(lf(k, i + o), z, width) * ((o.x == 1 ? w.x : 1.0 - w.x) * (o.y == 1 ? w.y : 1.0 - w.y));\n"
+               "  }\n"
+               "  return c;\n"
+               "}\n"
+               "vec3 lmb(vec2 uv, float z) { return lvb(0, uv, z, 350.0 * pc.d.z); }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 e = texelFetch(t, p, 0).rgb;\n"
+               "  vec3 m = pc.a.rgb;\n"
+               "  float lit = clamp(log2(max(dot(e, vec3(0.2126, 0.7152, 0.0722)), 1e-3) / 1.5) * 0.8, 0.0, 2.0);\n"
+               "  float d = texelFetch(dep, clamp(ivec2((vec2(p) + 0.5) / pc.c.zw * vec2(textureSize(dep, 0))), ivec2(0), textureSize(dep, 0) - 1), 0).r;\n"
+               "  if (lit < 0.02 && d < 0.999999) {\n"
+               "    float z = pc.b.y / ((pc.b.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.b.x);\n"
+               "    vec2 uv = (vec2(p) + 0.5) / pc.c.zw;\n"
+               "    float rpx = 380.0 * pc.c.x / z * 0.5 * pc.c.z;\n"
+               "    float lod = clamp(log2(max(rpx, 6.0) / 6.0), 0.0, 2.99);\n"
+               "    vec2 us = uv - vec2(0.0, 230.0 * pc.c.y / z * 0.5 * pc.b.w);\n"
+               // the pool: the pyramid level whose texel is about the light's radius (two levels blended), each texel kept by its own
+               // source depth: smooth, no noise (the old 32 random taps gave a salt-and-pepper grain on walls and ground)
+               "    float rr = min(rpx, 0.4 * pc.c.z);\n"
+               "    float a0 = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
+               "    float kl = clamp(log2(max(rr, 2.0) / 2.0), 0.0, 1.999);\n"
+               "    int k0 = int(floor(kl));\n"
+               // the source looked up 0..150 cm above the pixel (mostly around it: no beams down the screen), nearer weighing more: the spill fades away from its source instead of
+               // copying a whole lit facade onto the ground as one flat block
+               "    vec3 pool = vec3(0.0);\n"
+               "    for (int j = 0; j < 4; j++) {\n"
+               "      float hh = float[4](0.0, 40.0, 90.0, 150.0)[j], ww = float[4](0.45, 0.28, 0.17, 0.10)[j];\n"
+               "      vec2 uj = uv - vec2(0.0, hh * pc.c.y / z * 0.5 * pc.b.w);\n"
+               "      pool += ww * mix(lvb(k0, uj, z, 380.0 * pc.d.z), lvb(k0 + 1, uj, z, 380.0 * pc.d.z), fract(kl));\n"
+               "    }\n"
+               "    pool *= 0.35;\n"
+               // the halo: pyramid level 1, bilinear (no random taps: they grain the wall)
+               "    vec3 halo = (lvb(2, uv, z, 350.0 * pc.d.z) + lvb(3, uv, z, 350.0 * pc.d.z)) * 0.6;\n"
+               "    m = pc.a.rgb * (1.0 + pc.a.w * pc.d.y * (24.0 * pool + 6.0 * halo));\n"
+               // research (LARECOMP_DL_DEBUG=1): blue where the sample above the pixel has a source, green = its depth minus the pixel's / 2000
+               "    if (pc.d.w < -0.5) {\n"
+               "      vec4 q = lm(us);\n"
+               "      float Iq = max(q.r, max(q.g, q.b)), zq = q.a;\n"
+               "      m = Iq > 0.05 ? vec3(clamp(z / 4000.0, 0.0, 1.0), clamp(zq / 4000.0, 0.0, 1.0), 1.0) : vec3(0.1);\n"
+               "    }\n"
+               "  }\n"
+               // as in ssrecomp's night: a vignette (edges 20% darker), and fireflies (soft yellow-green dots drifting over grass and
+               // trees, 3 layers of cells). The output multiplies the scene, so an added light f is m += f / scene.
+               "  vec2 ex = (vec2(p) + 0.5) / pc.c.zw * 2.0 - 1.0;\n"
+               "  m *= mix(1.0, 1.0 - 0.2 * smoothstep(0.6, 1.3, sqrt(ex.x * ex.x * 0.8 + ex.y * ex.y)), pc.a.w);\n"
+               "  if (pc.d.x > 0.0 && d < 0.999999) {\n"
+               "    float s = pc.c.w / 720.0, T = pc.d.x;\n"
+               "    vec3 add = vec3(0.0);\n"
+               "    for (int L = 0; L < 3; L++) {\n"
+               "      float cell = (150.0 + 60.0 * float(L)) * s;\n"
+               "      vec2 id = floor(gl_FragCoord.xy / cell);\n"
+               "      for (int j = 0; j < 9; j++) {\n"
+               "        vec2 c = id + vec2(j % 3 - 1, j / 3 - 1);\n"
+               "        vec3 h = fract(sin(vec3(dot(c, vec2(127.1, 311.7)), dot(c, vec2(269.5, 183.3)), dot(c, vec2(419.2, 371.9))) + float(L) * 17.0) * 43758.5453);\n"
+               "        if (h.z > 0.45) continue;\n"
+               "        vec2 pos = (c + 0.15 + 0.7 * h.xy) * cell + cell * 0.3 * vec2(sin(T * (0.25 + h.x * 0.3) + h.y * 6.28), cos(T * (0.2 + h.y * 0.3) + h.x * 6.28));\n"
+               "        float dd = length(gl_FragCoord.xy - pos) / (s * (1.6 + float(L) * 0.5));\n"
+               "        if (dd > 5.0) continue;\n"
+               "        float blink = pow(max(0.0, sin(T * (0.9 + h.z * 1.5) + h.x * 40.0)), 3.0);\n"
+               "        vec3 g = texelFetch(t, clamp(ivec2(pos), ivec2(0), ivec2(pc.c.zw) - 1), 0).rgb;\n"
+               "        float green = smoothstep(0.0, 0.08, g.g - max(g.r, g.b) * 1.05);\n"  // only over grass / leaves
+               "        add += vec3(0.9, 1.0, 0.35) * 3.0 * blink * green * (exp(-dd * dd) + 0.12 * exp(-dd * dd * 0.12));\n"
+               "      }\n"
+               "    }\n"
+               // moonlight on water (vivid blue, not lit, not sky): a faint silver sheen, and smooth horizontal ripple highlights along a
+               // moon path (a fixed screen column, widening toward the camera: the moon is far, the camera angle fixed). No per-pixel
+               // random glints: they read as grain.
+               "    float wl = dot(e, vec3(0.2126, 0.7152, 0.0722));\n"
+               "    float water = smoothstep(0.12, 0.25, e.b - max(e.r * 1.6, e.g * 1.1)) * (1.0 - smoothstep(0.5, 0.8, wl));\n"
+               "    if (water > 0.0) {\n"
+               "      vec2 sp = gl_FragCoord.xy / pc.c.zw;\n"
+               "      float path = exp(-pow((sp.x - 0.64) / (0.06 + 0.16 * sp.y), 2.0));\n"
+               "      vec2 g = gl_FragCoord.xy / s;\n"
+               "      float rip = 0.5 + 0.5 * sin(g.y * 0.2 + 2.2 * sin(g.x * 0.021 + T * 0.6) + sin(g.x * 0.047 - T * 0.9) + T * 1.3);\n"
+               "      float rip2 = 0.5 + 0.5 * sin(g.y * 0.23 - 1.7 * sin(g.x * 0.033 - T * 0.4) - T * 0.8);\n"
+               "      vec2 nq = g * vec2(0.025, 0.11) + vec2(T * 0.15, 0.0), ni = floor(nq), nf = fract(nq);\n"  // smooth value noise: breaks the bands into streaks
+               "      nf = nf * nf * (3.0 - 2.0 * nf);\n"
+               "      vec4 nh = fract(sin(vec4(dot(ni, vec2(127.1, 311.7)), dot(ni + vec2(1, 0), vec2(127.1, 311.7)), dot(ni + vec2(0, 1), vec2(127.1, 311.7)), dot(ni + vec2(1, 1), vec2(127.1, 311.7)))) * 43758.5453);\n"
+               "      float nz = mix(mix(nh.x, nh.y, nf.x), mix(nh.z, nh.w, nf.x), nf.y);\n"
+               "      float shine = pow(rip, 6.0) * (0.6 + 0.4 * rip2) * smoothstep(0.45, 0.85, nz);\n"
+               "      add += vec3(0.75, 0.85, 1.0) * water * (0.015 + 0.05 * path + 1.0 * shine * path);\n"
+               "    }\n"
+               "    m += pc.a.w * min(add / max(e, vec3(0.06)), vec3(8.0));\n"
+               "  }\n"
+               "  o = vec4(m, 1.0);\n"
+               "}\n";
+    }
+    // Day/night: a constant colour, multiplied onto the scene by the blend (exec.c ssao_run)
+    if (!strcmp(name, "tint_apply.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(push_constant) uniform P { vec4 a; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() { o = vec4(pc.a.rgb, 1.0); }\n";
+    }
     if (!strcmp(name, "ssao_apply.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"

@@ -105,7 +105,7 @@ Each TCP message is a little-endian 16-bit byte length followed by a one-byte op
 
 `A` accepts with slot, code length/code, host slot, lock flag and a 16-byte token. `P` announces slot, name length/name and 16-byte identity. `H` reports host slot/lock flag. Host-only `K` sets the lock (one byte) and `D` removes another slot (one byte). `L` explicitly leaves; host leave closes the room. An unexpected drop preserves its reservation for 30 seconds. `X` rejects/ends with a length-prefixed reason. `Q`/`q` echo a 32-bit monotonic millisecond counter for RTT.
 
-A 28-byte snapshot is area fingerprint (u32), sequence (u32), x/y/z centimetres (i32 each), yaw (u16 turns), motion/readiness (u8), left-stick axes (i16 each), and activity (u8: 0 loading, 1 exploring, 2 menu/loading, 3 battle, 4 story). Bit 7 of motion signals overworld readiness. Unready heartbeats zero the axes. `T` appearance is gender/style (u8 each) and 80 bytes of native resource IDs. `E` carries one emote byte. `U` client actions carry command (u8: 0 invite, 1 accept, 2 decline, 3 cancel/end) and invitation ID (u32 LE). Server `U` status is state (u8: 0 none, 1 pending, 2 tagged), initiator slot (u8; 255 when none), reason (u8), invitation ID and remaining milliseconds (u32 LE each). Invalid or stale actions cannot change another invitation; no save/party data is transferred. Forwarded `S`, `T` and `E` prepend the sender slot. No packet carries save blocks, party data, inventory or event flags.
+A 28-byte snapshot is area fingerprint (u32), sequence (u32), x/y/z centimetres (i32 each), yaw (u16 turns), motion/readiness (u8), left-stick axes (i16 each), and activity (u8: 0 loading, 1 exploring, 2 menu/loading, 3 battle, 4 story). Bit 7 of motion signals overworld readiness. Unready heartbeats zero the axes. `T` appearance is gender/style (u8 each) and 80 bytes of native resource IDs. `E` carries one emote byte. `U` client actions carry command (u8: 0 invite, 1 accept, 2 decline, 3 cancel/end) and invitation ID (u32 LE). Server `U` status is state (u8: 0 none, 1 pending, 2 tagged), initiator slot (u8; 255 when none), reason (u8), invitation ID and remaining milliseconds (u32 LE each). Invalid or stale actions cannot change another invitation; no save/party data is transferred. Forwarded `S`, `T` and `E` prepend the sender slot. Normal social packets carry no save blocks, party data, inventory or event flags. The opt-in `B` battle channel below exchanges an accepted guest lead and turn decisions.
 
 ## Verification on 25 October 2026
 
@@ -135,3 +135,22 @@ Testing found and fixed a launcher Host/Join ImGui stack imbalance, missing in-g
 - Relay invitation tests cover self-accept/stale-ID rejection, distance/area/busy gates, accept/decline/cancel/end, expiry and disconnect. Two native client workers also completed invite/accept/end.
 - Scripted co-op tests use `tests/config/coop-light.ini` through `LARECOMP_SETTINGS`, keeping full graphics and frame generation out of timing checks and preserving the player's normal settings.
 - Native Communicate displayed an incoming invitation, queued acceptance until returning to the overworld, and both sides acknowledged the accepted social tag. Captures and packet log: `tests/runs/teamup-final`.
+
+
+## Opt-in battle extension
+
+`LARECOMP_COOP_GUEST_CONTROL=1` enables the controlled Eevee 1.0.0 trainer trial described in [the native battle notes](COOP-BATTLE-PROTOTYPE.md#two-client-guest-move-injection-and-npc-timeout). The default social tag still leaves ordinary encounters independent. Both clients and the relay must contain this extension; capability negotiation with older relays is not implemented.
+
+`B` payloads begin with subtype u8 and battle ID u64 LE. The relay enforces host/guest roles, explicit acceptance, current turn/sequence, legal choices and deadlines. Subtypes:
+
+| Subtype | Body bytes | Contents after subtype and battle ID |
+| --- | ---: | --- |
+| 0 offer | 13 | timeout u16, trainer ID u16 |
+| 1 accept | 9 | none |
+| 2 lead chunk | 140 | index u8 (0/1), 130 encrypted PB7 bytes |
+| 3 turn | 52 | turn/sequence u32 each, remaining ms u16, party slot u8, four move IDs u16, four PP u8, four target masks u16, two species u16, two current/max HP pairs u16 |
+| 4 choice | 22 | turn/sequence u32 each, party slot u8, move index u8, move ID u16, target u8 |
+| 5 outcome | 18 | turn/sequence u32 each, outcome u8 (1 guest, 2 NPC this turn) |
+| 6 end | 10 | reason u8 |
+
+A deadline defaults to 30 seconds. NPC fallback closes only the current decision; the next eligible turn returns control to the guest. Guest disconnect lets the host continue with the NPC. No guest reward, inventory or story writes are performed. This is a host-engine prototype with a guest decision overlay; full guest battle presentation remains unfinished.

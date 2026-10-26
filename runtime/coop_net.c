@@ -1,6 +1,7 @@
 // Native client for the small social co-op relay (protocol in docs/COOP-ONLINE.md).
 // The worker never touches game memory. Game hooks publish a copied pose; rendering reads a copied peer pose.
 #include "coop_net.h"
+#include "coop_battle_link.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -167,6 +168,7 @@ void coop_net_connect(const CoopOptions *options) {
     save_options(); pthread_cond_signal(&g_wake); pthread_mutex_unlock(&g_lock);
 }
 void coop_net_leave(void) {
+    coop_battle_link_reset();
     pthread_mutex_lock(&g_lock);
     g_request = false; g_generation++; g_configured = false;
     g_session.connection = COOP_OFFLINE; g_session.detail[0] = 0;
@@ -326,6 +328,7 @@ static void set_socket(CoopSocket s) {
 }
 
 static void clear_remote(void) {
+    coop_battle_link_reset();
     pthread_mutex_lock(&g_lock);
     memset(&g_remote, 0, sizeof g_remote);
     memset(&g_team,0,sizeof g_team);g_team_command=255;
@@ -338,6 +341,7 @@ static void clear_remote(void) {
 
 static void process_message(const uint8_t *p, size_t n) {
     if (!n) return;
+    if(p[0]=='B'){coop_battle_link_message(p+1,n-1);return;}
     if(p[0]=='U' && n==12 && p[1]<=2 && (p[2]<=1 || p[2]==255) && p[3]<=7) {
         pthread_mutex_lock(&g_lock);
         g_team=(CoopTeamUp){.state=p[1],.from_slot=p[2],.reason=p[3],.id=get_u32(p+4),
@@ -565,6 +569,11 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
         if (team_command<=3) {
             uint8_t body[5]={team_command};put_u32(body+1,team_id);
             if(!send_frame(s,'U',body,sizeof body))break;
+        }
+        coop_battle_link_tick();
+        { uint8_t body[255];size_t size;bool failed=false;
+          while(coop_battle_link_pop(body,&size))if(!send_frame(s,'B',body,size)){failed=true;break;}
+          if(failed)break;
         }
         if (control >= 0) { uint8_t value = control == 2 ? (uint8_t)(1 - g_local_slot) : control; if (!send_frame(s, control == 2 ? 'D' : 'K', &value, 1)) break; }
         if (now - last_reply > 5000000000ull) break;

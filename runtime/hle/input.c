@@ -343,6 +343,7 @@ static bool test_event(const SDL_Event *e) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: return e->key.which == TEST_DEVICE;
     case SDL_EVENT_TEXT_INPUT: return e->text.windowID == TEST_DEVICE;
     case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP: return e->gbutton.which == TEST_DEVICE;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION: return e->gaxis.which == TEST_DEVICE;
     default: return false;
     }
 }
@@ -366,7 +367,7 @@ bool input_user_blocked(const SDL_Event *e) {
     if (on < 0) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
         on = v ? atoi(v) != 0 : (getenv("LARECOMP_INPUT") || getenv("LARECOMP_DOORJUMP_TEST") || getenv("LARECOMP_PLACE") ||
-                                 getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_BIND_TEST"));
+                                 getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_HOST_INPUT_FILE") || getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
     if (!on) return false;
@@ -506,7 +507,7 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 //   entry first like a player's typing; "{Escape}" (any SDL key name) presses that key. No ',' or ':' in <text>.
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
-// "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
+// "frame:shot:<name>" saves the window (game + menus) to LARECOMP_CAPTURE_DIR/<name>.png.
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
 //   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
@@ -518,22 +519,56 @@ static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
     e.key.key = SDL_GetKeyFromScancode(sc, mod, false);
     SDL_PushEvent(&e);
 }
+// Named QA captures are consumed by the final presentation pass. Only simple
+// names are accepted, and captures stay inside the explicit test directory.
+static SDL_SpinLock test_capture_lock;
+static char test_capture_name[80];
+bool input_test_take_capture(char *out, size_t capacity) {
+    SDL_LockSpinlock(&test_capture_lock);
+    bool ready=test_capture_name[0]!=0;
+    if(ready){snprintf(out,capacity,"%s",test_capture_name);test_capture_name[0]=0;}
+    SDL_UnlockSpinlock(&test_capture_lock);
+    return ready;
+}
 static void test_push(uint64_t frame, unsigned long start, unsigned long len, const char *dev, const char *arg) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
     if (!strcmp(dev, "sdlkey")) {
-        if (frame == start || frame == start + len) push_key(SDL_GetScancodeFromName(arg), SDL_KMOD_NONE, frame == start);
+        if (frame == start || frame == start + len) {
+            SDL_Scancode sc=SDL_GetScancodeFromName(arg);
+            LOG("[input] QA key %s scancode %u down %u\n",arg,(unsigned)sc,frame==start);
+            push_key(sc, SDL_KMOD_NONE, frame == start);
+        }
         return;
+    }
+    if (!strcmp(dev, "sdlaxis")) {
+        if(frame!=start && frame!=start+len)return;
+        char axis_name[32];int value;
+        if(sscanf(arg,"%31[^/]/%d",axis_name,&value)!=2 || value < -32768 || value>32767)return;
+        SDL_GamepadAxis axis=SDL_GetGamepadAxisFromString(axis_name);
+        if(axis==SDL_GAMEPAD_AXIS_INVALID)return;
+        e.type=SDL_EVENT_GAMEPAD_AXIS_MOTION;e.gaxis.which=TEST_DEVICE;
+        e.gaxis.axis=(Uint8)axis;e.gaxis.value=frame==start?(Sint16)value:0;
+        SDL_PushEvent(&e);return;
     }
     if (!strcmp(dev, "sdlpad")) {
         int b = bind_pad_from_name(arg);
         if (b < 0 || b >= SDL_GAMEPAD_BUTTON_COUNT || (frame != start && frame != start + len)) return;
+        LOG("[input] QA pad %s button %d down %u\n",arg,b,frame==start);
         e.type = frame == start ? SDL_EVENT_GAMEPAD_BUTTON_DOWN : SDL_EVENT_GAMEPAD_BUTTON_UP;
         e.gbutton.which = TEST_DEVICE, e.gbutton.button = (Uint8)b, e.gbutton.down = frame == start;
         SDL_PushEvent(&e);
         return;
     }
     if (frame != start) return;
+    if (!strcmp(dev, "shot")) {
+        if(!getenv("LARECOMP_CAPTURE_DIR") || !arg[0] || strlen(arg)>=sizeof test_capture_name)return;
+        for(const char *p=arg;*p;p++)if(!isalnum((unsigned char)*p) && *p!='_' && *p!='-')return;
+        SDL_LockSpinlock(&test_capture_lock);
+        snprintf(test_capture_name,sizeof test_capture_name,"%s",arg);
+        SDL_UnlockSpinlock(&test_capture_lock);
+        return;
+    }
     LOG("[input] test: typing \"%s\"\n", arg);
     static char ascii[128][2];  // (a text event keeps a pointer to its text: these live on)
     for (const char *p = arg; *p; p++) {
@@ -560,10 +595,17 @@ static void test_push(uint64_t frame, unsigned long start, unsigned long len, co
 }
 
 static void host_test_frame(uint64_t frame) {
-    static const char *hspec, *bspec;
+    static const char *hspec, *bspec, *hfile;
+    static char live[2048];static uint64_t live_epoch;
     static int init;
-    if (!init) { init = 1; hspec = getenv("LARECOMP_HOST_INPUT"); bspec = getenv("LARECOMP_BIND_TEST"); host_test = hspec; }
+    if (!init) { init = 1; hspec = getenv("LARECOMP_HOST_INPUT"); bspec = getenv("LARECOMP_BIND_TEST"); hfile=getenv("LARECOMP_HOST_INPUT_FILE");host_test = hspec || hfile; }
     char buf[2048];
+    if(hfile){
+        char next[2048]={0};FILE *f=fopen(hfile,"r");
+        if(f){size_t n=fread(next,1,sizeof next-1,f);next[n]=0;fclose(f);}
+        if(strcmp(next,live)){snprintf(live,sizeof live,"%s",next);live_epoch=frame;}
+        hspec=live;
+    }
     if (hspec) {
         uint8_t keys[SDL_SCANCODE_COUNT] = {0};
         uint32_t padm = 0;
@@ -573,8 +615,9 @@ static void host_test_frame(uint64_t frame) {
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             unsigned long start = 0, len = 10;
             char dev[8] = "", name[400] = "";
-            if (sscanf(tok, "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
-            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot")) {
+            if (sscanf(tok+(hfile && tok[0]=='+'), "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
+            if(hfile && tok[0]=='+')start+=(unsigned long)live_epoch;
+            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlaxis") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }

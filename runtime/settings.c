@@ -23,6 +23,7 @@ Settings g_settings = {
     .brightness = 1.0f,
     .contrast = 1.0f,
     .saturation = 1.0f,
+    .daynight_speed = 1.0f,
     .ssao = false,
     .ssao_intensity = 1.2f,
     .ssao_radius = 240.0f,
@@ -79,6 +80,8 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "brightness")) g_settings.brightness = (float)atof(val);
     else if (!strcmp(key, "contrast")) g_settings.contrast = (float)atof(val);
     else if (!strcmp(key, "saturation")) g_settings.saturation = (float)atof(val);
+    else if (!strcmp(key, "daynight")) g_settings.daynight = atoi(val) != 0;
+    else if (!strcmp(key, "daynight_speed")) g_settings.daynight_speed = (float)atof(val);
     // (an older file's "ssao = 1" / "gi = 1" were today's high; the levels are saved after them)
     else if (!strcmp(key, "ssao")) g_settings.ssao_level = atoi(val) != 0 ? FX_HIGH : FX_OFF;
     else if (!strcmp(key, "ssao_level")) g_settings.ssao_level = atoi(val);
@@ -277,6 +280,8 @@ void settings_save(void) {
     fprintf(f, "brightness = %.2f\n", g_settings.brightness);
     fprintf(f, "contrast = %.2f\n", g_settings.contrast);
     fprintf(f, "saturation = %.2f\n", g_settings.saturation);
+    fprintf(f, "daynight = %d\n", g_settings.daynight);
+    fprintf(f, "daynight_speed = %.2f\n", g_settings.daynight_speed);
     fprintf(f, "ssao_level = %d\n", g_settings.ssao_level);
     fprintf(f, "gi_level = %d\n", g_settings.gi_level);
     if (g_settings.fx_custom) {  // (else the levels' own: nothing to keep)
