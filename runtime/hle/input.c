@@ -229,6 +229,10 @@ static void stick_deadzone(int32_t *x, int32_t *y) {
     *x = (int32_t)lround(*x * k), *y = (int32_t)lround(*y * k);
 }
 
+// Background controller events stay on (single-player habit), but two co-op instances on one PC would both read
+// the same pad: one press would choose for both players. Online, only the focused window takes pad presses.
+static bool coop_background(void) { return coop_net_enabled() && !SDL_GetKeyboardFocus(); }
+
 // Controller buttons (and the triggers as buttons) -> Switch buttons through g_bind_pad; the sticks stay the sticks.
 static void recompute_pad(void) {
     uint32_t host = test_pad;
@@ -239,7 +243,7 @@ static void recompute_pad(void) {
         const char *v = getenv("LARECOMP_NO_USER_INPUT");
         user_off = v ? atoi(v) != 0 : getenv("LARECOMP_INPUT") != NULL;
     }
-    if (pad && !host_test && !user_off) {
+    if (pad && !host_test && !user_off && !coop_background()) {
         for (int i = 0; i < SDL_GAMEPAD_BUTTON_COUNT; i++)
             if (SDL_GetGamepadButton(pad, (SDL_GamepadButton)i)) host |= 1u << i;
         if (SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) > 16000) host |= 1u << PADB_LTRIGGER;
@@ -251,7 +255,7 @@ static void recompute_pad(void) {
     for (int i = 0; i < BIND_PAD_COUNT; i++)
         if (g_bind_pad[i] >= 0 && g_bind_pad[i] < PADB_HOST_COUNT && (host >> g_bind_pad[i] & 1)) b |= 1ull << i;
     pad_buttons = b;
-    if (!pad || host_test || user_off) {  // (a test's simulated stick drift goes through the dead zone too)
+    if (!pad || host_test || user_off || coop_background()) {  // (a test's simulated stick drift goes through the dead zone too)
         int32_t tx = test_lx, ty = test_ly;
         stick_deadzone(&tx, &ty);
         pad_lx = tx, pad_ly = ty, pad_rx = pad_ry = 0;
@@ -370,8 +374,11 @@ bool input_user_blocked(const SDL_Event *e) {
                                  getenv("LARECOMP_HOST_INPUT") || getenv("LARECOMP_HOST_INPUT_FILE") || getenv("LARECOMP_BIND_TEST"));
         if (on) LOG("[input] scripted run: keyboard, mouse and controllers ignored\n");
     }
-    if (!on) return false;
     if (test_event(e)) return false;  // (LARECOMP_HOST_INPUT type: / sdlkey: / sdlpad: - the test's own presses)
+    // Presses only: a release or a stick back at centre must still reach the overlay.
+    if (coop_background() && (e->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN ||
+        (e->type == SDL_EVENT_GAMEPAD_AXIS_MOTION && abs(e->gaxis.value) > 8000))) return true;
+    if (!on) return false;
     switch (e->type) {
     case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: case SDL_EVENT_TEXT_INPUT: case SDL_EVENT_TEXT_EDITING:
     case SDL_EVENT_MOUSE_MOTION: case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -469,6 +476,7 @@ void input_handle_event(const SDL_Event *e) {
     }
     case SDL_EVENT_WINDOW_FOCUS_LOST:
         mouse_release();
+        recompute_pad();  // drops the held pad buttons while online co-op ignores this window
         break;
     case SDL_EVENT_GAMEPAD_ADDED:
         LOG("[input] detected gamepad: id=%u name=%s\n", e->gdevice.which, SDL_GetGamepadNameForID(e->gdevice.which));

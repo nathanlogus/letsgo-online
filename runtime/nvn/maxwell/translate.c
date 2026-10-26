@@ -2026,8 +2026,21 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 r++;
             }
         }
-        if (glowck)  // (pale cyan - glass - in a texture's draw: Mart's door is part of its wall texture)
-            sp(&s, "  { float gb_ = c0.g / max(c0.b, 1e-4f), br_ = c0.b / max(c0.r, 1e-4f), lu_ = dot(c0.rgb, vec3(0.2126f, 0.7152f, 0.0722f));"
+        // glowck 2 - water at night: a faint silver sheen and smooth ripple streaks along a moon column (screen x 0.64, widening
+        // toward the camera), broken by value noise; gck = (strength, seconds, width, height). Only the water's own draw: no
+        // colour guessing (blue roofs took it before)
+        if (glowck && key->glowck == 2)
+            sp(&s, "  { vec2 sp_ = gl_FragCoord.xy / gck.zw; float s_ = gck.w / 720.0f, T_ = gck.y; vec2 g_ = gl_FragCoord.xy / s_;"
+                   "    float path_ = exp(-pow((sp_.x - 0.64f) / (0.06f + 0.16f * sp_.y), 2.0f));"
+                   "    float rip_ = 0.5f + 0.5f * sin(g_.y * 0.2f + 2.2f * sin(g_.x * 0.021f + T_ * 0.6f) + sin(g_.x * 0.047f - T_ * 0.9f) + T_ * 1.3f);"
+                   "    float rip2_ = 0.5f + 0.5f * sin(g_.y * 0.23f - 1.7f * sin(g_.x * 0.033f - T_ * 0.4f) - T_ * 0.8f);"
+                   "    vec2 nq_ = g_ * vec2(0.025f, 0.11f) + vec2(T_ * 0.15f, 0.0f), ni_ = floor(nq_), nf_ = fract(nq_); nf_ = nf_ * nf_ * (3.0f - 2.0f * nf_);"
+                   "    vec4 nh_ = fract(sin(vec4(dot(ni_, vec2(127.1f, 311.7f)), dot(ni_ + vec2(1, 0), vec2(127.1f, 311.7f)), dot(ni_ + vec2(0, 1), vec2(127.1f, 311.7f)), dot(ni_ + vec2(1, 1), vec2(127.1f, 311.7f)))) * 43758.5453f);"
+                   "    float nz_ = mix(mix(nh_.x, nh_.y, nf_.x), mix(nh_.z, nh_.w, nf_.x), nf_.y);"
+                   "    float shine_ = pow(rip_, 6.0f) * (0.6f + 0.4f * rip2_) * smoothstep(0.45f, 0.85f, nz_);"
+                   "    c0.rgb += vec3(0.75f, 0.85f, 1.0f) * gck.x * (0.015f + 0.05f * path_ + 1.0f * shine_ * path_); }\n");
+        else if (glowck)  // (pale cyan - glass - in a texture's draw: Mart's door is part of its wall texture)
+            sp(&s,"  { float gb_ = c0.g / max(c0.b, 1e-4f), br_ = c0.b / max(c0.r, 1e-4f), lu_ = dot(c0.rgb, vec3(0.2126f, 0.7152f, 0.0722f));"
                    "    float m_ = smoothstep(0.55f, 0.68f, gb_) * (1.0f - smoothstep(0.95f, 1.05f, gb_)) * smoothstep(1.25f, 1.5f, br_) * smoothstep(0.15f, 0.25f, lu_);"
                    "    c0.rgb *= mix(vec3(1.0f), gck.rgb, m_); }\n");
         if (tint)

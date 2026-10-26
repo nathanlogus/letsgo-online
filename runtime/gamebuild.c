@@ -488,7 +488,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         if (f) fclose(f);
     }
     free(units.u);
-    rt_remove_game_file(game_dir, ".gamebuild");  // the C, the objects, the logs
+    if (ok || !getenv("LARECOMP_GAMEBUILD_KEEP")) rt_remove_game_file(game_dir, ".gamebuild");  // the C, the objects, the logs (LARECOMP_GAMEBUILD_KEEP=1: kept after a failure)
     LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");
     return ok;

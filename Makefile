@@ -93,7 +93,7 @@ GAMELIB  := $(B)/lasgame.dll
 # the runtime functions it calls: exported by the .exe, linked through its import library
 LDFLAGS  += -Wl,--export-all-symbols -Wl,--out-implib,$(B)/lasrecomp.dll.a
 GAMELIB_LDFLAGS := -shared -fuse-ld=lld $(B)/lasrecomp.dll.a
-GAMELIB_SHARED := -shared  # (+ the import library: runtime/gamebuild.c)
+GAMELIB_SHARED := -shared -fuse-ld=lld  # (+ the import library: runtime/gamebuild.c; lld: GNU ld fails on this many exports)
 endif
 
 # Research build (docs/DEBUGGING.md, LARECOMP_TRACE_STORES): make TRACE=1 B=build/trace GEN=generated-trace gen / -j20 all.

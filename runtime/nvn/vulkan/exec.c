@@ -1893,7 +1893,7 @@ static void translate_program(void *arg) {
     fx_patch_fs(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
-    save_glsl(p->fi->msl, p->code[1], "fs");
+    save_glsl(p->fi->msl, p->code[1], p->fkey.glowck == 2 ? "fs_water" : p->fkey.glowck ? "fs_glass" : "fs");  // (variants: their own file)
     compile_program(p);  // (this worker: queued again it would wait behind the other translations)
 }
 
@@ -1941,7 +1941,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     const uint8_t *vb = (const uint8_t *)vkey;
     for (size_t i = 0; i < sizeof *vkey; i++) { h ^= vb[i]; h *= 0x100000001B3ull; }
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
-    h ^= fkey->velocity | (uint64_t)fkey->vel_rt << 8; h *= 0x100000001B3ull;
+    h ^= fkey->velocity | (uint64_t)fkey->vel_rt << 8 | (uint64_t)fkey->glowck << 16; h *= 0x100000001B3ull;  // (glowck: the day/night variants are programs of their own)
     if (!h) h = 1;
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     for (int probe = 0; prog_tab[slot].key && prog_tab[slot].key != h; probe++) {
@@ -3594,6 +3594,31 @@ static bool glow_ck_draw(Prog *pr) {
     return false;
 }
 
+// Night, the water's draw (its fragment shader: found with tests/scripts/bisect_tex.py on Viridian's pond; LARECOMP_WATER_FSHASH=<hex>,...
+// adds others): the moon's sheen inside that shader (ShaderKey.glowck 2). LARECOMP_DL_MOON=0 turns it off.
+static bool water_draw(void) {
+    static uint64_t fsh[16] = {0x35899cd94b78efd3ull};
+    static int n = -1, on = -1;
+    if (n < 0) {
+        n = 1;
+        on = !(getenv("LARECOMP_DL_MOON") && !strcmp(getenv("LARECOMP_DL_MOON"), "0"));
+        for (const char *p = getenv("LARECOMP_WATER_FSHASH"); p && *p && n < 16;) {
+            fsh[n++] = strtoull(p, (char **)&p, 16);
+            while (*p == ',') p++;
+        }
+    }
+    float t[3], night;
+    if (!on || !daynight_tint(t) || (night = daynight_night()) < 0.05f || !ao.cw) return false;
+    int i = 0;
+    while (i < n && fsh[i] != g_cur_fs_hash) i++;
+    if (i == n) return false;
+    // (the sheen is added before the scene's tint multiplies it: divided by the tint's mean, it ends as bright as meant)
+    g_gck[0] = night / fmaxf((t[0] + t[1] + t[2]) / 3.0f, 0.05f);
+    g_gck[1] = (float)(SDL_GetTicks() % 1000000) / 1000.0f;
+    g_gck[2] = (float)ao.cw, g_gck[3] = (float)ao.ch;
+    return true;
+}
+
 static bool glow_draw(Prog *pr, float pre[3]) {
     float t[3], m[3];
     if (!daynight_tint(t)) return false;
@@ -3759,6 +3784,14 @@ static void draw_(CmdRec *r, bool indexed) {
         Prog *pg = get_program(st.program, &vkey, &fk3);
         if (pg) wait_built(&pg->state);
         if (pg && atomic_load(&pg->state) == 1) pr = pg, fkey.glowck = 1;
+    } else if (!glow && st.rt.depth && st.ds[0] && water_draw()) {  // (night: the moon on the water, in its own shader)
+        ShaderKey fk3 = fkey;
+        fk3.glowck = 2;
+        Prog *pg = get_program(st.program, &vkey, &fk3);
+        if (pg) wait_built(&pg->state);
+        if (pg && atomic_load(&pg->state) == 1) pr = pg, fkey.glowck = 2;
+        static bool said;
+        if (!said) { said = true; LOG("[daynight] water draw: moon variant %s\n", fkey.glowck == 2 ? "on" : "not built"); }
     }
     {   // (research, LARECOMP_COUNT_TEX=<w>x<h>: per frame, the draws and instances sampling a fragment texture of that size)
         static int tw = -1, th;
@@ -5167,7 +5200,7 @@ static void ssao_run(void) {
             if (getenv("LARECOMP_GLOW_DEBUG")) pt[4] = 6, pt[5] = 0, pt[6] = 6;  // (research: the key's matches in magenta)
             VkImageView ci[4] = {post_view(cp)};
             post_pass_view(cb, post_pipeline_ex("tint_glow.frag", ao.cfmt, 1), ci, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
-        } else if (night > 0.05f && getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "1")) {  // off until retested
+        } else if (night > 0.05f && !(getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "0"))) {
             // dynamic lights: the lit pixels (colour, intensity, depth) -> a light map at 1/4 size -> the apply pass (pools below sources, halos around)
             TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
             float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
@@ -5189,7 +5222,16 @@ static void ssao_run(void) {
             if (zw < 0) zw = getenv("LARECOMP_DL_ZW") ? (float)atof(getenv("LARECOMP_DL_ZW")) : 1.0f;
             static float rt_shadows = -1;  // LARECOMP_LIGHTS_RT=0: no shadows from the depth (default on)
             if (rt_shadows < 0) rt_shadows = getenv("LARECOMP_LIGHTS_RT") && !strcmp(getenv("LARECOMP_LIGHTS_RT"), "0") ? 0.0f : 1.0f;
-            float pa[16] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows};
+            // DQ HD-2D's "Dynamic Lighting Improvements" settings, ported: LARECOMP_DL_CONTRAST (mid tones at night, 0.7; 1 = off),
+            // LARECOMP_DL_STREAK (cross streaks, 1; 0 = off), LARECOMP_DL_FAR (the far lights' depth window, 2.5; 1 = off)
+            static float dq[3] = {-1, -1, -1};
+            if (dq[0] < 0) {
+                const char *v[3] = {getenv("LARECOMP_DL_CONTRAST"), getenv("LARECOMP_DL_STREAK"), getenv("LARECOMP_DL_FAR")};
+                const float def[3] = {0.7f, 1.0f, 2.5f};
+                for (int i = 0; i < 3; i++) dq[i] = v[i] ? (float)atof(v[i]) : def[i];
+            }
+            float pa[20] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows,
+                            dq[0], dq[1], dq[2], 0};
             for (int k = 1; k < 4; k++) {  // the pyramid: each level half the size of the one above, depth-weighted
                 lw[k] = (lw[k - 1] + 1) / 2, lh[k] = (lh[k - 1] + 1) / 2;
                 lv[k] = post_image_fmt(48 + k, lw[k], lh[k], VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -5201,6 +5243,15 @@ static void ssao_run(void) {
             vk_full_barrier(cb);
             VkImageView ai[6] = {post_view(cp), dv, post_view(lv[0]), post_view(lv[1]), post_view(lv[2]), post_view(lv[3])};
             post_pass_view(cb, post_pipeline_ex("dl_apply.frag", ao.cfmt, getenv("LARECOMP_DL_DEBUG") ? 2 : 1), ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
+            if (t0 > 0 && ao.vp_frame) {  // fireflies, placed in the world by this frame's camera (dl_ff.frag): they stay put as the camera moves
+                float pf[28];
+                for (int i = 0; i < 16; i++) pf[i] = (float)ao.vp[i];  // (row-major, as the shader's row_major mat4)
+                float rest[12] = {(float)ao.cw, (float)ao.ch, t0, mo, nvn_window_origin() == 0 ? 1.0f : 0.0f, night, 0, 0, dn[0], dn[1], dn[2], 0};
+                memcpy(pf + 16, rest, sizeof rest);
+                vk_full_barrier(cb);
+                VkImageView fi[4] = {post_view(cp), dv};
+                post_pass_view(cb, post_pipeline_ex("dl_ff.frag", ao.cfmt, 1), fi, 2, ao.cview, ao.cw, ao.ch, pf, sizeof pf, false, true);
+            }
         } else {
             float pt[8] = {dn[0], dn[1], dn[2]};
             post_pass_view(cb, post_pipeline_ex("tint_apply.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);

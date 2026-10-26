@@ -1506,6 +1506,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "        col = mix(e / max(max(e.r, max(e.g, e.b)), 1e-3), vec3(1.0, 0.72, 0.38), 0.5) * I;\n"
                "        float d = texelFetch(dep, clamp(ivec2((vec2(q) + 0.5) / pc.b.xy * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
                "        bz = pc.a.y / ((pc.a.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.a.x);\n"
+               "        if (isnan(bz) || isinf(bz) || bz <= 0.0) bi = 0.0, col = vec3(0.0);\n"  // (no NaN / inf into the map: the game's bloom spreads one over the whole screen)
                "      }\n"
                "    }\n"
                "  o = vec4(col, bi > 0.0 ? bz : 0.0);\n"  // rgb = colour x intensity; a = the source's view depth (0: none) - read back by nearest texel
@@ -1545,7 +1546,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 3) uniform sampler2D l1;\n"
                "layout(set = 0, binding = 4) uniform sampler2D l2;\n"
                "layout(set = 0, binding = 5) uniform sampler2D l3;\n"
-               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 f; } pc;\n"  // f = (contrast mid, streaks, far lights, -)
                "layout(location = 0) out vec4 o;\n"
                "vec4 lvl(int k, vec2 uv) {\n"
                "  return k == 0 ? texture(l0, uv) : k == 1 ? texture(l1, uv) : k == 2 ? texture(l2, uv) : texture(l3, uv);\n"
@@ -1599,8 +1600,12 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 m = pc.a.rgb;\n"
                "  float lit = clamp(log2(max(dot(e, vec3(0.2126, 0.7152, 0.0722)), 1e-3) / 1.5) * 0.8, 0.0, 2.0);\n"
                "  float d = texelFetch(dep, clamp(ivec2((vec2(p) + 0.5) / pc.c.zw * vec2(textureSize(dep, 0))), ivec2(0), textureSize(dep, 0) - 1), 0).r;\n"
+               "  float zp = d < 0.999999 ? pc.b.y / ((pc.b.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.b.x) : 1e6;\n"
+               // far lights (as DQ HD-2D's r.LightMaxDrawDistanceScale 2.5): the depth window widens with distance, so the pyramid's
+               // averaged depths still match far sources instead of dropping them
+               "  float zwf = mix(1.0, pc.f.z, smoothstep(1500.0, 6000.0, zp));\n"
                "  if (lit < 0.02 && d < 0.999999) {\n"
-               "    float z = pc.b.y / ((pc.b.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.b.x);\n"
+               "    float z = zp;\n"
                "    vec2 uv = (vec2(p) + 0.5) / pc.c.zw;\n"
                "    float rpx = 380.0 * pc.c.x / z * 0.5 * pc.c.z;\n"
                "    float lod = clamp(log2(max(rpx, 6.0) / 6.0), 0.0, 2.99);\n"
@@ -1617,11 +1622,11 @@ static const char *builtin_src(const char *name, int *stage) {
                "    for (int j = 0; j < 4; j++) {\n"
                "      float hh = float[4](0.0, 40.0, 90.0, 150.0)[j], ww = float[4](0.45, 0.28, 0.17, 0.10)[j];\n"
                "      vec2 uj = uv - vec2(0.0, hh * pc.c.y / z * 0.5 * pc.b.w);\n"
-               "      pool += ww * mix(lvb(k0, uj, z, 380.0 * pc.d.z), lvb(k0 + 1, uj, z, 380.0 * pc.d.z), fract(kl));\n"
+               "      pool += ww * mix(lvb(k0, uj, z, 380.0 * pc.d.z * zwf), lvb(k0 + 1, uj, z, 380.0 * pc.d.z * zwf), fract(kl));\n"
                "    }\n"
                "    pool *= 0.35;\n"
                // the halo: pyramid level 1, bilinear (no random taps: they grain the wall)
-               "    vec3 halo = (lvb(2, uv, z, 350.0 * pc.d.z) + lvb(3, uv, z, 350.0 * pc.d.z)) * 0.6;\n"
+               "    vec3 halo = (lvb(2, uv, z, 350.0 * pc.d.z * zwf) + lvb(3, uv, z, 350.0 * pc.d.z * zwf)) * 0.6;\n"
                "    m = pc.a.rgb * (1.0 + pc.a.w * pc.d.y * (24.0 * pool + 6.0 * halo));\n"
                // research (LARECOMP_DL_DEBUG=1): blue where the sample above the pixel has a source, green = its depth minus the pixel's / 2000
                "    if (pc.d.w < -0.5) {\n"
@@ -1632,47 +1637,73 @@ static const char *builtin_src(const char *name, int *stage) {
                "  }\n"
                // as in ssrecomp's night: a vignette (edges 20% darker), and fireflies (soft yellow-green dots drifting over grass and
                // trees, 3 layers of cells). The output multiplies the scene, so an added light f is m += f / scene.
+               // night contrast (as DQ HD-2D's r.Color.Mid 0.7): the dark and middle tones of the lit result down to f.x, the bright ones
+               // (pools, windows, lamps) kept - the lights stand out more
+               "  float Lt = dot(e * m, vec3(0.2126, 0.7152, 0.0722));\n"
+               "  m *= mix(1.0, mix(pc.f.x, 1.0, smoothstep(0.12, 0.7, Lt)), pc.a.w);\n"
+               // cross streaks (as its r.Bloom.Cross): 4 soft rays from each source, the light map's level 1 read along the row and the
+               // column (a lens effect: no depth test), added light (m += f / scene)
+               "  if (pc.f.y > 0.0) {\n"
+               "    vec2 uv0 = (vec2(p) + 0.5) / pc.c.zw, st = vec2(7.0 * pc.c.w / 720.0) / pc.c.zw;\n"
+               "    vec3 sk = vec3(0.0);\n"
+               // (level 0, only its strong texels: thin rays from lamps and window centres; level 1 smeared whole windows into boxes)
+               "    for (int i = 1; i <= 10; i++) {\n"
+               "      float w = exp(-float(i) * 0.3);\n"
+               "      vec2 ox = vec2(st.x * float(i), 0.0), oy = vec2(0.0, st.y * float(i));\n"
+               "      vec3 s4 = max(texture(l0, uv0 + ox).rgb - 0.6, 0.0) + max(texture(l0, uv0 - ox).rgb - 0.6, 0.0) + max(texture(l0, uv0 + oy).rgb - 0.6, 0.0) + max(texture(l0, uv0 - oy).rgb - 0.6, 0.0);\n"
+               "      sk += w * s4;\n"
+               "    }\n"
+               "    m += pc.a.w * pc.f.y * min(0.1 * sk * vec3(1.0, 0.85, 0.65) / max(e, vec3(0.06)), vec3(6.0));\n"
+               "  }\n"
                "  vec2 ex = (vec2(p) + 0.5) / pc.c.zw * 2.0 - 1.0;\n"
                "  m *= mix(1.0, 1.0 - 0.2 * smoothstep(0.6, 1.3, sqrt(ex.x * ex.x * 0.8 + ex.y * ex.y)), pc.a.w);\n"
-               "  if (pc.d.x > 0.0 && d < 0.999999) {\n"
-               "    float s = pc.c.w / 720.0, T = pc.d.x;\n"
-               "    vec3 add = vec3(0.0);\n"
-               "    for (int L = 0; L < 3; L++) {\n"
-               "      float cell = (150.0 + 60.0 * float(L)) * s;\n"
-               "      vec2 id = floor(gl_FragCoord.xy / cell);\n"
-               "      for (int j = 0; j < 9; j++) {\n"
-               "        vec2 c = id + vec2(j % 3 - 1, j / 3 - 1);\n"
-               "        vec3 h = fract(sin(vec3(dot(c, vec2(127.1, 311.7)), dot(c, vec2(269.5, 183.3)), dot(c, vec2(419.2, 371.9))) + float(L) * 17.0) * 43758.5453);\n"
-               "        if (h.z > 0.45) continue;\n"
-               "        vec2 pos = (c + 0.15 + 0.7 * h.xy) * cell + cell * 0.3 * vec2(sin(T * (0.25 + h.x * 0.3) + h.y * 6.28), cos(T * (0.2 + h.y * 0.3) + h.x * 6.28));\n"
-               "        float dd = length(gl_FragCoord.xy - pos) / (s * (1.6 + float(L) * 0.5));\n"
-               "        if (dd > 5.0) continue;\n"
-               "        float blink = pow(max(0.0, sin(T * (0.9 + h.z * 1.5) + h.x * 40.0)), 3.0);\n"
-               "        vec3 g = texelFetch(t, clamp(ivec2(pos), ivec2(0), ivec2(pc.c.zw) - 1), 0).rgb;\n"
-               "        float green = smoothstep(0.0, 0.08, g.g - max(g.r, g.b) * 1.05);\n"  // only over grass / leaves
-               "        add += vec3(0.9, 1.0, 0.35) * 3.0 * blink * green * (exp(-dd * dd) + 0.12 * exp(-dd * dd * 0.12));\n"
-               "      }\n"
-               "    }\n"
-               // moonlight on water (vivid blue, not lit, not sky): a faint silver sheen, and smooth horizontal ripple highlights along a
-               // moon path (a fixed screen column, widening toward the camera: the moon is far, the camera angle fixed). No per-pixel
-               // random glints: they read as grain.
-               "    float wl = dot(e, vec3(0.2126, 0.7152, 0.0722));\n"
-               "    float water = smoothstep(0.12, 0.25, e.b - max(e.r * 1.6, e.g * 1.1)) * (1.0 - smoothstep(0.5, 0.8, wl));\n"
-               "    if (water > 0.0) {\n"
-               "      vec2 sp = gl_FragCoord.xy / pc.c.zw;\n"
-               "      float path = exp(-pow((sp.x - 0.64) / (0.06 + 0.16 * sp.y), 2.0));\n"
-               "      vec2 g = gl_FragCoord.xy / s;\n"
-               "      float rip = 0.5 + 0.5 * sin(g.y * 0.2 + 2.2 * sin(g.x * 0.021 + T * 0.6) + sin(g.x * 0.047 - T * 0.9) + T * 1.3);\n"
-               "      float rip2 = 0.5 + 0.5 * sin(g.y * 0.23 - 1.7 * sin(g.x * 0.033 - T * 0.4) - T * 0.8);\n"
-               "      vec2 nq = g * vec2(0.025, 0.11) + vec2(T * 0.15, 0.0), ni = floor(nq), nf = fract(nq);\n"  // smooth value noise: breaks the bands into streaks
-               "      nf = nf * nf * (3.0 - 2.0 * nf);\n"
-               "      vec4 nh = fract(sin(vec4(dot(ni, vec2(127.1, 311.7)), dot(ni + vec2(1, 0), vec2(127.1, 311.7)), dot(ni + vec2(0, 1), vec2(127.1, 311.7)), dot(ni + vec2(1, 1), vec2(127.1, 311.7)))) * 43758.5453);\n"
-               "      float nz = mix(mix(nh.x, nh.y, nf.x), mix(nh.z, nh.w, nf.x), nf.y);\n"
-               "      float shine = pow(rip, 6.0) * (0.6 + 0.4 * rip2) * smoothstep(0.45, 0.85, nz);\n"
-               "      add += vec3(0.75, 0.85, 1.0) * water * (0.015 + 0.05 * path + 1.0 * shine * path);\n"
-               "    }\n"
-               "    m += pc.a.w * min(add / max(e, vec3(0.06)), vec3(8.0));\n"
+               // (the fireflies: their own pass, dl_ff.frag, in the world; the moon on water: inside the water's own shader, ShaderKey.glowck 2)
+               "  if (any(isnan(m)) || any(isinf(m))) m = pc.a.rgb;\n"  // (one bad pixel -> the game's bloom -> a black frame)
+               "  o = vec4(clamp(m, 0.0, 64.0), 1.0);\n"
+               "}\n";
+    }
+    // dl_ff: fireflies in the world. The pixel's surface point (depth -> inverse view-projection) picks 1.5 m cells around it; a cell
+    // has a fly (35%) hovering at a hashed point, drifting; drawn where it projects (pc.vp: this frame's camera), over grass only,
+    // not behind the surface. Scene copy (0), depth (1); a = (width, height, seconds, depth mode), b = (y flip, night, -, -),
+    // c.rgb = the tint (the output multiplies the tinted scene: the fly's light is divided by it).
+    if (!strcmp(name, "dl_ff.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { layout(row_major) mat4 vp; vec4 a; vec4 b; vec4 c; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "vec2 scr(vec4 cl) { vec2 n = cl.xy / cl.w; return vec2(n.x * 0.5 + 0.5, pc.b.x > 0.5 ? 0.5 - n.y * 0.5 : n.y * 0.5 + 0.5) * pc.a.xy; }\n"
+               "void main() {\n"
+               "  o = vec4(1.0);\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.a.xy;\n"
+               "  ivec2 dsz = textureSize(dep, 0);\n"
+               "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
+               "  if (d >= 0.999999) return;\n"
+               "  vec4 nd = vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "  vec4 wp = inverse(pc.vp) * nd;\n"
+               "  if (abs(wp.w) < 1e-6) return;\n"
+               "  vec3 P = wp.xyz / wp.w;\n"
+               "  float zp = (pc.vp * vec4(P, 1.0)).w, s = pc.a.y / 720.0, T = pc.a.z;\n"
+               "  vec3 add = vec3(0.0), base = floor(P / 150.0);\n"
+               "  for (int j = 0; j < 27; j++) {\n"
+               "    vec3 c = base + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1);\n"
+               "    vec4 h = fract(sin(vec4(dot(c, vec3(127.1, 311.7, 74.7)), dot(c, vec3(269.5, 183.3, 246.1)), dot(c, vec3(113.5, 271.9, 124.6)), dot(c, vec3(419.2, 371.9, 168.2)))) * 43758.5453);\n"
+               "    if (h.w > 0.35) continue;\n"
+               "    vec3 F = (c + 0.2 + 0.6 * h.xyz) * 150.0 + 30.0 * vec3(sin(T * (0.25 + h.x * 0.3) + h.y * 6.28), 0.5 * sin(T * (0.4 + h.z * 0.3) + h.x * 3.0), cos(T * (0.2 + h.y * 0.3) + h.x * 6.28));\n"
+               "    vec4 cl = pc.vp * vec4(F, 1.0);\n"
+               "    if (cl.w < 50.0 || cl.w > zp + 40.0) continue;\n"  // (behind the camera, or behind the surface here)
+               "    vec2 S = scr(cl);\n"
+               "    float r = clamp(1800.0 * s / cl.w, 1.0, 5.0 * s), dd = length(gl_FragCoord.xy - S) / r;\n"
+               "    if (dd > 5.0) continue;\n"
+               "    float blink = pow(max(0.0, sin(T * (0.9 + h.z * 1.5) + h.x * 40.0)), 3.0);\n"
+               "    vec3 g = texelFetch(t, clamp(ivec2(S), ivec2(0), ivec2(pc.a.xy) - 1), 0).rgb;\n"
+               "    float green = smoothstep(0.0, 0.08, g.g - max(g.r, g.b) * 1.05);\n"  // only over grass / leaves
+               "    add += vec3(0.9, 1.0, 0.35) * 3.0 * blink * green * (exp(-dd * dd) + 0.12 * exp(-dd * dd * 0.12));\n"
                "  }\n"
+               "  vec3 e = texelFetch(t, ivec2(gl_FragCoord.xy), 0).rgb;\n"
+               "  vec3 m = 1.0 + pc.b.y * min(add / max(e * pc.c.rgb, vec3(0.03)), vec3(16.0));\n"
+               "  if (any(isnan(m)) || any(isinf(m))) m = vec3(1.0);\n"
                "  o = vec4(m, 1.0);\n"
                "}\n";
     }

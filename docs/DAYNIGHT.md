@@ -33,7 +33,7 @@ Status (26 October 2026): scene tint by the clock (overworld only, UI untouched)
 - **Interiors.** `runtime/services/fs.c` notes which light set the game last read (`field/draw_env/default|room|dungeon`, logged as
   `[fs] light set: ...`); `daynight_tint` returns false for `room` and `dungeon`. `default` is confirmed in the overworld (Pallet, Viridian);
   that an interior really loads `room` is NOT verified yet (no walk into a building was run).
-- **Dynamic lights** (off by default since 2026-10-26, pending retest; `LARECOMP_LIGHTS=1` turns them on; `LARECOMP_DL_GAIN`, default 2.5; `LARECOMP_DL_ZW` depth window; `LARECOMP_DL_FLIP`).
+- **Dynamic lights** (on by default; `LARECOMP_LIGHTS=0` turns them off; `LARECOMP_DL_GAIN`, default 2.5; `LARECOMP_DL_ZW` depth window; `LARECOMP_DL_FLIP`).
   In the night pass (`ssao_run`): the lit pixels (pre-tint brightness above a threshold: glowing draws are boosted by M / T) are reduced to a
   1/4-size light map with each source's colour (its own hue, half toward warm), intensity and view depth (`dl_extract.frag`), a 4-level
   blur pyramid is built for the halo (`dl_down.frag`), and `dl_apply.frag` multiplies the scene by the tint x (1 + the light reaching the
@@ -158,3 +158,33 @@ Blur widened: pool uses pyramid level from radius/2; halo = levels 2+3 (results/
 - Pool: 4 lookups 40..280 cm above the pixel, nearer weighing more (was one 230 cm shift: a lit facade became a flat rectangle on the ground); max pyramid level 2.
 - Water (vivid blue, unlit): silver sheen + smooth ripple streaks along a moon column (screen x 0.64), broken by value noise. Random per-pixel glints removed (grain). Shots: `tests/runs/water/`, `tests/runs/waterdoor/_sheet.png`.
 - Light sources must be warm (r >= 1.15 b): white caps, water foam and glints no longer make pools (pink patch on water). Pool looks 0..150 cm up (mostly radial: the 40..280 cm version drew beams down the screen). Moon ripples lower frequency (no aliasing dots).
+
+## Settings from DQ HD-2D's "Dynamic Lighting Improvements" (2026-10-26)
+That mod (gamebanana 637365, Dragon Quest I & II HD-2D, Unreal) is only engine settings (`[ConsoleVariables]` in DefaultEngine.ini,
+copy in `tests/reference/dq-dli-mod/`). Three ideas ported to `dl_apply.frag`, each with a switch:
+- `LARECOMP_DL_CONTRAST` (0.7; 1 = off): its `r.Color.Mid=0.7` - at night the dark and middle tones go down to 0.7, the bright ones
+  (pools, windows, lamps) stay: more contrast between lit and unlit.
+- `LARECOMP_DL_STREAK` (1; 0 = off): its `r.Bloom.Cross=4.5` - 4 soft rays from each light (light map level 1 read along the row and
+  column, 8 steps of 10 px at 720p, no depth test).
+- `LARECOMP_DL_FAR` (2.5; 1 = off): its `r.LightMaxDrawDistanceScale=2.5` - the pools' depth window widens up to 2.5x from 15 m to
+  60 m, so far lamps keep their pools.
+Not ported: its shadow, AO, fog, DOF and resolution settings (the game's own renderer, or already ours).
+
+## Fireflies in the world, moon off, no black frames (2026-10-26)
+- Fireflies: own pass `dl_ff.frag`, placed in 1.5 m world cells around the visible surface (depth -> inverse of this frame's
+  view-projection `ao.vp`) and projected back: they stay put as the camera moves (they slid with the screen before) and hide
+  behind walls. Shots: `tests/runs/daynight/results/walk_fireflies*.png`.
+- Moonlight on water: off by default (`LARECOMP_DL_MOON=1`). Its colour test also took blue roofs for water; a real fix would tag
+  the game's water draws like the glow textures.
+- Black frames while walking (reported, not reproduced): a NaN / inf from the light pass would be spread over the whole frame by
+  the game's bloom. The light map drops non-finite depths and both passes replace a non-finite output.
+
+## Moon on the water only (2026-10-26)
+- The water's draw is found by its fragment shader (`0x35899cd94b78efd3`: Viridian's pond and route 21's sea; bisected with
+  `THRESH=30 tests/scripts/bisect_tex.py ... fs` - the water animates, so the default threshold 6 always reads "changed").
+  At night it gets a shader variant (`ShaderKey.glowck = 2`) that adds the sheen and ripple streaks inside the water itself:
+  no colour guessing, roofs stay dry. `LARECOMP_DL_MOON=0` turns it off; `LARECOMP_WATER_FSHASH=<hex>,...` adds other water shaders.
+- Bug found on the way: `get_program`'s cache key left out `glowck`, so its variants got the plain program - the glass colour key
+  (`glowck = 1`, Mart door glass inside its wall texture) never applied before either. Now it is part of the key.
+- `LARECOMP_SAVE_MSL=1` now saves variants as `<addr>_fs_water.glsl` / `_fs_glass.glsl` instead of overwriting the plain one.
+- Shots: `tests/runs/daynight/results/moon_water_only.png` (pond, Pallet, route 21).

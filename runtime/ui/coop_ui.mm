@@ -9,6 +9,7 @@ extern "C" {
 #include "../coop_battle_link.h"
 #include "../coop_battle_names.h"
 uint64_t plat_now_ns(void);
+bool coop_battle_native_ui(void);
 void input_reset(void);
 void input_quarantine_pad(void);
 }
@@ -16,18 +17,20 @@ void input_quarantine_pad(void);
 bool coop_battle_ui_captures(void) {
     CoopBattleLinkView v;coop_battle_link_view(&v);
     return !v.host && plat_now_ns()<v.deadline_ns &&
-        (v.phase==COOP_LINK_OFFER || (v.phase==COOP_LINK_ACTIVE && v.waiting));
+        (v.phase==COOP_LINK_OFFER || (v.phase==COOP_LINK_ACTIVE && v.waiting && !coop_battle_native_ui()));
 }
 
 void coop_battle_ui_draw(float scale) {
     CoopBattleLinkView v;coop_battle_link_view(&v);uint64_t now=plat_now_ns();
     bool offer=v.phase==COOP_LINK_OFFER && now<v.deadline_ns;
     bool prepare=v.host && v.phase==COOP_LINK_PREPARING && now<v.deadline_ns;
-    bool choosing=!v.host && v.phase==COOP_LINK_ACTIVE && v.waiting;
+    // Mirror trial: the guest chooses in the game's own battle menu, and both wait in its message window.
+    bool native=coop_battle_native_ui();
+    bool choosing=!v.host && v.phase==COOP_LINK_ACTIVE && v.waiting && !native;
     bool toast=v.outcome==2 && now<v.toast_until_ns;
     static bool was_captured;bool capture=!v.host && now<v.deadline_ns && (offer || choosing);
     if(was_captured && !capture){input_quarantine_pad();input_reset();}was_captured=capture;
-    if(!offer && !prepare && !choosing && !v.waiting && !toast)return;
+    if(!offer && !prepare && !choosing && !(v.waiting && !native) && !toast)return;
     ImGuiIO &io=ImGui::GetIO();
     ImGui::SetNextWindowPos(v.host?ImVec2(24*scale,24*scale):ImVec2(io.DisplaySize.x*.5f,24*scale),ImGuiCond_Always,ImVec2(v.host?0:.5f,0));
     ImGui::SetNextWindowSize(ImVec2((v.host?430:510)*scale,0),ImGuiCond_Always);
