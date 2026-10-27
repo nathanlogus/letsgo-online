@@ -3860,15 +3860,16 @@ static void draw_(CmdRec *r, bool indexed) {
     if (drawlog(pr, r, indexed)) return;  // (research: LARECOMP_DRAWLOG, LARECOMP_SKIP_TEX)
     float glow_pre[3];
     bool opaque = st.rt.depth && st.ds[0] && !(st.color_state[0] & 1);
-    bool em = opaque && glow_em_draw(pr);  // (night lights: dark glass gets a warm light added - before the multiplier, which keeps it dark)
-    bool glow = !em && opaque && glow_draw(pr, glow_pre);  // (night lights)
-    if (em || (!glow && opaque && glow_ck_draw(pr))) {  // (night lights: dark glass, or glass inside a texture)
+    bool lit = daynight_night() >= 0.05f;  // (by day nothing glows: none of the checks - they were 16 us of every draw)
+    bool em = lit && opaque && glow_em_draw(pr);  // (night lights: dark glass gets a warm light added - before the multiplier, which keeps it dark)
+    bool glow = !em && lit && opaque && glow_draw(pr, glow_pre);  // (night lights)
+    if (em || (!glow && lit && opaque && glow_ck_draw(pr))) {  // (night lights: dark glass, or glass inside a texture)
         ShaderKey fk3 = fkey;
         fk3.glowck = em ? 3 : 1;
         Prog *pg = get_program(st.program, &vkey, &fk3);
         if (pg) wait_built(&pg->state);
         if (pg && atomic_load(&pg->state) == 1) pr = pg, fkey.glowck = fk3.glowck;
-    } else if (!glow && st.rt.depth && st.ds[0] && water_draw()) {  // (night: the moon on the water, in its own shader)
+    } else if (!glow && lit && st.rt.depth && st.ds[0] && water_draw()) {  // (night: the moon on the water, in its own shader)
         ShaderKey fk3 = fkey;
         fk3.glowck = 2;
         Prog *pg = get_program(st.program, &vkey, &fk3);

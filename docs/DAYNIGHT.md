@@ -419,3 +419,8 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   translation 118-226 -> 20-59 ms on the workers. A start-up read-ahead of the listed translations and their SPIR-V
   (LASRecomp's shader prep, adapted) was tried and dropped: world entry was the same with and without it (113 vs 110 ms
   worst frame) - the time left is pipelines and the per-frame wait budget, not reading caches.
+- Walking was ~40 fps with the effects on or off: the render thread, not the GPU (busy ~8 of 14.5 ms). 16-18 us of every draw
+  went to the night-light checks (glow_em / glow / glow_ck_draw) - all day too - nearly all of it `getenv("LARECOMP_HOUR")`
+  in daynight_hour / daynight_night, asked per draw and texture. Read once now, the hour's values reused, and by day no check
+  runs: 37 ns a draw at noon, ~1.1 us at night; walking at 60 fps day and night (`tests/scripts/run-walk.sh`;
+  results/walk_fix_noon_night.png). Earlier "walks" pressed the D-pad, which does not move the player: use STICK_UP etc.

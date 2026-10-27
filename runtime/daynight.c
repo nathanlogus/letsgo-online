@@ -17,8 +17,9 @@ static const Key keys[] = {  // (night: ssrecomp's ambient 0.40 / 0.45 / 0.70 - 
 
 float daynight_hour(void) {
     if (g_settings.daynight_hour >= 0) return (float)g_settings.daynight_hour;  // (the menu's fixed hour wins over LARECOMP_HOUR)
-    const char *e = getenv("LARECOMP_HOUR");
-    if (e && *e) return fmodf(fabsf((float)atof(e)), 24.0f);
+    static float env = -2;  // (read once: getenv on every call was most of a draw's CPU time - exec.c asks per draw and texture)
+    if (env == -2) { const char *e = getenv("LARECOMP_HOUR"); env = e && *e ? fmodf(fabsf((float)atof(e)), 24.0f) : -1; }
+    if (env >= 0) return env;
     static time_t t0;
     static float h0;
     if (!t0) {
@@ -33,6 +34,9 @@ float daynight_hour(void) {
 
 static Key sample(void) {
     float h = daynight_hour();
+    static float last_h = -1;  // (the same hour: the last one's values)
+    static Key last;
+    if (h == last_h) return last;
     int i = 0;
     while (i < (int)(sizeof keys / sizeof *keys) - 2 && h >= keys[i + 1].h) i++;
     const Key *a = &keys[i], *b = &keys[i + 1];
@@ -42,6 +46,7 @@ static Key sample(void) {
 #define L(f) k.f = a->f + (b->f - a->f) * t
     L(r), L(g), L(b), L(mul), L(sat), L(night);
 #undef L
+    last_h = h, last = k;
     return k;
 }
 
@@ -113,7 +118,11 @@ void daynight_weather(Weather *w) {
 }
 float daynight_rain(void) { Weather w; daynight_weather(&w); return w.rain; }
 
-float daynight_night(void) { return g_settings.daynight || getenv("LARECOMP_HOUR") ? sample().night : 0; }
+float daynight_night(void) {
+    static int env = -1;
+    if (env < 0) env = getenv("LARECOMP_HOUR") != NULL;
+    return g_settings.daynight || env ? sample().night : 0;
+}
 
 extern bool game_title(void);         // runtime/hle/fps60.c: before the world's first update (logos, title, loading)
 extern int fs_env_set(void);          // runtime/services/fs.c: the light set the game loaded last (2 room, 3 dungeon: not the outdoors)
