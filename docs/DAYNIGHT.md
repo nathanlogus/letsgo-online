@@ -396,3 +396,14 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   shadows to the right; the shading turns with it. The clouds follow (they read the shadow map's light).
 - Regression found on the way: the 2x sun shadow map (`LARECOMP_SHADOW_SCALE`) removed every sun shadow - default back to 1
   (the game's), and a comment that had swallowed the end of `tex_shadow_k` (it returned garbage after the first call) fixed.
+
+## Performance pass (2026-10-27)
+
+- Report: 60 fps -> ~50 and laggy with the new effects (TAA, frame generation Auto, 1080p+). With frame generation a real frame and its
+  in-between image share 16.7 ms; measured ~17.5 ms, so Auto lowered the in-between images.
+- Clouds were the dearest (1.1 ms at 1080p, and again in each in-between image): a 4x4 inverse per pixel and 25 noise lookups. The
+  inverse is now made once on the CPU (passed instead of the matrix), the octaves 2 + 2 (warp), 4 (shape), 3 (wisps) = 11 lookups,
+  the distance from the depth: 0.48 ms. Atmosphere (3 inverses per pixel) and rain take the inverse too (atmosphere 0.16 -> 0.09 ms);
+  fireflies make theirs once per pixel instead of up to 5 times. The frame measured 13.7 ms.
+- The moving sun's search for the game's copies (16 MB read) retried every frame for up to 120 frames after a load; now every
+  15 frames, 8 times, comparing one word first.

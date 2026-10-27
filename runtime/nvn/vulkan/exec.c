@@ -5255,8 +5255,11 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
         if (clouds < 0) clouds = getenv("LARECOMP_CLOUDS") ? (float)atof(getenv("LARECOMP_CLOUDS")) : 99;
         float cl_k = clouds < 98 ? clouds : g_settings.cloud_shadows;  // (the setting, unless the variable)
         if (cl_k > 0 && ao.vp_frame) {  // cloud shadows drifting over the ground, in the world by this frame's camera (clouds.frag)
-            float pc[28];
-            for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
+            float pc[32];
+            double ivp[16];  // (the inverse once here, not per pixel: clouds.frag took 1.1 ms at 1080p)
+            if (!mat4_inverse(ao.vp, ivp)) memset(ivp, 0, sizeof ivp);
+            for (int i = 0; i < 16; i++) pc[i] = (float)ivp[i];
+            pc[28] = ao.proj[2], pc[29] = ao.proj[3], pc[30] = pc[31] = 0;  // (d: the distance from the depth)
             static float cover = -1;  // LARECOMP_CLOUD_COVER: how much of the sky is cloud, 0..1 (default 0.5)
             if (cover < 0) cover = getenv("LARECOMP_CLOUD_COVER") ? fminf(fmaxf((float)atof(getenv("LARECOMP_CLOUD_COVER")), 0), 1) : 0.5f;
             // (projected along the sun - the shadow map's light, sun_dir - else a fixed slant; a low sun is clamped)
@@ -5284,7 +5287,9 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
                 fog[3] *= (1.0f + 2.5f * rn) * (1.0f + 45.0f * wx.fog), stars *= 1.0f - fminf(wx.cloud * 1.7f, 1.0f);  // (overcast, rain, snow: none)
             }
             float pc[32];
-            for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
+            double ivp[16];  // (atmo.frag takes the inverse: it only unprojects)
+            if (!mat4_inverse(ao.vp, ivp)) memset(ivp, 0, sizeof ivp);
+            for (int i = 0; i < 16; i++) pc[i] = (float)ivp[i];
             float rest[16] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 1000000) / 1000.0f, mo, hor[0], hor[1], hor[2], stars,
                               zen[0], zen[1], zen[2], fog[3], fog[0], fog[1], fog[2], 0};
             memcpy(pc + 16, rest, sizeof rest);
@@ -5332,7 +5337,9 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
         if (getenv("LARECOMP_FLASH")) flash = (float)atof(getenv("LARECOMP_FLASH"));  // (tests: a fixed flash)
         if ((rn > 0.01f || wx.snow > 0.01f || flash > 0.005f) && ao.vp_frame) {
             float pc[28] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 1000000) / 1000.0f, rn, ao.proj[2], ao.proj[3], mo, night};
-            for (int i = 0; i < 16; i++) pc[8 + i] = (float)ao.vp[i];  // (the splashes, the settled snow: in the world)
+            double ivp[16];  // (rain.frag takes the inverse: it only unprojects)
+            if (!mat4_inverse(ao.vp, ivp)) memset(ivp, 0, sizeof ivp);
+            for (int i = 0; i < 16; i++) pc[8 + i] = (float)ivp[i];  // (the splashes, the settled snow: in the world)
             pc[24] = wx.snow, pc[25] = flash, pc[26] = pc[27] = 0;
             VkPipeline p_copy = post_pipeline_ex("copy.frag", ao.cfmt, 0), p_rain = post_pipeline_ex("rain.frag", ao.cfmt, 2);
             TexBackend *rc = post_image_fmt(55, ao.cw, ao.ch, ao.cfmt);

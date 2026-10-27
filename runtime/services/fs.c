@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <SDL3/SDL_timer.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -397,9 +398,10 @@ static bool g_sun_found;
 // The game's copies, once after a load: 2 MB around each table searched for its float3 (the table itself left out). The game
 // reads the tables once and keeps its own (the shadow light: one copy ~30 KB away); the per-frame constant buffers are rewritten
 // from those.
+static int g_sun_tries, g_sun_wait;  // (a load resets them: note_sun)
 static void sun_find(void) {
-    static int tries;
     int total = 0;
+    uint64_t t0 = SDL_GetTicksNS();
     g_sun_found = true;
     extern uint64_t kernel_heap_size(void);
     const uint8_t *hlo = (const uint8_t *)(uintptr_t)0x7240000000ull, *hhi = hlo + kernel_heap_size();
@@ -410,18 +412,26 @@ static void sun_find(void) {
         if (lo < hlo) lo = hlo;
         if (hi > hhi) hi = hhi;
         int n = 0;
-        for (const uint8_t *q = lo; q + 12 <= hi && n < 4; q += 4)
-            if (q != g_sun_tab[i] + 40 && (!memcmp(q, g_sun_last[i], 12) || !memcmp(q, g_sun_orig[i], 12))) g_sun_copy[i][n++] = (uint8_t *)q;
+        uint32_t w0, w1;  // (the first word first: one compare per position)
+        memcpy(&w0, g_sun_last[i], 4), memcpy(&w1, g_sun_orig[i], 4);
+        for (const uint8_t *q = lo; q + 12 <= hi && n < 4; q += 4) {
+            uint32_t w = *(const uint32_t *)q;
+            if ((w == w0 || w == w1) && q != g_sun_tab[i] + 40 && (!memcmp(q, g_sun_last[i], 12) || !memcmp(q, g_sun_orig[i], 12)))
+                g_sun_copy[i][n++] = (uint8_t *)q;
+        }
         total += n;
-        if (n || tries == 119) LOG("[sun] table %d: %d copies near it\n", i, n);
+        if (n || g_sun_tries == 7) LOG("[sun] table %d: %d copies near it\n", i, n);
     }
-    if (!total && ++tries < 120) g_sun_found = false;  // (the game may make its copies a little after the read: again, up to ~4 s)
+    // (the game may make its copies a little after the read: again every 15 frames, 8 times - each search ~16 MB read)
+    if (!total && ++g_sun_tries < 8) g_sun_found = false;
+    static int nl;
+    if (nl++ < 4) LOG("[sun] search: %.2f ms\n", (double)(SDL_GetTicksNS() - t0) / 1e6);
 }
 // Each frame (runtime/daynight.c daynight_sun_update): the directions turned by the hour - azimuth + daz (radians, about the
 // vertical), elevation x ek - into the tables and the game's copies of them. One whose value is neither its original nor what was
 // written last was reused by the game: left alone from then on.
 void fs_sun_apply(float daz, float ek) {
-    if (!g_sun_found) sun_find();
+    if (!g_sun_found && g_sun_wait++ % 15 == 0) sun_find();
     for (int i = 0; i < 4; i++) {
         const float *o = g_sun_orig[i];
         float hl = sqrtf(o[0] * o[0] + o[2] * o[2]), el = atan2f(-o[1], hl), az = atan2f(o[2], o[0]);
@@ -468,7 +478,7 @@ static void note_sun(const char *path, uint8_t *dst, uint64_t size) {
                                          "draw_env/default/EnvDirLight1.gfblt", "draw_env/default/EnvDirLight2.gfblt"};
     for (int i = 0; i < 4; i++)
         if (strstr(path, names[i]) && size >= 52) {
-            g_sun_tab[i] = dst, g_sun_found = false;  // (a new load: its copies searched again)
+            g_sun_tab[i] = dst, g_sun_found = false, g_sun_tries = g_sun_wait = 0;  // (a new load: its copies searched again)
             memcpy(g_sun_orig[i], dst + 40, 12), memcpy(g_sun_last[i], dst + 40, 12);
             static int n;
             if (n++ < 8) { float v[3]; memcpy(v, dst + 40, 12); LOG("[sun] %s at %p: (%.3f, %.3f, %.3f)\n", names[i] + 17, (void *)dst, v[0], v[1], v[2]); }

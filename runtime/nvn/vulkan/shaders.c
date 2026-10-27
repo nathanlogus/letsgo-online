@@ -1754,13 +1754,14 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec4 o;\n"
                "vec2 scr(vec4 cl) { vec2 n = cl.xy / cl.w; return vec2(n.x * 0.5 + 0.5, pc.b.x > 0.5 ? 0.5 - n.y * 0.5 : n.y * 0.5 + 0.5) * pc.a.xy; }\n"
                // the surface point under a pixel (false: the sky)
+               "mat4 g_iv;\n"  // (the inverse once per pixel, in main: at() runs up to 5 times)
                "bool at(vec2 fc, out vec3 P) {\n"
                "  vec2 uv = fc / pc.a.xy;\n"
                "  ivec2 dsz = textureSize(dep, 0);\n"
                "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
                "  P = vec3(0.0);\n"
                "  if (d >= 0.999999) return false;\n"
-               "  vec4 wp = inverse(pc.vp) * vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "  vec4 wp = g_iv * vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
                "  if (abs(wp.w) < 1e-6) return false;\n"
                "  P = wp.xyz / wp.w;\n"
                "  return true;\n"
@@ -1784,6 +1785,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "void main() {\n"
                "  o = vec4(1.0);\n"
                "  vec3 P;\n"
+               "  g_iv = inverse(pc.vp);\n"
                "  if (!at(gl_FragCoord.xy, P)) return;\n"
                "  float zp = (pc.vp * vec4(P, 1.0)).w, s = pc.a.y / 720.0, T = pc.a.z;\n"
                "  vec3 add = vec3(0.0), base[5];\n"
@@ -1826,7 +1828,7 @@ static const char *builtin_src(const char *name, int *stage) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
                "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
-               "layout(push_constant) uniform P { layout(row_major) mat4 vp; vec4 a; vec4 b; vec4 c; } pc;\n"  // c = (sun slope x, z, coverage, -)
+               "layout(push_constant) uniform P { layout(row_major) mat4 ivp; vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"  // c = (sun slope x, z, coverage, -)
                "layout(location = 0) out vec4 o;\n"
                // (an integer hash: the sin() one lost its precision on the octaves' large cell numbers - straight-edged patches)
                "float h2(vec2 c) { uvec2 q = uvec2(ivec2(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u;\n"
@@ -1839,11 +1841,11 @@ static const char *builtin_src(const char *name, int *stage) {
                "  return 0.5 + 0.7 * mix(mix(dot(gr(i), f), dot(gr(i + vec2(1, 0)), f - vec2(1, 0)), u.x),\n"
                "                         mix(dot(gr(i + vec2(0, 1)), f - vec2(0, 1)), dot(gr(i + vec2(1, 1)), f - vec2(1, 1)), u.x), u.y); }\n"
                // (5 octaves, each turned 37 degrees, the first too: no grid direction lines up)
-               "float fbm(vec2 x) {\n"
+               "float fbm(vec2 x, int n) {\n"
                "  float s = 0.0, a = 0.5;\n"
                "  mat2 r = mat2(0.8, 0.6, -0.6, 0.8);\n"
-               "  for (int i = 0; i < 5; i++) { x = r * x; s += a * gn(x); x = x * 2.03 + 11.7; a *= 0.5; }\n"
-               "  return s / 0.97;\n"
+               "  for (int i = 0; i < n; i++) { x = r * x; s += a * gn(x); x = x * 2.03 + 11.7; a *= 0.5; }\n"
+               "  return s / (1.0 - exp2(-float(n)));\n"
                "}\n"
                "void main() {\n"
                "  o = vec4(1.0);\n"
@@ -1852,7 +1854,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
                "  if (d >= 0.999999) return;\n"
                "  vec4 nd = vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
-               "  vec4 wp = inverse(pc.vp) * nd;\n"
+               "  vec4 wp = pc.ivp * nd;\n"
                "  if (abs(wp.w) < 1e-6) return;\n"
                "  vec3 P = wp.xyz / wp.w;\n"
                // (cm: clouds ~12 m, drifting ~40 cm/s; a wall's height moves its point along the sun; none past 30-50 m: the sky dome
@@ -1864,14 +1866,14 @@ static const char *builtin_src(const char *name, int *stage) {
                // "multiply inverse": lit = (1 - a) x (1 - 0.45 b)
                "  float T = pc.a.z;\n"
                "  vec2 g = Q / 1600.0 + T * vec2(0.022, 0.009);\n"
-               "  vec2 w = vec2(fbm(g * 0.7 + 3.1), fbm(g * 0.7 + 7.7));\n"
-               "  float n1 = clamp((fbm(g + 3.0 * (w - 0.5)) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
+               "  vec2 w = vec2(fbm(g * 0.7 + 3.1, 2), fbm(g * 0.7 + 7.7, 2));\n"
+               "  float n1 = clamp((fbm(g + 3.0 * (w - 0.5), 4) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
                "  vec2 g2 = mat2(0.9, 0.44, -0.44, 0.9) * Q / 650.0 + T * vec2(0.05, -0.03);\n"
-               "  float n2 = clamp((fbm(g2 + 5.3) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
+               "  float n2 = clamp((fbm(g2 + 5.3, 3) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
                "  float cov = pc.c.z, s1 = 0.12, s2 = 0.3;\n"
                "  float st1 = -s1 + (1.0 - cov) * (1.0 + 2.0 * s1), st2 = -s2 + (1.0 - 0.8 * cov) * (1.0 + 2.0 * s2);\n"
                "  float a1 = smoothstep(st1 - s1, st1 + s1, n1), a2 = smoothstep(st2 - s2, st2 + s2, n2);\n"
-               "  float sh = (1.0 - (1.0 - a1) * (1.0 - 0.45 * a2)) * (1.0 - smoothstep(3000.0, 5000.0, (pc.vp * vec4(P, 1.0)).w));\n"
+               "  float sh = (1.0 - (1.0 - a1) * (1.0 - 0.45 * a2)) * (1.0 - smoothstep(3000.0, 5000.0, (pc.d.y / ((pc.a.w > 0.5 ? d * 2.0 - 1.0 : d) + pc.d.x))));\n"
                "  o = vec4(vec3(1.0 - pc.b.y * sh), 1.0);\n"
                "  if (pc.b.z > 1.5) { vec2 c = floor(P.xz / 200.0); o = vec4(0.4 + 0.6 * vec3(h2(c), h2(c + 7.0), h2(c + 13.0)), 1.0); return; }\n"  // (=2: 2 m world cells, each its own tint)
                "  if (pc.b.z > 0.0) { vec2 gl = step(fract(P.xz / 100.0), vec2(0.08)); o = vec4(1.0 - 0.8 * max(gl.x, gl.y)); }\n"  // (LARECOMP_CLOUDS_DEBUG: a 1 m world grid, dark lines)
@@ -1890,7 +1892,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec4 o;\n"
                "float h3(vec3 c) { uvec3 q = uvec3(ivec3(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u ^ q.z * 2654435761u;\n"
                "  h = (h ^ (h >> 16)) * 2246822519u; h = (h ^ (h >> 13)) * 3266489917u; h ^= h >> 16; return float(h) * (1.0 / 4294967296.0); }\n"
-               "vec3 unproj(vec2 uv, float z) { vec4 w = inverse(pc.vp) * vec4(uv * 2.0 - 1.0, z, 1.0); return w.xyz / w.w; }\n"
+               "vec3 unproj(vec2 uv, float z) { vec4 w = pc.vp * vec4(uv * 2.0 - 1.0, z, 1.0); return w.xyz / w.w; }\n"
                "void main() {\n"
                "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
                "  vec3 col = texelFetch(t, p, 0).rgb;\n"
@@ -2018,7 +2020,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  }\n"
                "  col += vec3(0.6, 0.65, 0.75) * s * 0.22 * r * (1.0 - 0.6 * pc.b.w);\n"
                "  if (d < 0.999999) {\n"
-               "    vec4 wp = inverse(pc.vp) * vec4(uv * 2.0 - 1.0, pc.b.z > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "    vec4 wp = pc.vp * vec4(uv * 2.0 - 1.0, pc.b.z > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
                "    vec3 P = wp.xyz / wp.w, N = normalize(cross(dFdx(P), dFdy(P)));\n"
                "    float up = smoothstep(0.8, 0.95, abs(N.y));\n"
                // the splashes: near ground only - too small to read past 25 m; by the scene's light (dimmer at night)
