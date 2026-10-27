@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -55,6 +56,11 @@ Settings g_settings = {
     .movie_audio = true,
     .show_fps = false,
     .rt_shadows = true,
+    .cloud_shadows = 0.4f,
+    .sky_fx = true,
+    .reflections = true,
+    .light_shafts = true,
+    .rt_ao = true,
     .wild_battle = true,
     .render_thread = true,
     .vertex_read = VREAD_AUTO,
@@ -123,6 +129,11 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
     else if (!strcmp(key, "lossless")) g_settings.lossless = atoi(val) != 0;
     else if (!strcmp(key, "rt_shadows")) g_settings.rt_shadows = atoi(val) != 0;
+    else if (!strcmp(key, "cloud_shadows")) g_settings.cloud_shadows = fminf(fmaxf((float)atof(val), 0), 1);
+    else if (!strcmp(key, "sky_fx")) g_settings.sky_fx = atoi(val) != 0;
+    else if (!strcmp(key, "reflections")) g_settings.reflections = atoi(val) != 0;
+    else if (!strcmp(key, "light_shafts")) g_settings.light_shafts = atoi(val) != 0;
+    else if (!strcmp(key, "rt_ao")) g_settings.rt_ao = atoi(val) != 0;
     else if (!strcmp(key, "weather")) g_settings.weather = atoi(val) >= 0 && atoi(val) <= 6 ? atoi(val) : 0;
     else if (!strcmp(key, "resolution")) {
         int n = atoi(val);
@@ -313,6 +324,11 @@ void settings_save(void) {
     fprintf(f, "lossless = %d\n", g_settings.lossless);
     fprintf(f, "rt_shadows = %d\n", g_settings.rt_shadows);
     fprintf(f, "weather = %d\n", g_settings.weather);
+    fprintf(f, "cloud_shadows = %.2f\n", g_settings.cloud_shadows);
+    fprintf(f, "sky_fx = %d\n", g_settings.sky_fx);
+    fprintf(f, "reflections = %d\n", g_settings.reflections);
+    fprintf(f, "light_shafts = %d\n", g_settings.light_shafts);
+    fprintf(f, "rt_ao = %d\n", g_settings.rt_ao);
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");

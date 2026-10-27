@@ -1693,7 +1693,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "        vec3 T = normalize(cross(D, abs(D.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0))), U = cross(D, T);\n"
                "        float vis = 0.0;\n"
                "        for (int r = 0; r < 4; r++) {\n"
-               "          float an = a0 + float(r) * 1.5707963;\n"
+               "          float an = a0 + float(r) * 1.5707963 + fract(pc.d.x * 0.618) * 6.2831853;\n"  // (turned each frame: TAA averages the 4 rays' pattern away)
                "          vec3 Br = B + 60.0 * (cos(an) * T + sin(an) * U), Dr = Br - O;\n"
                "          rayQueryEXT rq;\n"
                "          rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, O, 0.0, normalize(Dr), max(length(Dr) - 50.0, 0.0));\n"
@@ -2025,6 +2025,10 @@ static const char *builtin_src(const char *name, int *stage) {
                "    if (r > 0.01 && z < 2500.0) col += vec3(0.75, 0.8, 0.9) * splash(P) * up * (1.0 - smoothstep(1500.0, 2500.0, z)) * r * 0.12 * max(L, 0.08) / 0.3;\n"
                // snow settled on what faces up: toward white at the scene's light, broken up by a world noise so the ground shows through
                "    if (sn > 0.01) {\n"
+               // water frozen: the strongly blue level pixels (as ssr.frag finds them) to a pale icy blue at the scene's light
+               "      vec3 c0 = texelFetch(t, p, 0).rgb;\n"
+               "      float ice = up * smoothstep(0.06, 0.16, c0.b - max(c0.r, c0.g) * 1.15) * sn;\n"
+               "      col = mix(col, vec3(0.72, 0.84, 0.95) * max(max(c0.r, max(c0.g, c0.b)) * 0.85, 0.05), 0.8 * ice);\n"  // (by its brightest channel: a blue's luminance is low)
                "      vec2 g = P.xz / 60.0; vec2 i = floor(g), f = fract(g); f = f * f * (3.0 - 2.0 * f);\n"
                "      float nz = mix(mix(h1(i), h1(i + vec2(1, 0)), f.x), mix(h1(i + vec2(0, 1)), h1(i + vec2(1, 1)), f.x), f.y);\n"
                "      float cover = up * smoothstep(0.2, 0.6, nz + 0.35 * sn) * sn;\n"

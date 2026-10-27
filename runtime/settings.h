@@ -86,6 +86,11 @@ typedef struct {
     bool show_fps;
     bool lossless;       // start Lossless Scaling (Steam) with the game and press its scale hotkey (runtime/lossless.c; default off)
     bool rt_shadows;     // night lights cast ray-traced shadows, on a GPU with ray queries (runtime/nvn/vulkan/rt.c; default on)
+    float cloud_shadows; // the clouds' shadows: how dark under a cloud, 0..1 (default 0.4; exec.c clouds.frag)
+    bool sky_fx;         // the sky's colours, stars and haze by hour (default on; atmo.frag)
+    bool reflections;    // water (and wet ground) reflections (default on; ssr.frag)
+    bool light_shafts;   // sun shafts at dawn and dusk (default on; shafts.frag)
+    bool rt_ao;          // ray-traced ambient occlusion, on a GPU with ray queries (default on; rtao.frag)
     int weather;         // 0 clear, 1 rain, 2 changing, 3 cloudy, 4 storm, 5 snow, 6 fog (runtime/daynight.c daynight_weather; default 0)
     bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
     bool render_thread;  // the backend runs on its own thread (runtime/nvn/vulkan/renderthread.c); default on

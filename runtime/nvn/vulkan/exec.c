@@ -3634,7 +3634,7 @@ static float rt_ao_strength(void) {
 }
 static bool rt_ao(void) {
     extern bool game_title(void);
-    return rt_ao_strength() > 0 && g_settings.rt_shadows && g_vk.rt && !game_title() && rt_available();
+    return rt_ao_strength() > 0 && g_settings.rt_ao && g_vk.rt && !game_title() && rt_available();
 }
 
 // Night, the water's draw (its fragment shader: found with tests/scripts/bisect_tex.py on Viridian's pond; LARECOMP_WATER_FSHASH=<hex>,...
@@ -5252,8 +5252,9 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
         }
         gp_mark(cb, "ours: clouds");
         static float clouds = -1;  // LARECOMP_CLOUDS: the cloud shadows' depth in daylight (default 0.4; 0 = off), a third of it at night
-        if (clouds < 0) clouds = getenv("LARECOMP_CLOUDS") ? (float)atof(getenv("LARECOMP_CLOUDS")) : 0.4f;
-        if (clouds > 0 && ao.vp_frame) {  // cloud shadows drifting over the ground, in the world by this frame's camera (clouds.frag)
+        if (clouds < 0) clouds = getenv("LARECOMP_CLOUDS") ? (float)atof(getenv("LARECOMP_CLOUDS")) : 99;
+        float cl_k = clouds < 98 ? clouds : g_settings.cloud_shadows;  // (the setting, unless the variable)
+        if (cl_k > 0 && ao.vp_frame) {  // cloud shadows drifting over the ground, in the world by this frame's camera (clouds.frag)
             float pc[28];
             for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
             static float cover = -1;  // LARECOMP_CLOUD_COVER: how much of the sky is cloud, 0..1 (default 0.5)
@@ -5265,7 +5266,7 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
             {   static int said;
                 if (said++ == 300) LOG("[clouds] sun (%.2f, %.2f, %.2f)%s\n", L[0], L[1], L[2], sun.frame == fx_frame() && sun.votes > 0 ? "" : " (fixed slant: no shadow map light)"); }
             float rest[12] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 40000000) / 1000.0f, mo, 0.0f /* (as mv.frag) */,
-                              clouds * (1.0f - 0.67f * night) * (1.0f + 0.6f * wx.cloud), getenv("LARECOMP_CLOUDS_DEBUG") ? (float)atof(getenv("LARECOMP_CLOUDS_DEBUG")) : 0.0f, 0,
+                              cl_k * (1.0f - 0.67f * night) * (1.0f + 0.6f * wx.cloud), getenv("LARECOMP_CLOUDS_DEBUG") ? (float)atof(getenv("LARECOMP_CLOUDS_DEBUG")) : 0.0f, 0,
                               slope[0], slope[1], cover + (0.85f - cover) * wx.cloud, 0};  // (cloudy / rain / storm: overcast)
             memcpy(pc + 16, rest, sizeof rest);
             vk_full_barrier(cb);
@@ -5274,13 +5275,13 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
         gp_mark(cb, "ours: atmosphere");
         static int atmo = -1;  // LARECOMP_ATMO=0: no sky colours, stars or haze by hour (atmo.frag, runtime/daynight.c daynight_atmo)
         if (atmo < 0) atmo = !(getenv("LARECOMP_ATMO") && !strcmp(getenv("LARECOMP_ATMO"), "0"));
-        if (atmo && ao.vp_frame) {
+        if (atmo && g_settings.sky_fx && ao.vp_frame) {
             float hor[3], zen[3], fog[4], stars;
             daynight_atmo(hor, zen, fog, &stars);
             {   // (rain, snow: thicker, greyer haze; fog: a thick pale-grey one; clouds: fewer stars)
                 float rn = fmaxf(wx.rain, wx.snow), g = (fog[0] + fog[1] + fog[2]) / 3.0f, gl = fmaxf(g, 0.08f + 0.5f * (1.0f - night));
                 for (int k = 0; k < 3; k++) fog[k] += (g - fog[k]) * 0.6f * rn, fog[k] += (gl * 1.05f - fog[k]) * 0.8f * wx.fog;
-                fog[3] *= (1.0f + 2.5f * rn) * (1.0f + 45.0f * wx.fog), stars *= 1.0f - fminf(wx.cloud * 1.4f, 1.0f);
+                fog[3] *= (1.0f + 2.5f * rn) * (1.0f + 45.0f * wx.fog), stars *= 1.0f - fminf(wx.cloud * 1.7f, 1.0f);  // (overcast, rain, snow: none)
             }
             float pc[32];
             for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
@@ -5303,7 +5304,7 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
         static float ssr = -1;
         if (ssr < 0) ssr = getenv("LARECOMP_SSR") ? (float)atof(getenv("LARECOMP_SSR")) : 1.0f;
         uint32_t bs = ao.scene_size[ao.scene_cur];
-        if (ssr > 0 && ao.poff >= 64 && ao.poff <= bs) {
+        if (ssr > 0 && g_settings.reflections && ao.poff >= 64 && ao.poff <= bs) {
             float v[16];
             memcpy(v, ao.scene[ao.scene_cur] + ao.poff - 64, sizeof v);
             float pc[16] = {ao.proj[0], ao.proj[1], ao.proj[2], ao.proj[3], v[1], v[5], -v[9], mo,
@@ -5349,7 +5350,7 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
         static int shafts = -1;
         if (shafts < 0) shafts = !(getenv("LARECOMP_SHAFTS") && !strcmp(getenv("LARECOMP_SHAFTS"), "0"));
         float Ls[3];
-        if (shafts && ao.vp_frame && sun_dir(fx_frame(), Ls) && night < 0.9f) {
+        if (shafts && g_settings.light_shafts && ao.vp_frame && sun_dir(fx_frame(), Ls) && night < 0.9f) {
             double cl[4] = {0};
             for (int r = 0; r < 4; r++) for (int c = 0; c < 3; c++) cl[r] += ao.vp[r * 4 + c] * Ls[c];
             float edge = 4.0f * night * (1.0f - night);  // (1 at dusk / dawn's middle)

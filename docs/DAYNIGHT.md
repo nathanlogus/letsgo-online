@@ -373,3 +373,11 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   - Fog: the haze 45x denser and pale grey (dark at night: lamps and windows glow through).
   - Shooting stars on clear nights: about every 12 s, 0.8 s across 20 degrees of sky (hidden by clouds and rain, as the stars).
   `results/weather_cloudy_snow_fog_storm.png`, `weather_fog_day_night.png`, `weather_lightning.png`.
+- Settings for the graphics (game Options and F12): Cloud shadows (percent, default 40), Sky and haze, Water reflections, Light
+  shafts (all with day and night), Ray-traced occlusion (its own switch now, not the light shadows'). The variables still override.
+- Snow freezes the water: strongly blue level pixels to a pale icy blue at their brightest channel (`results/frozen_pond.png`).
+- Stars hidden fully under overcast, rain and snow. Lamp-shadow rays turned each frame (TAA averages their pattern). The temporary
+  ray-tracing debug readback in rt.c removed.
+- Checked: the Options rows (Weather to Cloudy, Cloud shadows 40 -> 30, saved); storm in the Center and snow in Mt. Moon - both
+  clear; snow in a night battle; the Mart door walking at 60 fps / TAA / frame generation - steady (the doorway is bright: the
+  game's bloom on its pale glass); the game's sun does not move with the hour, so the clouds' projection never goes low.

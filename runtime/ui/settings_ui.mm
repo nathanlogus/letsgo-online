@@ -659,6 +659,19 @@ void ui_page_image_sound(void) {
     ui_toggle("##rtshadows", "Ray-traced light shadows", x, &g_settings.rt_shadows);
     ImGui::EndDisabled();
     ui_tip("At night, lamps and lit windows cast shadows, traced on the GPU (about 1 ms). Needs a ray tracing graphics card.");
+    // the day / night graphics (runtime/nvn/vulkan/exec.c dn_run, ssao_run): clouds, sky, reflections, shafts, ray-traced occlusion
+    ImGui::BeginDisabled(!g_settings.daynight);
+    {
+        float pct = g_settings.cloud_shadows * 100;
+        ui_row("Cloud shadows", x);
+        if (ui_slider("##clouds", &pct, 0, 100, "%.0f%%", 5)) g_settings.cloud_shadows = pct / 100;
+    }
+    ui_toggle("##skyfx", "Sky and haze", x, &g_settings.sky_fx);
+    ui_toggle("##refl", "Water reflections", x, &g_settings.reflections);
+    ui_toggle("##shafts", "Light shafts", x, &g_settings.light_shafts);
+    ImGui::EndDisabled();
+    ui_toggle("##rtao", "Ray-traced occlusion", x, &g_settings.rt_ao);
+    ui_tip("Soft shade where objects meet, traced on the GPU (about 0.9 ms). Needs a ray tracing graphics card.");
     ui_group_gap();
     if (ui_button(UI_T("Reset", "Restaurar", "Сбросить"))) {
         g_settings.volume = g_settings.brightness = g_settings.contrast = g_settings.saturation = 1.0f;

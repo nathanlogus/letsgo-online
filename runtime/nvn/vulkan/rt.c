@@ -138,11 +138,6 @@ static void barrier(VkCommandBuffer cb, VkPipelineStageFlags src, VkAccessFlags 
 
 bool rt_build(VkCommandBuffer cb, uint64_t frame, const float proj[4]) {
     if (!init()) return false;
-    {   static uint64_t n;  // (LARECOMP_RT_DEBUG: the state every 60 calls)
-        if (getenv("LARECOMP_RT_DEBUG") && n++ % 60 == 0)
-            LOG("[rt] build call %llu: frame %llu, captured frame %llu, %u vertices, built %d\n", (unsigned long long)n,
-                (unsigned long long)frame, (unsigned long long)cap_frame, cap_verts, built);
-    }
     if (frame != cap_frame || cap_verts < 3) return built;  // (nothing new: an in-between image keeps N's)
     // clip -> the lights pass's view space: (x / P00, y / P11, w), w = (P23 - z) / P22 (row-major P, w = -z_view)
     VkTransformMatrixKHR m = {{{1.0f / proj[0], 0, 0, 0}, {0, 1.0f / proj[1], 0, 0}, {0, 0, -1.0f / proj[2], proj[3] / proj[2]}}};
@@ -182,33 +177,6 @@ bool rt_build(VkCommandBuffer cb, uint64_t frame, const float proj[4]) {
             VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_TRANSFORM_FEEDBACK_WRITE_BIT_EXT);
     static int logged;
     if (logged++ < 3) LOG("[rt] frame %llu: %u triangles\n", (unsigned long long)frame, cap_verts / 3);
-    {   // LARECOMP_RT_DEBUG: the first captured vertices, copied out at the 40th build and logged at the 80th (research)
-        static VkBuffer rb;
-        static VmaAllocation rm;
-        static void *rp;
-        static int nb;
-        if (getenv("LARECOMP_RT_DEBUG") && ++nb == 40) {
-            VkBufferCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 64 * 16, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
-            VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO, .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
-            VmaAllocationInfo inf;
-            VK_CHECK(vmaCreateBuffer(g_vk.vma, &ci, &ai, &rb, &rm, &inf));
-            rp = inf.pMappedData;
-            barrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-            VkBufferCopy c[4];  // (16 vertices from the start, a quarter, the middle and three quarters of the frame's capture)
-            for (int i = 0; i < 4; i++) c[i] = (VkBufferCopy){(VkDeviceSize)(cap_verts / 4 * i) * 16, (VkDeviceSize)i * 16 * 16, 16 * 16};
-            vkCmdCopyBuffer(cb, xfb.buf, rb, 4, c);
-            LOG("[rt] debug: proj %g %g %g %g, %u vertices\n", proj[0], proj[1], proj[2], proj[3], cap_verts);
-        }
-        if (nb == 80 && rp) {
-            vmaInvalidateAllocation(g_vk.vma, rm, 0, VK_WHOLE_SIZE);
-            const float *v = rp;
-            for (int r = 0; r < 4; r++) {
-                int nz = 0;
-                for (int i = 0; i < 64; i++) nz += v[r * 64 + i] != 0.0f;
-                LOG("[rt] debug: region %d: %d of 64 floats non-zero, first %g %g %g %g\n", r, nz, v[r * 64], v[r * 64 + 1], v[r * 64 + 2], v[r * 64 + 3]);
-            }
-        }
-    }
     built = true;
     return true;
 }
