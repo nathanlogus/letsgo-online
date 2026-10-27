@@ -18,16 +18,27 @@ typedef struct {
 } CoopBattleLinkView;
 
 bool coop_battle_link_enabled(void);
+// The "Team-up battles" option (coop.ini): off, no offers as host and every offer declined as guest.
+void coop_battle_link_set_offers(bool on);
+// Guest, each network tick: false while it can't join (not on the overworld); an open offer is declined after 0.5 s.
+void coop_battle_link_guest_ready(bool ready);
 void coop_battle_link_reset(void);
 void coop_battle_link_tick(void);
 void coop_battle_link_party(const CoopParty *);
-bool coop_battle_link_local_lead(uint8_t lead[COOP_PB7_BYTES]);
+// Guest: the party it sent with its accept (B2); the battle's ally party is built from it.
+bool coop_battle_link_local_party(CoopParty *);
 void coop_battle_link_view(CoopBattleLinkView *);
 bool coop_battle_link_offer(uint64_t id, unsigned timeout_ms, unsigned trainer);
+// Host: an unanswered offer expires earlier (B6 reason 3), e.g. a trainer's held pre-battle text.
+void coop_battle_link_offer_deadline(uint64_t ns);
 bool coop_battle_link_accept(void);
 bool coop_battle_link_lead(uint8_t lead[COOP_PB7_BYTES], uint64_t *id);
+// Host: the guest's whole party, once every B2 chunk is in.
+bool coop_battle_link_guest_party(CoopParty *, uint64_t *id);
 bool coop_battle_link_request(const CoopAllyWait *, const uint16_t opponents[2], const uint16_t hp[2], const uint16_t max_hp[2]);
 bool coop_battle_link_choose(unsigned move_index, unsigned target);
+// Guest: switch in its own party slot (an action-select switch or a replacement after a faint).
+bool coop_battle_link_choose_switch(unsigned party_slot);
 bool coop_battle_link_take(CoopBattleMove *, uint64_t *received_ns);
 void coop_battle_link_complete(bool use_ai);
 void coop_battle_link_end(void);

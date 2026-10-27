@@ -20,7 +20,10 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.Queue = g_vk.queue;
     ii.DescriptorPoolSize = 64;
     ii.MinImageCount = 2;
-    ii.ImageCount = (g_vk.sc_count > 3 ? g_vk.sc_count : 3) + 1;  // vertex buffers rotate per image: cover frames in flight
+    // The backend rotates host-written vertex/index buffers per draw, not by
+    // acquired swapchain image. Match the CPU frame ring so a pending GPU read
+    // cannot observe geometry overwritten by a newer frame.
+    ii.ImageCount = VK_WINDOW_FRAMES_IN_FLIGHT;
     ii.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
     ii.PipelineCache = g_vk.pcache;
     ii.UseDynamicRendering = true;

@@ -32,6 +32,7 @@ extern "C" {
 #include "paths.h"
 #include "settings.h"
 #include "ui2x.h"
+#include "account.h"
 void settings_save(void);
 void ui_window_init(void);
 SDL_Window *ui_window(void);
@@ -48,6 +49,204 @@ void vk_imgui_backend_shutdown(void);
 static bool g_pt;
 #define T(en, pt) (g_pt ? (pt) : (en))
 static float g_scale = 1;  // the window's height over 1080 (ui_scale): fixed sizes below are for 1080 px
+
+static void profile_section(void) {
+    AccountProfileSnapshot p; AccountInboxSnapshot inbox; account_profile_snapshot(&p); account_inbox_snapshot(&inbox);
+    ui_group_gap(); ui_heading(T("Local profile", "Perfil local"));
+    ImGui::PushTextWrapPos(0);
+    if (!p.selected) ImGui::TextWrapped("%s",T("Set up a supported game to link its local profile.","Configure o jogo para vincular seu perfil local."));
+    else {
+        ImGui::Text("%s: %s",T("Game","Jogo"),!strcmp(p.edition,"pikachu") ? "Let's Go, Pikachu!" : "Let's Go, Eevee!");
+        ImGui::TextWrapped("%s",p.detail);
+        if (p.bound) ImGui::Text("%s: %s",T("Linked profile","Perfil vinculado"),p.label);
+        else {
+            static char label[256],last_label[256]; static unsigned revision;
+            if (revision!=p.revision || strcmp(last_label,p.label)) {
+                snprintf(label,sizeof label,"%s",p.label); snprintf(last_label,sizeof last_label,"%s",p.label); revision=p.revision;
+            }
+            ImGui::BeginDisabled(p.busy || inbox.state==INBOX_LOADING);
+            ImGui::TextUnformatted(T("Profile name","Nome do perfil"));
+            ImGui::SetNextItemWidth(-FLT_MIN); ImGui::InputText("##account-profile-label",label,sizeof label);
+            if (ui_button(p.busy ? T("Linking...","Vinculando...") : T("Link this local profile","Vincular este perfil local"),-1)) account_bind_profile(label);
+            ImGui::EndDisabled();
+        }
+        ImGui::TextDisabled("%s",T("Linking keeps your game save unchanged.","Vincular nao altera seu save."));
+    }
+    ImGui::PopTextWrapPos();
+}
+
+static int g_inbox_kind;
+static void claim_section(const AccountProfileSnapshot &profile) {
+    AccountClaimSnapshot c;AccountInboxSnapshot inbox;account_claim_snapshot(&c);account_inbox_snapshot(&inbox);
+    static char code[81];static bool clear_confirm;static unsigned revision;
+    if(revision!=profile.revision) { memset(code,0,sizeof code);clear_confirm=false;revision=profile.revision; }
+    bool busy=c.state==CLAIM_PREVIEWING || c.state==CLAIM_SENDING || inbox.state==INBOX_LOADING || profile.busy;
+    ui_heading(T("Gift code / preview","Codigo / previa"));
+    if(!profile.bound) ImGui::TextWrapped("%s",T("Link this local profile on the Account page before claiming a gift.","Vincule um perfil local antes de resgatar presentes."));
+    ImGui::BeginDisabled(!profile.bound || busy || c.pending);
+    ImGui::SetNextItemWidth(-FLT_MIN);ImGui::InputText(T("##gift-code","##gift-code"),code,sizeof code,ImGuiInputTextFlags_Password);
+    if(ui_button(T("Preview code","Ver previa do codigo"))) {account_gift_preview(NULL,code);memset(code,0,sizeof code);}
+    ImGui::EndDisabled();
+    if(c.state==CLAIM_PREVIEWING) ImGui::TextUnformatted(T("Checking gift...","Verificando presente..."));
+    else if(c.state==CLAIM_SENDING) ImGui::TextUnformatted(T("Saving or recovering your claim...","Salvando ou recuperando resgate..."));
+    else if(c.state!=CLAIM_IDLE || c.pending || c.detail[0]) {
+        if(c.title[0]) ImGui::TextUnformatted(c.title);
+        if(c.item_count) ImGui::Text("%d %s",c.item_count,T("items","itens"));
+        if(c.profile_label[0]) ImGui::Text("%s: %s",T("For","Para"),c.profile_label);
+        ImGui::TextWrapped("%s",c.detail);
+        if(c.state==CLAIM_PREVIEW && c.eligible && !c.pending) {
+            ImGui::BeginDisabled(busy);if(ui_button(T("Confirm gift claim","Confirmar resgate"),-1)) account_claim_confirm();ImGui::EndDisabled();
+        }
+    }
+    if(c.pending && !busy) {
+        if(ui_button(T("Resume saved claim","Retomar resgate salvo"),-1)) account_claim_resume();
+        ImGui::Checkbox(T("Clear only the local retry","Limpar apenas a tentativa local"),&clear_confirm);
+        ImGui::BeginDisabled(!clear_confirm);
+        if(ui_button(T("Clear local retry request","Limpar tentativa local"))) {account_claim_forget();clear_confirm=false;}
+        ImGui::EndDisabled();
+        ImGui::TextWrapped("%s",T("Clearing a local retry does not remove gifts from your server history.","O historico de presentes no servidor sera mantido."));
+    }
+}
+static void inbox_section(void) {
+    AccountSnapshot a; AccountProfileSnapshot p; AccountInboxSnapshot box;
+    account_snapshot(&a); account_profile_snapshot(&p); account_inbox_snapshot(&box);
+    ImGui::PushTextWrapPos(0);
+    if (a.state!=ACCOUNT_SIGNED_IN) {
+        ImGui::TextWrapped("%s",T("Sign in on the Account page to view your gifts.","Entre na pagina Conta para ver seus presentes."));
+        ImGui::PopTextWrapPos(); return;
+    }
+    int &kind=g_inbox_kind;
+    const char *tabs[]={T("Available","Disponiveis"),T("Pending","Pendentes"),T("Received","Recebidos")};
+    AccountClaimSnapshot operation;account_claim_snapshot(&operation);
+    ImGui::BeginDisabled(operation.state==CLAIM_PREVIEWING || operation.state==CLAIM_SENDING || p.busy);
+    int old=kind; ui_row(T("Show","Mostrar"),ui_label_x(tabs,3)); ui_combo("##gift-kind",&kind,tabs,3);
+    ImGui::EndDisabled();
+    if (old!=kind || box.kind!=kind || box.state==INBOX_SIGNED_OUT || box.state==INBOX_IDLE) account_inbox_request(kind,0);
+    account_inbox_snapshot(&box);
+    if (p.bound) ImGui::Text("%s: %s",T("Profile","Perfil"),p.label);
+    else ImGui::TextWrapped("%s",T("Showing your account's gifts. Link a local profile on the Account page to filter to that save.",
+                                  "Vincule um perfil local na pagina Conta para filtrar os presentes deste save."));
+    ImGui::TextWrapped("%s",T("Gift delivery is not available in this build.","A entrega de presentes ainda nao esta disponivel nesta versao."));
+    claim_section(p);
+    AccountClaimSnapshot claim;account_claim_snapshot(&claim);bool claiming=claim.state==CLAIM_PREVIEWING || claim.state==CLAIM_SENDING;
+    ui_group_gap();
+    if (box.state==INBOX_LOADING) ImGui::TextUnformatted(T("Loading gifts...","Carregando presentes..."));
+    else if (box.state==INBOX_ERROR) ImGui::TextWrapped("%s",box.detail);
+    else if (box.state==INBOX_READY) {
+        if (!box.count) ImGui::TextWrapped("%s",T("No gifts in this category.","Nenhum presente nesta categoria."));
+        for(int i=0;i<box.count;i++) {
+            const AccountInboxRow &r=box.rows[i];
+            ui_heading(r.title);
+            ImGui::Text("%d %s",r.item_count,T("items","itens"));
+            if (kind==0 && r.requires_code) ImGui::TextUnformatted(T("A gift code is required.","Requer um codigo de presente."));
+            if(kind==0) {
+                ImGui::PushID(r.id);ImGui::BeginDisabled(!p.bound || claiming || claim.pending);
+                if(ui_button(T("Preview gift","Ver presente"))) account_gift_preview(r.id,NULL);
+                ImGui::EndDisabled();ImGui::PopID();
+            }
+            if (r.profile_label[0]) ImGui::Text("%s: %s",T("For","Para"),r.profile_label);
+            if (kind==1) ImGui::TextUnformatted(T("Waiting for delivery.","Aguardando entrega."));
+            if (kind==2) ImGui::TextUnformatted(T("Delivery reported by the client.","Entrega informada pelo cliente."));
+        }
+    }
+    ui_group_gap();
+    ImGui::BeginDisabled(box.state==INBOX_LOADING || p.busy || claiming);
+    if (ui_button(T("Refresh gifts","Atualizar presentes"),-1)) account_inbox_request(kind,box.page);
+    ImGui::BeginDisabled(box.page==0); if(ui_button(T("Previous page","Pagina anterior"))) account_inbox_request(kind,box.page-1); ImGui::EndDisabled();
+    ImGui::BeginDisabled(!box.has_more); if(ui_button(T("Next page","Proxima pagina"))) account_inbox_request(kind,box.page+1); ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    ImGui::PopTextWrapPos();
+}
+
+static void account_section(void) {
+    static bool remember = true;
+    AccountSnapshot a;
+    account_snapshot(&a);
+    bool busy = a.state == ACCOUNT_RESTORING || a.state == ACCOUNT_WAITING || a.state == ACCOUNT_COMPLETING || a.state == ACCOUNT_SIGNING_OUT;
+    ui_heading(T("Your account", "Sua conta"));
+    ImGui::PushTextWrapPos(0);
+    if (a.state == ACCOUNT_SIGNED_IN) {
+        ImGui::TextColored(UI_GREEN_TEXT, "%s", T("Signed in", "Conectado"));
+        ImGui::TextUnformatted(a.name);
+    } else {
+        ImGui::TextUnformatted(busy ? T("Connecting...", "Conectando...") : T("Not signed in", "Desconectado"));
+    }
+    ImGui::TextWrapped("%s", a.detail);
+    ImGui::PopTextWrapPos();
+    ui_group_gap();
+    if (a.state == ACCOUNT_SIGNED_IN) {
+        ImGui::TextDisabled("%s", a.remembered ? T("Remembered securely on this Windows account.", "Login salvo com seguranca nesta conta do Windows.") :
+                                               T("Signed in for this session only.", "Conectado apenas nesta sessao."));
+        if (ui_button(T("Sign out", "Sair da conta"), -1)) account_sign_out();
+        profile_section();
+    } else if (busy) {
+        ImGui::BeginDisabled(a.state == ACCOUNT_SIGNING_OUT);
+        if (ui_button(T("Cancel sign-in", "Cancelar login"), -1)) account_cancel();
+        ImGui::EndDisabled();
+    } else {
+        const char *label[] = {T("Remember me", "Lembrar de mim")};
+        ui_toggle("##remember-account", label[0], ui_label_x(label, 1), &remember);
+        ImGui::BeginDisabled(a.state == ACCOUNT_UNSUPPORTED);
+        if (ui_button(T("Sign in with browser", "Entrar pelo navegador"), -1)) account_sign_in(remember);
+        if (a.state == ACCOUNT_ERROR && ui_button(T("Retry saved sign-in", "Tentar login salvo"), -1)) account_retry();
+        ImGui::EndDisabled();
+    }
+    ui_group_gap();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextWrapped("%s", T("Sign in through Keycloak in your browser. Your password stays there.",
+                              "Entre pelo Keycloak no navegador. Sua senha fica la."));
+    ImGui::TextWrapped("%s", T("You can play solo and join friends with room codes without an account.",
+                              "Voce pode jogar sozinho ou com amigos por codigo de sala sem uma conta."));
+    ImGui::PopTextWrapPos();
+}
+
+// Explicit copied-profile QA only. No credentials enter this diagnostic directory.
+static char g_account_qa_shot[1400];
+static bool g_account_qa_quit;
+static int g_account_qa_tab=-1;
+static void account_qa_frame(void) {
+    const char *dir = getenv("LARECOMP_ACCOUNT_QA_DIR");
+    if (!dir || !*dir) return;
+    char path[1400], command[256];
+    snprintf(path, sizeof path, "%s/account-action.txt", dir);
+    FILE *f = fopen(path, "r");
+    if (f) {
+        bool got = fgets(command, sizeof command, f) != NULL; fclose(f); remove(path);
+        if (got) {
+            command[strcspn(command, "\r\n")] = 0;
+            if (!strcmp(command, "signin")) account_sign_in(true);
+            else if (!strcmp(command, "signin-once")) account_sign_in(false);
+            else if (!strcmp(command, "cancel")) account_cancel();
+            else if (!strcmp(command, "signout")) account_sign_out();
+            else if (!strcmp(command, "retry")) account_retry();
+            else if (!strncmp(command,"bind:",5)) account_bind_profile(command+5);
+            else if (!strncmp(command,"preview:",8)) account_gift_preview(command+8,NULL);
+            else if (!strncmp(command,"code:",5)) account_gift_preview(NULL,command+5);
+            else if (!strcmp(command,"claim")) account_claim_confirm();
+            else if (!strcmp(command,"resume-claim")) account_claim_resume();
+            else if (!strcmp(command,"forget-claim")) account_claim_forget();
+            else if (!strncmp(command,"inbox:",6)) { int kind=0,page=0; if(sscanf(command+6,"%d:%d",&kind,&page)==2 && kind>=0 && kind<=2) { g_inbox_kind=kind; account_inbox_request(kind,page); } }
+            else if (!strcmp(command,"page:gifts")) g_account_qa_tab=7;
+            else if (!strcmp(command,"page:account")) g_account_qa_tab=6;
+            else if (!strcmp(command, "quit")) g_account_qa_quit = true;
+            else if (!strncmp(command, "capture:", 8) && command[8] && strspn(command+8, "abcdefghijklmnopqrstuvwxyz0123456789-_") == strlen(command+8))
+                snprintf(g_account_qa_shot, sizeof g_account_qa_shot, "%s/%s.png", dir, command+8);
+        }
+    }
+    AccountSnapshot a; account_snapshot(&a);
+    snprintf(path, sizeof path, "%s/account-state.txt", dir);
+    f = fopen(path, "w");
+    if (f) { fprintf(f, "%d\n%s\n%s\n%d\n", (int)a.state, a.name, a.detail, a.remembered); fclose(f); }
+    AccountProfileSnapshot p; AccountInboxSnapshot box; account_profile_snapshot(&p); account_inbox_snapshot(&box);
+    snprintf(path,sizeof path,"%s/profile-state.txt",dir); f=fopen(path,"w");
+    if(f) { fprintf(f,"%d\n%d\n%s\n%s\n%s\n",p.bound,p.busy,p.id,p.label,p.detail); fclose(f); }
+    snprintf(path,sizeof path,"%s/inbox-state.txt",dir); f=fopen(path,"w");
+    if(f) { fprintf(f,"%d\n%d\n%d\n%d\n%d\n%s\n",box.state,box.kind,box.page,box.count,box.has_more,box.detail);
+        for(int i=0;i<box.count;i++) fprintf(f,"%s\n",box.rows[i].title); fclose(f); }
+    AccountClaimSnapshot c;account_claim_snapshot(&c);
+    snprintf(path,sizeof path,"%s/claim-state.txt",dir);f=fopen(path,"w");
+    if(f) {fprintf(f,"%d\n%d\n%d\n%s\n%s\n%s\n",c.state,c.pending,c.eligible,c.id,c.detail,c.title);fclose(f);}
+}
 
 // ------------------------------------------------------------------ keyboard
 // The game's actions with the key bound to each. Click one, then press the new key (Esc or 5 s cancels; a key already
@@ -489,8 +688,10 @@ extern "C" void launcher_lg_run(const char *root) {
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     bool autoplay = getenv("LARECOMP_LAUNCHER_AUTOPLAY") != NULL, play = false;
     const char *keys_test = getenv("LARECOMP_LAUNCHER_KEYS");
-    enum { TAB_GAME, TAB_GRAPHICS, TAB_IMAGE, TAB_CONTROLS, TAB_MODS, TAB_FRIENDS, NTABS };
+    enum { TAB_GAME, TAB_GRAPHICS, TAB_IMAGE, TAB_CONTROLS, TAB_MODS, TAB_FRIENDS, TAB_ACCOUNT, TAB_GIFTS, NTABS };
+    account_start();
     int tab = getenv("LARECOMP_LAUNCHER_TAB") ? atoi(getenv("LARECOMP_LAUNCHER_TAB")) : keys_test ? TAB_CONTROLS : TAB_GAME;
+    if (tab < 0 || tab >= NTABS) tab = TAB_GAME;
     if (keys_test && atoi(keys_test) > 0) bind_capture_begin(BIND_DEV_KEY, atoi(keys_test));
     if (getenv("LARECOMP_SETUP_DIR")) setup_start(getenv("LARECOMP_SETUP_DIR"));
     if (getenv("LARECOMP_MOD_INSTALL")) mod_install_start(getenv("LARECOMP_MOD_INSTALL"));
@@ -499,13 +700,24 @@ extern "C" void launcher_lg_run(const char *root) {
         gold_text(0.23f, 0.18f, 0.03f, 1);
 
     while (!play) {
+        account_qa_frame();
+        if(g_account_qa_tab>=0) { tab=g_account_qa_tab; g_account_qa_tab=-1; }
+        char browser_url[8192];
+        if (account_take_browser_url(browser_url, sizeof browser_url)) {
+            const char *qa = getenv("LARECOMP_ACCOUNT_QA_DIR");
+            if (qa && getenv("LARECOMP_ACCOUNT_QA_NO_BROWSER")) {
+                char browser_path[1400]; snprintf(browser_path, sizeof browser_path, "%s/account-browser-url.txt", qa);
+                FILE *f = fopen(browser_path, "w"); if (f) { fputs(browser_url, f); fclose(f); }
+            } else if (!SDL_OpenURL(browser_url)) account_cancel();
+            memset(browser_url, 0, sizeof browser_url);
+        }
         menu_apply_window_requests(win);
         SDL_Event e;
         bool focus_back = false;
         while (SDL_PollEvent(&e)) {
             if (bind_capture_event(&e)) continue;  // (waiting for a new key: the press is the binding's)
             ImGui_ImplSDL3_ProcessEvent(&e);
-            if (e.type == SDL_EVENT_QUIT) exit(0);
+            if (e.type == SDL_EVENT_QUIT) { account_shutdown(); exit(0); }
             if (e.type == SDL_EVENT_WINDOW_FOCUS_GAINED) focus_back = true;
         }
         char path[1024];
@@ -529,6 +741,13 @@ extern "C" void launcher_lg_run(const char *root) {
         }
         last_install = inst;
         bool ready = !setup_running() && setup_ready();
+        if (ready && (frame%60==0)) {
+            const char *game=game_name("extracted/exefs");
+            if(game) {
+                bool pikachu=!strcmp(game,"Pikachu"); const char *save=getenv("LARECOMP_SAVE_DIR");
+                account_select_local_profile(save && *save ? save : pikachu ? "save-pikachu" : "save",pikachu ? "pikachu" : "eevee");
+            }
+        }
         {   // (tests, LARECOMP_UI2X_GENERATE=1: the 2x interface images made, then exit - status 0 when done)
             static int gen = -1;
             if (gen < 0) gen = getenv("LARECOMP_UI2X_GENERATE") != NULL;
@@ -554,7 +773,7 @@ extern "C" void launcher_lg_run(const char *root) {
         const char *only = T("Only with version 1.0.0 (the base game) of Eevee or Pikachu for now.",
                              "Por enquanto só na versão 1.0.0 (o jogo base) do Eevee ou do Pikachu.");
         const char *names[NTABS] = {T("Game", "Jogo"), T("Graphics", "Gráficos"), T("Image and sound", "Imagem e som"),
-                                    T("Controls", "Controles"), "Mods", "Friends"};
+                                    T("Controls", "Controles"), "Mods", "Friends", T("Account", "Conta"),T("Mystery Gift","Presente Misterioso")};
         ui_tabs_begin(&tab, NTABS);  // (L1 / R1 on a controller: the page before / after)
 
         ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
@@ -683,6 +902,10 @@ extern "C" void launcher_lg_run(const char *root) {
                 keys_section();
             } else if (tab == TAB_FRIENDS) {
                 if (coop_ui_page(true) && ready) play = true;
+            } else if (tab == TAB_ACCOUNT) {
+                account_section();
+            } else if (tab == TAB_GIFTS) {
+                inbox_section();
             } else {
                 mods_section(win, inst);
             }
@@ -697,9 +920,12 @@ extern "C" void launcher_lg_run(const char *root) {
         ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)vk_frame_cmd());
         bool shot = shot_at && ++frame == shot_at;
         if (!shot_at) frame++;
-        vk_frame_end(shot ? (getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png") : NULL);
-        if (shot) exit(0);
+        vk_frame_end(g_account_qa_shot[0] ? g_account_qa_shot : shot ? (getenv("LARECOMP_SHOT_PATH") ? getenv("LARECOMP_SHOT_PATH") : "build/launcher.png") : NULL);
+        g_account_qa_shot[0] = 0;
+        if (g_account_qa_quit) { account_shutdown(); exit(0); }
+        if (shot) { account_shutdown(); exit(0); }
     }
+    account_shutdown();
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
     settings_apply_levels();  // (the upscaler follows the anti-aliasing)

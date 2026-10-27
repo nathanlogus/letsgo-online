@@ -54,6 +54,7 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .show_fps = false,
+    .rt_shadows = true,
     .wild_battle = true,
     .render_thread = true,
     .vertex_read = VREAD_AUTO,
@@ -120,6 +121,8 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
     else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
+    else if (!strcmp(key, "lossless")) g_settings.lossless = atoi(val) != 0;
+    else if (!strcmp(key, "rt_shadows")) g_settings.rt_shadows = atoi(val) != 0;
     else if (!strcmp(key, "resolution")) {
         int n = atoi(val);
         g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
@@ -306,6 +309,8 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
+    fprintf(f, "lossless = %d\n", g_settings.lossless);
+    fprintf(f, "rt_shadows = %d\n", g_settings.rt_shadows);
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");

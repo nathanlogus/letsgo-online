@@ -39,6 +39,7 @@ cache/
 save/
 larecomp.ini
 coop.ini
+account-profiles/
 *.log
 mods/
 

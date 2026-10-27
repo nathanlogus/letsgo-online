@@ -188,3 +188,136 @@ Not ported: its shadow, AO, fog, DOF and resolution settings (the game's own ren
   (`glowck = 1`, Mart door glass inside its wall texture) never applied before either. Now it is part of the key.
 - `LARECOMP_SAVE_MSL=1` now saves variants as `<addr>_fs_water.glsl` / `_fs_glass.glsl` instead of overwriting the plain one.
 - Shots: `tests/runs/daynight/results/moon_water_only.png` (pond, Pallet, route 21).
+
+## Celadon and Saffron windows (2026-10-26)
+Their window glass textures are nearly black (the blue is a reflection map), so the glow multiplier kept them dark. They now get a
+warm light added in their own shader (`ShaderKey.glowck = 3`, `daynight_glow_emissive`, linear {0.6, 0.3, 0.08} x night before the
+tint): `window02_01_area07`, `window03_01_area07`, `window01_com` and `a45b4798` (Celadon's blue windows: not in the name index,
+found with `bisect_tex.py` after removing the textures every building draw shares - the 256x8 ramp, the 2048 / 1024 maps - from the
+candidate list). Shots: `tests/runs/daynight/results/celadon_saffron_glass.png`, `celadon_glass2.png`.
+
+## Route lamps (2026-10-26)
+The curved route lamps (routes 5, 6, 7, 8, 24, 25: `buildmodel` `streetlight01_0x`) were all `GL_LAMP_POST`, a faint warm lift.
+Their light panel is its own draw (fs `dfe6f535cb747369`, texture `streetlight01_02` `4d78e548`), so it is now `GL_LAMP_GLASS`
+(`gen_glow_table.py`): the panel glows and the night lights give it a halo and streaks; the pole keeps the faint lift.
+Shots: `tests/runs/daynight/results/route_lamp_head.png` (route 7: fix | panel skipped), `route5_lamps.png`.
+The lamps sit outside the default camera view on most routes; the shots use `LARECOMP_ZOOM=0.5`.
+
+## World tour: town lamps, Cycling Road, battle intros (2026-10-26)
+`tests/scripts/world_tour.sh 22` (every town and route box, wide view) -> `tests/runs/towns/`, `tests/runs/routes/` (sheets `_sheet_*.png`,
+made by `sheet.py <out.png> <img>...`). What it found and what changed:
+- Town lamps: their glass is the lamp's second texture, a gray glow mask drawn on its own: `streetlamp01_01_area04` (Cerulean's
+  globes), `lamp01_02_town005_area08` (Vermilion), `lamp01_02_town006_area09` (Fuchsia), `lamp01_02_town007_area06` (Lavender's
+  bells) are now `GL_LAMP_GLASS`. Pewter and Viridian already were (`lamp_glass01_*`). Shot: `results/town_lamps_before_after.png`.
+- Cycling Road's lamps (`roadlight01_area05`) are one texture, pole and head: the colour key has a second mode (`gck.w` 2, in
+  `daynight.c`'s `colorkey_tex`) that lights only the white half of the head; the pole no longer gets the lift (it read neon orange).
+  Shot: `results/cycling_road_lamp.png` (before | after).
+- Battle intros were in daylight: the scene hook (tint, night lights) waited for 16 opaque draws and the intro draws 6 (the
+  Pokémon, the water, the backdrop). With day/night on it now starts after 4 (`ao.min_opaque`; SSAO / TAA keep 16 otherwise).
+  Shots: `results/battle_intro_before.png`, `battle_intro_night.png` (route 19, frames 1500-1880; the white flash is the game's).
+- Dark glass (`glowck` 3) now also drops most of the pane's colour before adding the warm light (the reflection read pink in Celadon).
+- Still open: the green panes of the house south-west of Pewter's museum (`tests/saves/town-tour/pewter`, wide view, bottom left).
+  By day they are cyan glass; no glow-table texture draws them (removing the gym / shop / Center window textures' draws leaves them,
+  and the removal bisect found nothing), so their colour comes from the game's own shading of that glass at night.
+  Also ruled out (each tried as dark glass, no change): `bldg_gym_door01_com`, `bldg_pc_window01_com`, the mint pane texture
+  `a69fbb4d` of the gym's draws. Since removing any logged texture leaves the panes, they are likely drawn without the depth
+  test: `LARECOMP_DRAWLOG` does not log those and the glow paths skip them. Next: log the non-depth draws of that frame.
+- Menus checked at night: the party screen keeps the tinted world behind it and a clean interface; the summary's 3D Pokémon is
+  untinted (`tests/runs/daynight/menus/`). The lower scene threshold (4) did not reach them.
+- Many route boxes put the camera in tree tops or out of bounds (`area02_road015_2`, `018_2`, `area03_road002_2`, `area05_road016_1`,
+  `area06_road016_2`, `area08_road012`, `013`, `015_1`): the tour's drop point, not the lighting.
+
+## Cloud shadows (2026-10-27)
+
+- Soft cloud shadows drift over the outdoor ground, after the tint in `ssao_run` (`clouds.frag`, a multiply pass). The pixel's
+  surface point (depth -> inverse of this frame's view-projection, as the fireflies) is moved along the sun by its height, then
+  two octaves of value noise (clouds ~12 m across) scroll with the wind at ~40 cm/s.
+- Strength: `LARECOMP_CLOUDS` (default 0.3 = 30% darker under a cloud; 0 = off), a third of it at night. Fades out from 30 to
+  50 m of distance, so the sky dome and the battle backdrops' far mountains stay clean (at 8000 their polygons showed).
+- Same gate as the tint: day/night on, outdoors only (no interiors or caves), the battles included.
+- `LARECOMP_CLOUDS_DEBUG=1`: a 1 m world grid; `=2`: 2 m world cells, each its own tint (both should stay on the ground as the
+  camera moves).
+
+## Fireflies and clouds in the world, Pokémon Center roofs (2026-10-27)
+
+- The fireflies and the clouds rebuilt the world position with the image's rows flipped (`nvn_window_origin() == 0`). Row 0 is
+  NDC y = -1, as the motion vectors (`mv.frag`, validated) have it. Flipped, the positions followed the camera: the flies slid
+  against the world while walking, and every size measured from them came out ~3x too small (the cloud scale was tuned on that,
+  now redone). With the fix a cell grid stays on the path and cliff edges as the camera moves (`LARECOMP_CLOUDS_DEBUG=2`), and
+  the flies move with the ground (`LARECOMP_FF_DEBUG=1`: every fly lit, 3x size).
+- Still open: a pixel looks for flies only around its own surface point, so a fly in front of a roof edge can be cut.
+- The Pokémon Center / Mart roof textures (`bldg_pc_roof01_02_com`, `bldg_shop_roof02_01_com`) are whole roofs, not lit strips:
+  in the SIGN class they turned the roof bright red at night and the dynamic lights took it as a source (a halo over the
+  building). Out of the table now; the Center's sign keeps its glow. Image: `results/pokecenter_night_fixed.png`.
+- Center / Mart doors: the Center's blue glass door showed a ragged bright patch at night, and the Mart's white one blew out.
+  The patch came from the dynamic lights (gone with `LARECOMP_LIGHTS=0` only, not with the moon or the glow off): the bright
+  door was taken as a source and its quarter-size light fell back on it. `dl_extract` now skips cool pixels (`b > 1.25 r`;
+  lamps and windows are warm), and the glass-door glow is lower (1.12 / 1.0 / 0.72 from 1.25 / 1.12 / 0.85).
+  Image: `results/doors_night_fixed.png`.
+- The doors still broke up while walking (60 fps, TAA): a stepped dark / bright edge over the Center's glass that crawled. Not
+  the lights' screen-space shadows (`LARECOMP_LIGHTS_RT=0`: the same). `dl_apply` gave the pools and halos only to pixels below
+  `lit 0.02` (luminance ~1): the lit glass sits at that brightness, so its texels were split into lit and unlit. Now a pixel
+  takes `1 - smoothstep(0, 0.4, lit)` of them. Four frames walking past: one smooth door (`tests/runs/daynight/doorwalk/`).
+
+## Real ray-traced light shadows: assessment (2026-10-27)
+
+- Hardware: the RTX 3060's driver (621.1, Vulkan 1.4) has `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`,
+  `VK_KHR_ray_tracing_pipeline`, `VK_KHR_buffer_device_address` and `VK_KHR_deferred_host_operations`. A ray query from
+  `dl_apply.frag` (one shadow ray per pixel toward its light) would be the simplest use.
+- Missing: the scene's triangles in an acceleration structure. Nothing captures geometry today (no transform feedback,
+  no device address on the vertex buffers, the device is created with the swapchain extension only). The game's draws come
+  from guest memory with their own vertex formats; static meshes, skinned characters and vegetation run different vertex
+  shaders, so positions only exist after the vertex shader.
+- The workable route: transform feedback (`VK_EXT_transform_feedback`) on the opaque scene draws - the translated vertex
+  shaders (`runtime/nvn/maxwell/translate.c`) write their clip position to a capture buffer as well, turned back into world
+  space by the inverse of the frame's view-projection (as the fireflies do) - then one BLAS built (or refit) per frame from
+  those triangles and a TLAS of it; `dl_apply` traces from each lit pixel to its source and keeps the light where nothing is hit.
+- Cost and risk: a town frame has ~130-230 opaque draws, roughly 0.5-1.5 M triangles; a full BLAS build of that on a 3060 is
+  ~1-3 ms a frame (a refit is cheaper but the draw set changes as the camera moves). The capture doubles the vertex work of those
+  draws. Frame generation's re-rendered in-between images would need it too (or reuse N's). Several days: device features,
+  the capture path in the shader translator, buffer and AS management, the shader change, then tuning.
+- What it would improve: the screen-space march misses occluders off screen or behind the visible surface; with the faint pools
+  of this game its measured effect was ~1 / 255 near a lamp. Ray-traced shadows would mostly show as sharper, correct shadows of
+  posts, fences and characters inside the lamp pools.
+
+## Frame generation flicker at night, caves, Options rows (2026-10-27)
+
+- Flicker: with frame generation on, a GPU that falls behind gets its in-between images at 50-75 % size (`[fg] auto: ...
+  in-between images at 50 %`). The light map was 4x4-pixel blocks of whatever size the image was, so a reduced image's map
+  covered twice the scene: larger, brighter pools and halos every other image (+5-6 levels over the lit Center; identical with
+  `LARECOMP_LIGHTS=0`, so the lights alone). Now `dl_extract`'s block follows the image's scale (`ip_lo_factor`: 2 at 50 %,
+  3 at 75 %) and `dl_apply`'s radii are in full-size pixels (`f.w`). `LARECOMP_FG_SCALE=0.5`, walking past the Center: real
+  96.3-96.9, in-between 94.9-95.8 (a 2x2 block of reduced pixels catches a little less peak; was +5-6). `tests/runs/daynight/fgflick/`.
+- Caves: Mt. Moon (`tests/saves/mtmoon`: map id = FNV-1a 64 of the pack name `r004d01`, as every map id is; floor 1 bounds from
+  its `terrain_data.bin`) loads the `dungeon` light set and looks the same at 12:00 and 22:00 (`results/cave_noon_vs_night.png`).
+- The game's own Options list has "Day and night" and "Time of day" (Clock or 00:00-23:00; `--` with day/night off),
+  `runtime/hle/pc_settings.c`.
+
+## Ray-traced light shadows: built (2026-10-27)
+
+- `runtime/nvn/vulkan/rt.c`: at night with the dynamic lights on, the scene pass's opaque, depth-writing triangle draws run a
+  vertex variant (`ShaderKey.xfb`: `xfb_pos_` = the clip position before zoom / jitter, transform feedback buffer 0) and each is
+  captured at its own place of one 48 MB buffer (3 M vertices). After the pass one BLAS is built from it (fast build) with a
+  geometry transform from the game's clip space to the lights pass's view space (x / P00, y / P11, (P23 - z) / P22: linear),
+  and a one-instance TLAS. `dl_apply_rt.frag` (`dl_apply.frag` with `RT`): the pool's sources' weighted view-space point is kept
+  while the pool is summed; 4 ray queries go from the pixel (moved 1.5 % toward the camera, off its surface) to points 60 cm
+  around it, stopping 50 cm short; a hit leaves 12 % of the pool. The halo is not shadowed.
+- Excluded: blended draws, alpha-cut ones (`uses_discard`: grass tufts, leaves, tree cards - captured whole, their empty corners
+  cast square shadows), strips with primitive restart. So trees and bushes cast no ray-traced shadow (alpha testing in the
+  ray query would be next). Frame generation's in-between images capture nothing and trace N's structure.
+- Note: the screen-space march (`vis()`) was not called any more since the pool rewrite: before this, the pools had no shadows.
+- Device: `VK_KHR_acceleration_structure`, `VK_KHR_ray_query`, `VK_KHR_deferred_host_operations`, `VK_EXT_transform_feedback`
+  and buffer device addresses when all are there (`[vk] ray-traced light shadows: available`); `LARECOMP_RT=0` leaves them off.
+- Setting `rt_shadows` (default on): game Options "Ray-traced light shadows" (with day and night), F12 image page;
+  `LARECOMP_LIGHTS_RT=0` off for a run. The GLSL translation cache key now includes the variant (it handed back the shaders
+  without the capture: an all-zero buffer).
+- Checked: `LARECOMP_RT_DEBUG=1` traces from the camera through each pixel - green where the hit matches the depth buffer: the
+  ground, paths, lamp posts, buildings and characters match (`tests/runs/daynight/rt1/h22_1900_dbg5_game_01900.png`); it also
+  logs a few captured vertices. Viridian at 22:00: ~145-280 K triangles a frame; GPU, frame 1880 at 720p: 4.81 ms with, 3.97
+  without (the structures ~1.0 ms). The Center's roof and wall now take a soft shadow where its own roof blocks its windows'
+  light (`tests/runs/daynight/rt2/`); a faint fixed 4-ray pattern shows up close.
+- Pewter's blocky window halo and green panes: fixed (by the user, 2026-10-27).
+- Cloud shapes (2026-10-27): the shadows were rectangles / straight-edged facets. Not the noise type alone: the `fract(sin(dot()))`
+  hash lost its precision on the octaves' large cell numbers (GPU `sin` of ~1e5) and its values lined up. Now an integer hash,
+  gradient noise with a quintic fade, 5 octaves each turned 37 degrees, and the shape warped by a second fbm: rounded, billowy
+  outlines (`tests/runs/daynight/clouds_fbm/h12_1620_i0.6_window.png`, at `LARECOMP_CLOUDS=0.6`).

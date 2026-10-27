@@ -217,10 +217,24 @@ static int social_mode_hook(Cpu *c, uint64_t addr) {
         // branch. Other calls in that function still observe real join state.
         c->x[0] = 0; return 1;
     }
-    if (!coop_net_enabled() || caller < 0x7000700000ull || caller >= 0x7000b00000ull) return 0;
+    // CallTrainerBattleCore / CallWildBattle (after their P2 actor check, social_trainer_hook) would still pick the
+    // native 2-vs-1 battle from the joined controller mode. A co-op team-up sets the ally instead.
+    bool trainer_core = caller == 0x700017e3ccull || caller == 0x700017e4d0ull;
+    if (!coop_net_enabled() || (!trainer_core && (caller < 0x7000700000ull || caller >= 0x7000b00000ull))) return 0;
     static bool logged;
     if (!logged) { logged = true; LOG("[coop-social] battle mode forced solo (caller %llx)\n", (unsigned long long)caller); }
     c->x[0] = 0; return 1;
+}
+static int social_trainer_hook(Cpu *c, uint64_t addr) {
+    (void)addr;
+    // CallTrainerBattleCore makes an ordinary single trainer battle the native 2-vs-1 (mode 3) when a P2 actor
+    // exists; P2 would then fight with a second Pokemon from this save. The social P2 is the other player's
+    // avatar: without a team-up the trainer battles this player alone, as the unmodified game does.
+    // CallWildBattle (static encounters: Snorlax, the legendaries) sets the same 2-vs-1 flag (class A +0xa6 -> mode 3).
+    bool wild = c->x[30] == 0x700017e4c0ull;
+    if (!coop_net_enabled() || (c->x[30] != 0x700017e3bcull && !wild) || (uint32_t)c->x[0] != 1) return 0;
+    LOG("[coop-social] %s battle stays solo (remote P2 avatar ignored)\n", wild ? "static wild" : "trainer");
+    *(uint64_t *)(uintptr_t)c->x[8] = 0; return 1;
 }
 static int social_eject_hook(Cpu *c, uint64_t addr) {
     (void)c, (void)addr;
@@ -248,6 +262,7 @@ void coop_actor_configure(void) {
     rt_register_fnhook(P2_MODEL_BUDDY, model_hook);
     rt_register_fnhook(PARTY_SELECTION, social_party_hook);
     rt_register_fnhook(COOP_MODE, social_mode_hook);
+    rt_register_fnhook(TRAINER_GET, social_trainer_hook);
     rt_register_fnhook(P2_EJECT, social_eject_hook);
     rt_register_fnhook(RECORD_ADD, social_record_hook);
 }

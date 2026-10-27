@@ -1,0 +1,50 @@
+name: letsgo-accounts
+services:
+  database:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: letsgo_accounts
+      POSTGRES_USER: letsgo_accounts
+      POSTGRES_PASSWORD: ${ACCOUNT_DB_PASSWORD:?Set ACCOUNT_DB_PASSWORD}
+    volumes:
+      - account-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U letsgo_accounts -d letsgo_accounts"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["python", "-m", "uvicorn", "server.accounts.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "7385", "--no-access-log", "--proxy-headers", "--forwarded-allow-ips", "${ACCOUNT_PROXY_IPS:-127.0.0.1}"]
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${ACCOUNT_PORT:-7385}:7385"
+    environment:
+      ACCOUNT_ENV: ${ACCOUNT_ENV:-production}
+      ACCOUNT_DATABASE_URL: postgresql://letsgo_accounts:${ACCOUNT_DB_PASSWORD:?Set ACCOUNT_DB_PASSWORD}@database:5432/letsgo_accounts
+      ACCOUNT_DIGEST_SECRET: ${ACCOUNT_DIGEST_SECRET:?Set ACCOUNT_DIGEST_SECRET}
+      ACCOUNT_OIDC_ISSUER: ${ACCOUNT_OIDC_ISSUER:?Set ACCOUNT_OIDC_ISSUER}
+      ACCOUNT_OIDC_AUDIENCE: ${ACCOUNT_OIDC_AUDIENCE:?Set ACCOUNT_OIDC_AUDIENCE}
+      ACCOUNT_OIDC_JWKS_URL: ${ACCOUNT_OIDC_JWKS_URL:?Set ACCOUNT_OIDC_JWKS_URL}
+      ACCOUNT_OIDC_ALGORITHM: ${ACCOUNT_OIDC_ALGORITHM:-RS256}
+      ACCOUNT_OIDC_INTERNAL_URL: ${ACCOUNT_OIDC_INTERNAL_URL:-}
+      ACCOUNT_NATIVE_CLIENT_ID: ${ACCOUNT_NATIVE_CLIENT_ID:-letsgo-native}
+      ACCOUNT_NATIVE_REDIRECT_URI: ${ACCOUNT_NATIVE_REDIRECT_URI:-http://127.0.0.1:7386/callback}
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7385/health/live', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+volumes:
+  account-data:

@@ -96,6 +96,7 @@ static void save_options(void) { // g_lock held; no save-game data is read or wr
     for (unsigned i = 0; i < 16; i++) fprintf(f, "%02x", g_identity[i]);
     fprintf(f, "\n");
     for (unsigned i = 0; i < 4; i++) fprintf(f, "room%u=%s\n", i, g_options.saved_rooms[i]);
+    fprintf(f, "teamup_battles=%d\n", g_options.teamup_battles);
     fclose(f);
 }
 static void load_options(void) { // g_lock held
@@ -103,6 +104,7 @@ static void load_options(void) { // g_lock held
     g_options_loaded = true;
     snprintf(g_options.server, sizeof g_options.server, "127.0.0.1:7381");
     snprintf(g_options.name, sizeof g_options.name, "Trainer");
+    g_options.teamup_battles = true;
     char path[1200], line[512]; options_path(path);
     FILE *f = fopen(path, "r");
     if (f) {
@@ -115,6 +117,7 @@ static void load_options(void) { // g_lock held
                 for (unsigned i = 0, b; i < 16; i++) if (sscanf(v + i*2, "%2x", &b) == 1) g_identity[i] = b;
             if (strlen(line) == 5 && !strncmp(line, "room", 4) && line[4] >= '0' && line[4] <= '3')
                 snprintf(g_options.saved_rooms[line[4]-'0'], 17, "%s", v);
+            if (!strcmp(line, "teamup_battles")) g_options.teamup_battles = atoi(v) != 0;
         }
         fclose(f);
     }
@@ -128,6 +131,7 @@ static void load_options(void) { // g_lock held
 #endif
         save_options();
     }
+    coop_battle_link_set_offers(g_options.teamup_battles);
 }
 
 void coop_net_options(CoopOptions *out) {
@@ -141,6 +145,7 @@ void coop_net_preferences(const CoopOptions *options) {
     snprintf(g_options.name,sizeof g_options.name,"%s",options->name);
     for(char *p=g_options.server;*p;p++) if((unsigned char)*p<32) *p=' ';
     for(char *p=g_options.name;*p;p++) if((unsigned char)*p<32) *p=' ';
+    g_options.teamup_battles=options->teamup_battles; coop_battle_link_set_offers(options->teamup_battles);
     save_options(); pthread_mutex_unlock(&g_lock);
 }
 void coop_net_session(CoopSession *out) {
@@ -157,8 +162,9 @@ void coop_net_connect(const CoopOptions *options) {
     if (!options || !options->server[0] || !options->name[0]) return;
     pthread_mutex_lock(&g_lock); load_options();
     char saved_rooms[4][17]; memcpy(saved_rooms, g_options.saved_rooms, sizeof saved_rooms);
+    bool teamup = g_options.teamup_battles;  // (changed through coop_net_preferences only)
     g_options = *options;
-    memcpy(g_options.saved_rooms, saved_rooms, sizeof saved_rooms);
+    memcpy(g_options.saved_rooms, saved_rooms, sizeof saved_rooms); g_options.teamup_battles = teamup;
     g_options.server[255] = g_options.name[24] = g_options.room[16] = 0;
     for (char *p = g_options.room; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
     for (char *p = g_options.server; *p; p++) if ((unsigned char)*p < 32) *p = ' ';
@@ -497,7 +503,7 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
     uint8_t hello[128];
     size_t n = 0;
     hello[n++] = resume ? 'R' : create ? 'C' : 'J';
-    hello[n++] = 5;  // social sessions and voluntary team-up invitations
+    hello[n++] = 7;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches
     put_u64(hello + n, g_program_id); n += 8;
     put_u64(hello + n, build_id); n += 8;
     if (!create) {
@@ -571,6 +577,7 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
             uint8_t body[5]={team_command};put_u32(body+1,team_id);
             if(!send_frame(s,'U',body,sizeof body))break;
         }
+        coop_battle_link_guest_ready(activity == COOP_OVERWORLD);
         coop_battle_link_tick();
         { uint8_t body[255];size_t size;bool failed=false;
           while(coop_battle_link_pop(body,&size))if(!send_frame(s,'B',body,size)){failed=true;break;}

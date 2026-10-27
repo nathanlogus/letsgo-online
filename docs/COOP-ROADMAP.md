@@ -1,6 +1,6 @@
 # Online co-op proposal
 
-Status: stages 1–2 implemented and tested in controlled scenarios, with independent progression. Further stages were requested on 25 October 2026. Stage 3 now has voluntary social tag-up invitations; synchronized battles are still open. Shared story scenes (4), trades, practice PvP and spectating (5) remain unimplemented. Details and limits are in [COOP-ONLINE.md](COOP-ONLINE.md).
+Status: stages 1–2 implemented and tested in controlled scenarios, with independent progression. Further stages were requested on 25 October 2026. Stage 3 has voluntary social tag-up invitations and, since 27 October 2026 (protocol 6), team-up battles against ordinary trainers in normal play (setting "Team-up battles", default on; [COOP-ONLINE.md](COOP-ONLINE.md#team-up-trainer-battles)); wild battles, switching/items for the partner and the partner's own rewards are still open. Shared story scenes (4), trades, practice PvP and spectating (5) remain unimplemented. Details and limits are in [COOP-ONLINE.md](COOP-ONLINE.md).
 
 ## Reference experience
 

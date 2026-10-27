@@ -604,6 +604,10 @@ void ui_page_graphics(float x, bool known) {
                     "экрана показывает равномерно (60 fps при 240 Гц: 4x); если GPU не успевает, дополнительные кадры "
                     "сначала рисуются в меньшем разрешении, затем их становится меньше."));
     }
+    // Lossless Scaling (Steam app, runtime/lossless.c): started with the game, its scale hotkey pressed for this window
+    ui_toggle("##lossless", "Lossless Scaling", x, &g_settings.lossless);
+    ui_tip("Starts Lossless Scaling from your Steam library with the game and turns on its scaling (its frame generation and "
+           "upscaler, as set in Lossless Scaling). Use windowed or fullscreen; turn this game's own frame generation off with it.");
     settings_apply_levels();
 }
 
@@ -650,6 +654,11 @@ void ui_page_image_sound(void) {
         ImGui::EndDisabled();
         ui_tip("Clock: the computer's time. Or one hour, kept fixed.");
     }
+    // ray-traced light shadows (runtime/nvn/vulkan/rt.c): with day and night on, on a GPU with ray queries
+    ImGui::BeginDisabled(!g_settings.daynight);
+    ui_toggle("##rtshadows", "Ray-traced light shadows", x, &g_settings.rt_shadows);
+    ImGui::EndDisabled();
+    ui_tip("At night, lamps and lit windows cast shadows, traced on the GPU (about 1 ms). Needs a ray tracing graphics card.");
     ui_group_gap();
     if (ui_button(UI_T("Reset", "Restaurar", "Сбросить"))) {
         g_settings.volume = g_settings.brightness = g_settings.contrast = g_settings.saturation = 1.0f;

@@ -269,6 +269,17 @@ static int rm_entry(const char *path, const struct stat *sb, int flag, struct FT
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
 
+bool plat_replace_file(const char *from, const char *to) {
+    if (rename(from, to)) return false;
+    char dir[4096];  // the rename itself is durable once its directory is flushed
+    snprintf(dir, sizeof dir, "%s", to);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = 0; else strcpy(dir, ".");
+    int fd = open(dir, O_RDONLY);
+    if (fd >= 0) fsync(fd), close(fd);
+    return true;
+}
+
 // End the process at once, skipping the library teardown: as on Windows, the GPU driver's threads crashed in exit()
 // while the game's threads still submitted work.
 void plat_terminate(void) { _exit(0); }

@@ -30,7 +30,7 @@ void rt_call_original(Cpu *c, uint64_t addr);
 #define PC_HELP_ID 0x6c61726570637000ull
 
 enum { CHOICE, PERCENT, TOGGLE, RESET_PICTURE, RESET_ADVANCED };
-enum { ALWAYS, WITH_FSR3, WITH_TAA, WITH_SSAO, WITH_GI, WITH_FG };
+enum { ALWAYS, WITH_FSR3, WITH_TAA, WITH_SSAO, WITH_GI, WITH_FG, WITH_DN };
 typedef struct {
     const char *label, *help;
     int type, when;
@@ -46,6 +46,8 @@ static const char *const aa[] = {"Off", "SMAA", "TAA", "FSR 3.1"};
 static const char *const fsr[] = {"Native AA", "Quality", "Balanced", "Performance", "Ultra performance"};
 static const char *const fg[] = {"Off", "Auto", "2x", "3x", "4x"};
 static const char *const fg_methods[] = {"Re-render", "Optical flow"};
+static const char *const hours[] = {"Clock", "00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00", "08:00", "09:00", "10:00",
+                                    "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"};
 #define FIELD(name) offsetof(Settings, name)
 #define CH(label, help, field, choices, n, when) {label, help, CHOICE, when, FIELD(field), choices, n, 0, 0}
 #define PC(label, help, field, low, high, when) {label, help, PERCENT, when, FIELD(field), NULL, 0, low, high}
@@ -64,12 +66,16 @@ static const Row rows[] = {
     PC("Brightness", "Adjust image brightness. 100% preserves the original brightness.", brightness, .5f, 1.5f, ALWAYS),
     PC("Contrast", "Adjust image contrast. 100% preserves the original contrast.", contrast, .5f, 1.5f, ALWAYS),
     PC("Saturation", "Adjust image colour intensity. 100% preserves the original colours.", saturation, 0, 2, ALWAYS),
+    TG("Day and night", "The outdoors follow the time of day: dawn, day, dusk, and night with lit windows and lamps.", daynight, ALWAYS),
+    CH("Time of day", "Clock follows the computer's time. An hour keeps the day at that time. Needs Day and night.", daynight_hour, hours, 25, WITH_DN),
+    TG("Ray-traced light shadows", "At night, lamps and lit windows cast shadows, traced on the GPU. Needs a ray tracing graphics card.", rt_shadows, WITH_DN),
     PC("TAA sharpness", "Sharpen the TAA image. Available when anti-aliasing is set to TAA.", taa_sharpness, 0, 1, WITH_TAA),
     TG("Object motion", "Track moving objects as well as the camera for TAA, FSR 3.1 and frame generation.", mv_objects, ALWAYS),
     TG("Show occlusion", "Debug view: show ambient occlusion alone. Requires ambient occlusion to be enabled.", ssao_debug, WITH_SSAO),
     TG("Show indirect light", "Debug view: show indirect light alone. Requires indirect light to be enabled.", gi_debug, WITH_GI),
     TG("Show motion vectors", "Debug view: show the scene's motion vectors.", mv_debug, ALWAYS),
     TG("FPS counter", "Show the PC frame-rate counter while playing.", show_fps, ALWAYS),
+    TG("Lossless Scaling", "Start Lossless Scaling from Steam with the game and turn on its scaling with your settings there.", lossless, ALWAYS),
     TG("Wild battles", "Classic combat with XP on defeat and catching with balls from the battle Bag.", wild_battle, ALWAYS),
     {"Reset picture settings", "Reset volume, brightness, contrast, saturation and TAA sharpness.", RESET_PICTURE},
     {"Reset advanced settings", "Turn off debug views and enable object motion vectors.", RESET_ADVANCED},
@@ -100,6 +106,7 @@ static bool enabled(const Row *r) {
     case WITH_TAA: return g_settings.antialias == AA_TAA;
     case WITH_SSAO: return g_settings.ssao;
     case WITH_GI: return g_settings.gi;
+    case WITH_DN: return g_settings.daynight;
     default: return true;
     }
 }
@@ -111,6 +118,7 @@ static void value(const Row *r, char *out, size_t cap) {
     else if (r->type == CHOICE) {
         int v = *(const int *)p;
         if (r->offset == FIELD(fps)) v = v == 120 ? 2 : v == 60 ? 1 : 0;
+        if (r->offset == FIELD(daynight_hour)) v++;  // (-1 = the clock)
         snprintf(out, cap, "%s", r->choices[v >= 0 && v < r->count ? v : 0]);
     } else out[0] = 0;
 }
@@ -120,8 +128,9 @@ static void change(const Row *r, int direction) {
     if (r->type == CHOICE) {
         int v = *(int *)p;
         if (r->offset == FIELD(fps)) v = v == 120 ? 2 : v == 60 ? 1 : 0;
+        if (r->offset == FIELD(daynight_hour)) v++;
         v = (v + direction + r->count) % r->count;
-        *(int *)p = r->offset == FIELD(fps) ? (int[]){30, 60, 120}[v] : v;
+        *(int *)p = r->offset == FIELD(fps) ? (int[]){30, 60, 120}[v] : r->offset == FIELD(daynight_hour) ? v - 1 : v;
     } else if (r->type == PERCENT) {
         float v = roundf(*(float *)p * 20) / 20 + direction * .05f;
         *(float *)p = fminf(r->hi, fmaxf(r->lo, v));

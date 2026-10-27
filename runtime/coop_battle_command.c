@@ -90,6 +90,10 @@ bool coop_ally_submit(CoopAllyWait *w, const CoopBattleMove *m, uint64_t receive
         m->battle != w->battle || m->turn != w->turn || m->sequence != w->sequence ||
         m->trainer != 2 || m->party_index != w->choices.party_index || m->move_index >= 4 || m->target >= 16)
         return false;
+    if (m->switch_to) {
+        if (m->switch_to > 6 || !(w->choices.switches & (1u << (m->switch_to - 1)))) return false;
+        w->command=*m;w->phase=COOP_ALLY_REMOTE;return true;
+    }
     unsigned i=m->move_index;
     if (!m->move || m->move != w->choices.moves[i] || !w->choices.pp[i] ||
         !(w->choices.targets[i] & (UINT32_C(1)<<m->target))) return false;

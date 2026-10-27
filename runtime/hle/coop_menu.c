@@ -22,7 +22,7 @@ void menu_copy_text(const char *);
 #define UI_REARM        0x70003623c0ull
 
 enum { ROOT, ROOM, MANAGE, PLAYERS, REMOTE, INSPECT, SETTINGS, SAVED, SAVED_DETAIL,
-       REMOVE_CONFIRM, LEAVE_CONFIRM, FORGET_CONFIRM, STATUS, TEAM, SOCIAL };
+       REMOVE_CONFIRM, LEAVE_CONFIRM, FORGET_CONFIRM, STATUS, TEAM, SOCIAL, MORE_SETTINGS };
 static uint64_t g_app;
 static atomic_bool g_visible;
 static int g_page, g_stack[16], g_depth, g_saved;
@@ -86,7 +86,7 @@ static void labels(char out[3][256]) {
         a=g_team_queued<=1 ? "Return to the overworld" : team.state==2 ? "Tagged up for travel" :
             team.state==1 ? team.from_slot==s.local_slot ? "Waiting for your friend" : "Accept invitation" : "Invite to tag up";
         b=g_team_queued<=1 ? "Cancel queued invitation" : team.state==2 ? "End tag-up" : team.state==1 ?
-            team.from_slot==s.local_slot ? "Cancel invitation" : "Decline invitation" : "Battles stay individual";
+            team.from_slot==s.local_slot ? "Cancel invitation" : "Decline invitation" : o.teamup_battles ? "Trainers: team-up battles" : "Battles stay individual";
         if(!team.state && team.reason) {
             static const char *why[]={"","Invitation declined","Tag-up ended","Another request is active",
                 "Friend is busy or too far","Invitation expired","Friend disconnected","Invitation no longer valid"};
@@ -98,7 +98,9 @@ static void labels(char out[3][256]) {
         snprintf(out[1],256,"%s",!g_inspect_self && peer ? activity(p.activity) : activity(s.activity));
         snprintf(out[2],256,"%s",!g_inspect_self && peer && p.appearance.valid ? p.appearance.gender ? "Female trainer" : "Male trainer" : "Independent save");a=b=d=NULL;break;
     case SETTINGS:
-        snprintf(out[0],256,"Trainer: %.24s",o.name);a=NULL;b="Relay server";d="Saved worlds";break;
+        snprintf(out[0],256,"Trainer: %.24s",o.name);a=NULL;b="Relay server";d="More settings";break;
+    case MORE_SETTINGS:
+        a=o.teamup_battles ? "Team-up battles: On" : "Team-up battles: Off";b="Saved worlds";d="Back";break;
     case SAVED:
         snprintf(out[0],256,"Saved world %u%s",g_saved+1,o.saved_rooms[g_saved][0] ? "" : " (empty)");
         a=NULL;b="Next saved world";d="Back";break;
@@ -166,11 +168,14 @@ static void choose(unsigned item) {
             g_team_queued=team.state==0 ? 0 : 1;g_team_queued_id=team.id;g_team_until=plat_now_ns()+30000000000ull;
         }break;
     case SETTINGS:
-        if(item==3){g_saved=0;page(SAVED);break;}
+        if(item==3){page(MORE_SETTINGS);break;}
         if(menu_keyboard_run_labeled(item==1 ? "Trainer name" : "Relay address (host:port)",item==1 ? o.name : o.server,item==1 ? 24 : 255,entered,sizeof entered) && entered[0]) {
             if(item==1)snprintf(o.name,sizeof o.name,"%s",entered);else snprintf(o.server,sizeof o.server,"%s",entered);
             coop_net_preferences(&o);
         }break;
+    case MORE_SETTINGS:
+        if(item==1){o.teamup_battles=!o.teamup_battles;coop_net_preferences(&o);}
+        else if(item==2){g_saved=0;page(SAVED);}else back();break;
     case SAVED:
         if(item==1 && o.saved_rooms[g_saved][0])page(SAVED_DETAIL);
         else if(item==2)g_saved=(g_saved+1)%4;else if(item==3)back();break;

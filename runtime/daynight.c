@@ -67,10 +67,11 @@ enum { GL_WINDOW, GL_GLASS_DOOR, GL_LAMP_GLASS, GL_LAMP_POST, GL_SIGN, GL_CLASSE
 // the multiplier of the daylight colour at full night, by class
 static const float glow_rgb[GL_CLASSES][3] = {  // (kept low so the panes, frames and bulbs keep their detail - Sword / Shield nights: warm orange windows,
     [GL_WINDOW] = {1.7f, 1.05f, 0.40f},            //  not blown-out white; LARECOMP_GLOW_STRENGTH scales (g - 1))
-    [GL_GLASS_DOOR] = {1.25f, 1.12f, 0.85f},       // warm-white interior light (blue x cool read as a cyan screen)
+    [GL_GLASS_DOOR] = {1.12f, 1.0f, 0.72f},        // a warm interior light, kept low (1.25 / 1.12 / 0.85: the Center's blue door read cyan
+                                                   //  and the Mart's white one blew out - both bright enough to be dynamic-light sources)
     [GL_LAMP_GLASS] = {2.2f, 1.45f, 0.50f},        // the lantern bulb: the game's bloom does the halo
     [GL_LAMP_POST] = {1.25f, 1.10f, 0.85f},        // a whole street lamp is one texture: only a warm lift
-    [GL_SIGN] = {1.7f, 1.15f, 0.95f},
+    [GL_SIGN] = {1.7f, 1.15f, 0.95f},              // (the Center's sign only: the Center / Mart roof textures are whole roofs)
 };
 static const struct { unsigned key; int cls; const char *what; } glow[] = {
 #include "daynight_glow.inc"
@@ -104,16 +105,34 @@ bool daynight_glow(unsigned key, float mul[3]) {
     return true;
 }
 
-// (bldg_shop_wall01_com: its sliding glass door and window strips; the wall around them stays dark)
-static const unsigned colorkey_tex[] = {0};  // (none needed so far: the Mart door turned out to be its own draw)
-
-bool daynight_glow_colorkey(unsigned key, float mul[3]) {
+// Dark glass windows (Celadon and Saffron, area07: their window textures are nearly black, so a multiplier keeps them dark): a warm
+// lit-interior light added in the draw's own shader (exec.c, ShaderKey.glowck 3), as the colour the pane should add before the tint.
+static const unsigned emissive_tex[] = {0x4d6065ff /* window02_01_area07 */, 0x2abecc1e /* window03_01_area07 */, 0x8cc01a3f /* window01_com */,
+                                       0xa45b4798 /* Celadon's blue windows (not in the name index; found with bisect_tex.py) */};
+bool daynight_glow_emissive(unsigned key, float add[3]) {
     float n = daynight_night();
     if (n < 0.05f) return false;
-    for (unsigned i = 0; i < sizeof colorkey_tex / sizeof *colorkey_tex; i++)
-        if (colorkey_tex[i] == key) {
-            for (int k = 0; k < 3; k++) mul[k] = 1 + (glow_rgb[GL_GLASS_DOOR][k] - 1) * n;
+    static const float warm[3] = {0.6f, 0.3f, 0.08f};  // (linear: the warm orange of the lit windows elsewhere; 0.9 / 0.5 / 0.16 read pinkish white)
+    for (unsigned i = 0; i < sizeof emissive_tex / sizeof *emissive_tex; i++)
+        if (emissive_tex[i] == key) {
+            for (int k = 0; k < 3; k++) add[k] = warm[k] * n;
             return true;
         }
     return false;
+}
+
+// Glass that is a region of a bigger texture, by the key's mode: 1 the pale cyan glass, 2 the white parts (a lamp drawn as one texture)
+static const struct { unsigned key; int mode, cls; } colorkey_tex[] = {
+    {0xe2c34422, 2, GL_LAMP_GLASS},  // roadlight01_area05: Cycling Road's lamps, the white half of the ball-shaped head
+};
+
+int daynight_glow_colorkey(unsigned key, float mul[3]) {
+    float n = daynight_night();
+    if (n < 0.05f) return 0;
+    for (unsigned i = 0; i < sizeof colorkey_tex / sizeof *colorkey_tex; i++)
+        if (colorkey_tex[i].key == key) {
+            for (int k = 0; k < 3; k++) mul[k] = 1 + (glow_rgb[colorkey_tex[i].cls][k] - 1) * n;
+            return colorkey_tex[i].mode;
+        }
+    return 0;
 }

@@ -1940,6 +1940,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             if (c->out_attr_mask & (1u << i)) sp(&s, "layout(location = %d) out vec4 v%d;\n", i, i);
         if (vel_vs) sp(&s, "layout(location = 30) out vec4 mv_prev_;\nlayout(location = 31) out vec4 mv_cur_;\n");
         if (key && key->jitter && !dbg) sp(&s, "layout(std140, set = 0, binding = 20) uniform Jit { vec4 jit; };\n");
+        if (key && key->xfb && !dbg) {  // (a location no varying uses; the fragment shader doesn't read it)
+            int loc = 29;
+            while (loc > 0 && (c->out_attr_mask & (1u << loc))) loc--;
+            sp(&s, "layout(location = %d, xfb_buffer = 0, xfb_offset = 0, xfb_stride = 16) out vec4 xfb_pos_;\n", loc);
+        }
     } else if (stage == STAGE_FRAGMENT) {
         if (vel_fs)
             sp(&s, "layout(location = 30) in vec4 mv_prev_;\nlayout(location = 31) in vec4 mv_cur_;\n"
@@ -2001,6 +2006,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     free(pre.buf);
     free(body.buf);
     if (stage == STAGE_VERTEX) {
+        if (key && key->xfb && !dbg) sp(&s, "  xfb_pos_ = gl_Position;\n");
         if (key && key->zoom && !dbg) sp(&s, "  gl_Position.xy *= %.4ff;\n", key->zoom / 100.0);
         if (key && key->jitter && !dbg) sp(&s, "  gl_Position.xy += jit.xy * gl_Position.w;\n");
         if (key && key->flip_y) sp(&s, "  gl_Position.y = -gl_Position.y;\n");
@@ -2039,9 +2045,14 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                    "    float nz_ = mix(mix(nh_.x, nh_.y, nf_.x), mix(nh_.z, nh_.w, nf_.x), nf_.y);"
                    "    float shine_ = pow(rip_, 6.0f) * (0.6f + 0.4f * rip2_) * smoothstep(0.45f, 0.85f, nz_);"
                    "    c0.rgb += vec3(0.75f, 0.85f, 1.0f) * gck.x * (0.015f + 0.05f * path_ + 1.0f * shine_ * path_); }\n");
-        else if (glowck)  // (pale cyan - glass - in a texture's draw: Mart's door is part of its wall texture)
+        else if (glowck && key->glowck == 3)  // (dark glass windows: a warm interior light added, the pane's pattern kept but not its
+                                              //  colour - the reflection of daylit trees read green, of the sky pink)
+            sp(&s, "  { float l_ = dot(c0.rgb, vec3(0.2126f, 0.7152f, 0.0722f)); c0.rgb = mix(c0.rgb, vec3(l_), 0.8f * min(gck.r * 2.0f, 1.0f));"
+                   "    c0.rgb += gck.rgb * (0.55f + 1.5f * l_); }\n");
+        else if (glowck)  // (gck.w 1: pale cyan - glass - in a texture's draw; 2: its white parts - a lamp's head drawn with its pole)
             sp(&s,"  { float gb_ = c0.g / max(c0.b, 1e-4f), br_ = c0.b / max(c0.r, 1e-4f), lu_ = dot(c0.rgb, vec3(0.2126f, 0.7152f, 0.0722f));"
                    "    float m_ = smoothstep(0.55f, 0.68f, gb_) * (1.0f - smoothstep(0.95f, 1.05f, gb_)) * smoothstep(1.25f, 1.5f, br_) * smoothstep(0.15f, 0.25f, lu_);"
+                   "    if (gck.w > 1.5f) { float mx_ = max(c0.r, max(c0.g, c0.b)); m_ = smoothstep(0.12f, 0.3f, lu_) * (1.0f - smoothstep(0.2f, 0.4f, (mx_ - min(c0.r, min(c0.g, c0.b))) / max(mx_, 1e-4f))); }"
                    "    c0.rgb *= mix(vec3(1.0f), gck.rgb, m_); }\n");
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { vec3 g = c0.rgb; float l = dot(g, vec3(0.299f, 0.587f, 0.114f));\n"
@@ -2420,7 +2431,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     size_t len = (size_t)(code - blob) + code_end(code, (max_size - (code - blob)) / 8) * 8;
     uint64_t h[2] = {0xcbf29ce484222325ull, 0x9e3779b97f4a7c15ull};
     uint32_t meta[8] = {(uint32_t)stage, (uint32_t)len, key->vs_out_mask, (uint32_t)(getenv("LARECOMP_NO_DISCARD") != NULL),
-                        (uint32_t)(getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0), (uint32_t)key->glowck};
+                        (uint32_t)(getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0), (uint32_t)key->glowck,
+                        (uint32_t)key->xfb};
     uint8_t kb[48] = {key->depth_minus_one, key->flip_y, key->glsl, key->velocity, key->vel_vs, key->vel_rt, key->jitter, key->zoom};
     memcpy(kb + 8, key->attr_kind, 32);
     memcpy(kb + 40, key->rt_kind, 8);

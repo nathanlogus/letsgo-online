@@ -20,6 +20,7 @@
 #include "../../settings.h"
 #include "../../coop_net.h"
 #include "fsr3.h"
+#include "rt.h"
 
 static uint64_t g_draws_total;  // (never reset: LARECOMP_COUNTER_LOG)
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
@@ -365,9 +366,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
             if (s->npools == 16) FATAL("descriptor pools exhausted\n");
             VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 512}};  // (rt.c: g_vk.rt only)
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = g_vk.rt ? 6 : 5, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1198,6 +1200,7 @@ static struct {
     VkImageView cview;
     VkFormat cfmt;
     uint32_t cw, ch, opaque;
+    uint32_t min_opaque;       // opaque draws before the scene counts: 16; 4 with day/night on (a battle's intro draws 6, it stayed in daylight)
     uint64_t frame, done_frame, proj_frame, scan_frame;
     float proj[4];             // P00, P11, A, B (GL style: z_ndc = (A z + B) / -z)
     int pbind;                 // where the projection was found: vertex cbuf, byte offset
@@ -1318,7 +1321,7 @@ static void vk_end_pass_at(int line) {
         renderer_save_texture_tex(st.rt.color[0]->backend, path);
     }
     // (the scene pass ends - a copy, a dispatch, another target - with its opaque draws done: the occlusion now)
-    if (ao.qual && !ao.busy && ao.opaque >= 16 && ao.done_frame != fx_frame()) ssao_run();
+    if (ao.qual && !ao.busy && ao.opaque >= ao.min_opaque && ao.done_frame != fx_frame()) ssao_run();
 }
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
@@ -1417,6 +1420,7 @@ static void begin_pass(void) {
             uint64_t fr = fx_frame();
             if (ao.tex != st.rt.color[0] || ao.frame != fr) { ao.tex = st.rt.color[0]; ao.frame = fr; ao.opaque = 0; }
             ao.qual = true;
+            ao.min_opaque = daynight_tint(dn_rgb) ? 4 : 16;
             ao.color = c0;
             ao.depth = st.rt.depth->backend;
             ao.dtex = st.rt.depth;
@@ -1893,7 +1897,7 @@ static void translate_program(void *arg) {
     fx_patch_fs(p);
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
     save_glsl(p->vi->msl, p->code[0], "vs");
-    save_glsl(p->fi->msl, p->code[1], p->fkey.glowck == 2 ? "fs_water" : p->fkey.glowck ? "fs_glass" : "fs");  // (variants: their own file)
+    save_glsl(p->fi->msl, p->code[1], p->fkey.glowck == 2 ? "fs_water" : p->fkey.glowck == 3 ? "fs_darkglass" : p->fkey.glowck ? "fs_glass" : "fs");  // (variants: their own file)
     compile_program(p);  // (this worker: queued again it would wait behind the other translations)
 }
 
@@ -3518,7 +3522,7 @@ static void ssao_settle_camera(void) {
 static bool ssao_draw_hook(void) {
     if (ao.busy || ao.done_frame == fx_frame()) return false;
     if (!(st.color_state[0] & 1) && st.ds[0] && st.ds[1]) { ao.opaque++; ssao_find_projection(); }
-    if (st.ds[0] || ao.opaque < 16) return false;
+    if (st.ds[0] || ao.opaque < ao.min_opaque) return false;
     vk_end_pass();
     return true;
 }
@@ -3590,12 +3594,23 @@ static bool glow_ck_draw(Prog *pr) {
     if (!daynight_tint(t)) return false;
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
         NvnTexture *tx = shader_texture_object(1, &pr->fi->tex[i]);
-        if (!tx || !tx->addr || !daynight_glow_colorkey((unsigned)(tex_content_key(tx) >> 32), m)) continue;
+        int mode = tx && tx->addr ? daynight_glow_colorkey((unsigned)(tex_content_key(tx) >> 32), m) : 0;
+        if (!mode) continue;
         for (int k = 0; k < 3; k++) g_gck[k] = fminf(m[k] / fmaxf(t[k], 0.02f), 24.0f);
-        g_gck[3] = 1;
+        g_gck[3] = (float)mode;  // (the shader's key: 1 pale cyan glass, 2 the white parts)
         return true;
     }
     return false;
+}
+
+// Ray-traced light shadows (rt.c): at night, with the dynamic lights on, on a device that has it. LARECOMP_LIGHTS_RT=0: off
+// (the lights' pools then cast no shadow).
+static bool rt_lights(void) {
+    static int env = -1;
+    if (env < 0) env = !(getenv("LARECOMP_LIGHTS_RT") && !strcmp(getenv("LARECOMP_LIGHTS_RT"), "0")) &&
+                       !(getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "0"));
+    float t[3];
+    return env && g_settings.rt_shadows && g_vk.rt && daynight_tint(t) && daynight_night() > 0.05f && rt_available();
 }
 
 // Night, the water's draw (its fragment shader: found with tests/scripts/bisect_tex.py on Viridian's pond; LARECOMP_WATER_FSHASH=<hex>,...
@@ -3621,6 +3636,20 @@ static bool water_draw(void) {
     g_gck[1] = (float)(SDL_GetTicks() % 1000000) / 1000.0f;
     g_gck[2] = (float)ao.cw, g_gck[3] = (float)ao.ch;
     return true;
+}
+
+// Night, dark glass windows (daynight_glow_emissive): a warm light added in the draw's shader (ShaderKey.glowck 3, gck.rgb = the light / T)
+static bool glow_em_draw(Prog *pr) {
+    float t[3], a[3];
+    if (!daynight_tint(t)) return false;
+    for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+        NvnTexture *tx = shader_texture_object(1, &pr->fi->tex[i]);
+        if (!tx || !tx->addr || !daynight_glow_emissive((unsigned)(tex_content_key(tx) >> 32), a)) continue;
+        for (int k = 0; k < 3; k++) g_gck[k] = fminf(a[k] / fmaxf(t[k], 0.02f), 24.0f);
+        g_gck[3] = 1;
+        return true;
+    }
+    return false;
 }
 
 static bool glow_draw(Prog *pr, float pre[3]) {
@@ -3669,8 +3698,8 @@ static bool drawlog(Prog *pr, CmdRec *r, bool indexed) {
     char line[600];
     int len = 0;
     if (log)
-        len = snprintf(line, sizeof line, "[drawlog] #%d fs %016llx blend %d zwrite %d obj %llx args", ord++, (unsigned long long)g_cur_fs_hash,
-                       st.color_state[0] & 1, st.ds[1], (unsigned long long)st.obj);
+        len = snprintf(line, sizeof line, "[drawlog] #%d fs %016llx blend %d zwrite %d obj %llx%s args", ord++, (unsigned long long)g_cur_fs_hash,
+                       st.color_state[0] & 1, st.ds[1], (unsigned long long)st.obj, ao.done_frame == fx_frame() ? " AFTER-TINT" : "");
     for (int i = 0; log && i < draw_nargs(indexed); i++) len += snprintf(line + len, sizeof line - len, " %llx", (unsigned long long)r->x[i]);
     bool hit = false;
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
@@ -3752,6 +3781,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.glsl = fkey.glsl = 1;
     vkey.jitter = jitter_on() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (TAA, FSR 3)
     vkey.zoom = cam_zoom() != 1.0f && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0] ? (uint8_t)lroundf(cam_zoom() * 100.0f) : 0;  // (LARECOMP_ZOOM)
+    vkey.xfb = rt_lights() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (ray-traced light shadows: rt.c)
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -3781,13 +3811,15 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (drawlog(pr, r, indexed)) return;  // (research: LARECOMP_DRAWLOG, LARECOMP_SKIP_TEX)
     float glow_pre[3];
-    bool glow = st.rt.depth && st.ds[0] && !(st.color_state[0] & 1) && glow_draw(pr, glow_pre);  // (night lights)
-    if (!glow && st.rt.depth && st.ds[0] && !(st.color_state[0] & 1) && glow_ck_draw(pr)) {  // (night lights: glass inside a texture)
+    bool opaque = st.rt.depth && st.ds[0] && !(st.color_state[0] & 1);
+    bool em = opaque && glow_em_draw(pr);  // (night lights: dark glass gets a warm light added - before the multiplier, which keeps it dark)
+    bool glow = !em && opaque && glow_draw(pr, glow_pre);  // (night lights)
+    if (em || (!glow && opaque && glow_ck_draw(pr))) {  // (night lights: dark glass, or glass inside a texture)
         ShaderKey fk3 = fkey;
-        fk3.glowck = 1;
+        fk3.glowck = em ? 3 : 1;
         Prog *pg = get_program(st.program, &vkey, &fk3);
         if (pg) wait_built(&pg->state);
-        if (pg && atomic_load(&pg->state) == 1) pr = pg, fkey.glowck = 1;
+        if (pg && atomic_load(&pg->state) == 1) pr = pg, fkey.glowck = fk3.glowck;
     } else if (!glow && st.rt.depth && st.ds[0] && water_draw()) {  // (night: the moon on the water, in its own shader)
         ShaderKey fk3 = fkey;
         fk3.glowck = 2;
@@ -3833,7 +3865,9 @@ static void draw_(CmdRec *r, bool indexed) {
     snap_reason = "draw-colorwrite";
     for (int i = 0; i < st.rt.ncolor; i++)
         if (st.rt.color[i] && ((st.channel_mask >> (i * 4)) & 0xF)) snapshots_invalidate(st.rt.color[i]);
-    if (g_settings.contact_on) sun_probe();  // (the shadow map's light: the contact shadows' sun)
+    static int hour_env = -1;
+    if (hour_env < 0) hour_env = getenv("LARECOMP_HOUR") != NULL;
+    if (g_settings.contact_on || g_settings.daynight || hour_env) sun_probe();  // (the shadow map's light: the contact shadows' sun, the clouds' projection)
     begin_pass();
     // Online head labels still need the scene camera when all camera-dependent
     // graphics effects are off. Capture it without enabling those effects.
@@ -4249,8 +4283,21 @@ static void draw_(CmdRec *r, bool indexed) {
     if (ip_drop < 0) ip_drop = getenv("LARECOMP_INTERP_DROP") ? atoi(getenv("LARECOMP_INTERP_DROP")) : 0;
     if (ip_drop && ip_replaying && ip_kept_why && (ip_drop & (1 << ip_kept_why))) { /* left out */ }
     else if (exp_hit && exp_mode == 1) { /* skipped */ }
-    else if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
-    else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
+    else {
+        // ray-traced light shadows: this frame's opaque scene triangles, captured before the lights pass (rt.c). The output is a
+        // triangle list: a list's vertices, or 3 per strip triangle (none where a restart would cut the strip short)
+        bool xcap = false;
+        // (not the alpha-cut cards - grass tufts, leaves: captured whole, their empty corners blocked the light as squares)
+        if (vkey.xfb && st.ds[1] && !(st.color_state[0] & 1) && !pr->fi->uses_discard && !ip_replaying && ao.done_frame != fx_frame() && cls == 2 &&
+            !(native && topo == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP && st.prim_restart)) {
+            uint32_t n = use_index ? icount : count;
+            uint32_t tri = native && topo == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ? (n >= 3 ? n - 2 : 0) : n / 3;
+            xcap = rt_capture_begin(cb, fx_frame(), tri * 3 * inst_eff);
+        }
+        if (!use_index) vkCmdDraw(cb, count, inst_eff, first, base_inst);
+        else vkCmdDrawIndexed(cb, icount, inst_eff, 0, base_vertex, base_inst);
+        if (xcap) rt_capture_end(cb);
+    }
     if (gp_q) { vkCmdEndQuery(cb, gps_qp, (uint32_t)gps_n); gp_stat[gp_n - 1] = gps_n + 1; gps_n++; }
     if (exp_hit && exp_mode == 2) apply_scissor();
     stat_draws++;
@@ -4643,6 +4690,7 @@ static VkImageView raw_view(TexBackend *b) {
 // up to three inputs (bindings 0-2), sampled linear / clamp.
 static VkPipelineLayout post_layout;
 static VkDescriptorSetLayout post_set_layout;
+static VkAccelerationStructureKHR post_tlas;  // (set: the next post passes bind it at 6 - the lights pass's ray-traced shadows)
 
 // fmt: the output's format; blend 1: the output multiplies what is there (SSAO onto the game's scene, colour only),
 // 2: replaces the colour, 3: is added to it (GI)
@@ -4651,10 +4699,13 @@ static VkPipeline post_pipeline_ex(const char *fs, VkFormat fmt, int blend) {
     static struct { const char *fs; VkFormat fmt; int blend; VkPipeline p; } cache[64];
     for (int i = 0; i < 64; i++) if (cache[i].p && cache[i].fs == fs && cache[i].fmt == fmt && cache[i].blend == blend) return cache[i].p;
     if (!post_layout) {
-        VkDescriptorSetLayoutBinding b[6];  // (6: the optical flow's in-between image, flow_image)
+        VkDescriptorSetLayoutBinding b[7];  // (6: the optical flow's in-between image, flow_image)
         for (uint32_t i = 0; i < 6; i++)
             b[i] = (VkDescriptorSetLayoutBinding){i, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
-        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 6, .pBindings = b};
+        // (binding 6: the scene's acceleration structure, for the lights pass's ray-traced shadows - post_tlas)
+        b[6] = (VkDescriptorSetLayoutBinding){6, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+        VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = g_vk.rt ? 7 : 6,
+                                              .pBindings = b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &post_set_layout));
         VkPushConstantRange r = {VK_SHADER_STAGE_FRAGMENT_BIT, 0, 128};  // (32 for most; a matrix: the motion vectors)
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
@@ -4786,13 +4837,18 @@ static void post_pass_view(VkCommandBuffer cb, VkPipeline pipe, const VkImageVie
     vkCmdBeginRendering(cb, &ri);
     VkDescriptorSet ds = vk_alloc_set(post_set_layout);
     VkDescriptorImageInfo ii[6];
-    VkWriteDescriptorSet w[6];
+    VkWriteDescriptorSet w[7];
     for (int i = 0; i < n; i++) {
         ii[i] = (VkDescriptorImageInfo){vk_default_sampler(true), srcs[i], VK_IMAGE_LAYOUT_GENERAL};
         w[i] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = (uint32_t)i,
                                       .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                       .pImageInfo = &ii[i]};
     }
+    VkWriteDescriptorSetAccelerationStructureKHR wa = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR,
+                                                       .accelerationStructureCount = 1, .pAccelerationStructures = &post_tlas};
+    if (post_tlas)
+        w[n++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = &wa, .dstSet = ds, .dstBinding = 6,
+                                        .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR};
     vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, post_layout, 0, 1, &ds, 0, NULL);
@@ -5213,9 +5269,13 @@ static void ssao_run(void) {
             float t0 = (getenv("LARECOMP_FIREFLIES") && !strcmp(getenv("LARECOMP_FIREFLIES"), "0")) ? 0.0f : (float)(SDL_GetTicks() % 1000000) / 1000.0f + 0.01f;  // seconds, for the fireflies (0: off)
             uint32_t lw[4], lh[4];
             TexBackend *lv[4];
-            lw[0] = (ao.cw + 3) / 4, lh[0] = (ao.ch + 3) / 4;
+            // (frame generation's reduced in-between images: a smaller block, so the light map covers the scene as N's does - at 4 the pools
+            //  and halos of every other image came out larger and brighter, a flicker at night)
+            float dl_s = vk_tex_lo_active() ? ip_lo_factor() : 1.0f;
+            int dl_b = (int)lroundf(4.0f * dl_s) < 1 ? 1 : (int)lroundf(4.0f * dl_s);
+            lw[0] = (ao.cw + dl_b - 1) / dl_b, lh[0] = (ao.ch + dl_b - 1) / dl_b;
             lv[0] = post_image_fmt(48, lw[0], lh[0], VK_FORMAT_R16G16B16A16_SFLOAT);
-            float pe[8] = {ao.proj[2], ao.proj[3], mo, 0, (float)ao.cw, (float)ao.ch};
+            float pe[8] = {ao.proj[2], ao.proj[3], mo, (float)dl_b, (float)ao.cw, (float)ao.ch};
             VkImageView ei[4] = {post_view(cp), dv};
             post_pass_view(cb, post_pipeline_ex("dl_extract.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ei, 2, post_view(lv[0]), lw[0], lh[0], pe, 32, false, false);
             static float flip = 99;  // LARECOMP_DL_FLIP=1: the other row direction (the pools run the wrong way)
@@ -5234,8 +5294,8 @@ static void ssao_run(void) {
                 const float def[3] = {0.7f, 1.0f, 2.5f};
                 for (int i = 0; i < 3; i++) dq[i] = v[i] ? (float)atof(v[i]) : def[i];
             }
-            float pa[20] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows,
-                            dq[0], dq[1], dq[2], 0};
+            float pa[20] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_RT_DEBUG") ? -2.0f : getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows,
+                            dq[0], dq[1], dq[2], dl_s};
             for (int k = 1; k < 4; k++) {  // the pyramid: each level half the size of the one above, depth-weighted
                 lw[k] = (lw[k - 1] + 1) / 2, lh[k] = (lh[k - 1] + 1) / 2;
                 lv[k] = post_image_fmt(48 + k, lw[k], lh[k], VK_FORMAT_R16G16B16A16_SFLOAT);
@@ -5246,11 +5306,19 @@ static void ssao_run(void) {
             }
             vk_full_barrier(cb);
             VkImageView ai[6] = {post_view(cp), dv, post_view(lv[0]), post_view(lv[1]), post_view(lv[2]), post_view(lv[3])};
-            post_pass_view(cb, post_pipeline_ex("dl_apply.frag", ao.cfmt, getenv("LARECOMP_DL_DEBUG") ? 2 : 1), ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
+            // (ray-traced shadows: this frame's captured triangles -> acceleration structures, rt.c; an in-between image traces N's)
+            gp_mark(cb, "ours: ray tracing (acceleration structures)");
+            post_tlas = rt_lights() && rt_build(cb, fx_frame(), ao.proj) ? rt_tlas() : VK_NULL_HANDLE;
+            gp_mark(cb, "ours: night lights apply%s", post_tlas ? " (ray-traced shadows)" : "");
+            VkPipeline p_dl = post_pipeline_ex(post_tlas ? "dl_apply_rt.frag" : "dl_apply.frag", ao.cfmt, getenv("LARECOMP_DL_DEBUG") || getenv("LARECOMP_RT_DEBUG") ? 2 : 1);
+            {   static bool said;
+                if (!said && post_tlas) { said = true; LOG("[rt] lights pass: ray-traced shadows\n"); } }
+            post_pass_view(cb, p_dl, ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
+            post_tlas = VK_NULL_HANDLE;
             if (t0 > 0 && ao.vp_frame) {  // fireflies, placed in the world by this frame's camera (dl_ff.frag): they stay put as the camera moves
                 float pf[28];
                 for (int i = 0; i < 16; i++) pf[i] = (float)ao.vp[i];  // (row-major, as the shader's row_major mat4)
-                float rest[12] = {(float)ao.cw, (float)ao.ch, t0, mo, nvn_window_origin() == 0 ? 1.0f : 0.0f, night, 0, 0, dn[0], dn[1], dn[2], 0};
+                float rest[12] = {(float)ao.cw, (float)ao.ch, t0, mo, 0.0f /* (row 0 = NDC y -1, as mv.frag) */, night, getenv("LARECOMP_FF_DEBUG") ? 1.0f : 0.0f, 0, dn[0], dn[1], dn[2], 0};
                 memcpy(pf + 16, rest, sizeof rest);
                 vk_full_barrier(cb);
                 VkImageView fi[4] = {post_view(cp), dv};
@@ -5259,6 +5327,24 @@ static void ssao_run(void) {
         } else {
             float pt[8] = {dn[0], dn[1], dn[2]};
             post_pass_view(cb, post_pipeline_ex("tint_apply.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
+        }
+        static float clouds = -1;  // LARECOMP_CLOUDS: the cloud shadows' depth in daylight (default 0.3; 0 = off), a third of it at night
+        if (clouds < 0) clouds = getenv("LARECOMP_CLOUDS") ? (float)atof(getenv("LARECOMP_CLOUDS")) : 0.3f;
+        if (clouds > 0 && ao.vp_frame) {  // cloud shadows drifting over the ground, in the world by this frame's camera (clouds.frag)
+            float pc[28];
+            for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
+            static float cover = -1;  // LARECOMP_CLOUD_COVER: how much of the sky is cloud, 0..1 (default 0.45)
+            if (cover < 0) cover = getenv("LARECOMP_CLOUD_COVER") ? fminf(fmaxf((float)atof(getenv("LARECOMP_CLOUD_COVER")), 0), 1) : 0.45f;
+            // (projected along the sun - the shadow map's light, sun_dir - else a fixed slant; a low sun is clamped)
+            float L[3] = {0.4f, 1, 0.3f}, slope[2];
+            if (!sun_dir(fx_frame(), L) || L[1] < 0.2f) L[0] = 0.4f, L[1] = 1, L[2] = 0.3f;
+            slope[0] = L[0] / L[1], slope[1] = L[2] / L[1];
+            float rest[12] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 40000000) / 1000.0f, mo, 0.0f /* (as mv.frag) */,
+                              clouds * (1.0f - 0.67f * night), getenv("LARECOMP_CLOUDS_DEBUG") ? (float)atof(getenv("LARECOMP_CLOUDS_DEBUG")) : 0.0f, 0,
+                              slope[0], slope[1], cover, 0};
+            memcpy(pc + 16, rest, sizeof rest);
+            vk_full_barrier(cb);
+            post_pass_view(cb, post_pipeline_ex("clouds.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
         }
     }
     vk_full_barrier(cb);

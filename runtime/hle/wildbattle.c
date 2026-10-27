@@ -303,6 +303,7 @@ static void start_battle(Cpu *c) {
 static int trigger_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (g_active) return 1;  // (swallowed: our battle is running)
+    if (getenv("LARECOMP_WILDBATTLE_NONE")) return 1;  // (test runs: touches start nothing, e.g. two-client battle tests)
     if (!(g_mode_override < 0 ? g_settings.wild_battle : g_mode_override)) return 0;
     if (g_count >= g_max) return 0;  // (the game's capture runs)
     g_starter_alone = starter_walks_alone(c);  // (issue #6: the starter's battle model, above)

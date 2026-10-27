@@ -1,0 +1,17 @@
+# Mystery Gift preview and retry-safe claims
+
+The Windows launcher Mystery Gift page can preview an available campaign or entered gift code, show its item count and linked destination, and explicitly confirm a server claim. A linked, remotely verified local profile is required. Preview consumes no code, stock or entitlement. Successful confirmation reserves a gift for future delivery; **this build does not apply rewards to saves**.
+
+The client normalizes codes, obtains `POST /v1/gift-preview`, then freezes the confirmed account/profile, campaign or code, adapter, reward digest and random idempotency key. Before sending `POST /v1/claims`, it locks and durably saves a per-profile retry journal. The journal is encrypted with Windows DPAPI for the current user, with service/account/profile-specific entropy. It contains no application session tokens or password, and private codes are not stored in plaintext profile metadata.
+
+The version-1 journal is a bounded native binary record at the selected profile metadata path plus `.claim`. Write uses an independent temporary file, flush and atomic replacement. Record size, version, ownership, UUIDs, code format and adapter are checked on recovery. Future layout changes must preserve compatible reading or migrate explicitly. Do not deserialize an incompatible layout or silently replace an unreadable pending request.
+
+If a reply is lost, the launcher keeps the journal and offers **Resume saved claim**. Restarting/signing in detects it without allocating automatically. Explicit Resume sends the same request and key, so a committed allocation returns its original result. Destination and reward digest must match the saved intent before the journal is removed. An uncertain or rejected response preserves recovery data. A paused/expired campaign does not undo a previously committed idempotent result.
+
+The explicit **Clear local retry request** action requires its local-clear checkbox. It removes only this device's encrypted retry file. It does not cancel a server claim, restock a gift, reset account eligibility or delete history. Check the Pending/Received inbox if a prior allocation may have succeeded. Private retry payloads must never be logged or copied into public diagnostics.
+
+The item list currently shows aggregate counts. Native item-name/icon mapping, preview polish, game-save mutation and delivery receipts are separate work. The existing `ack` endpoint is not called by these launcher claim jobs. Claiming is not evidence of successful native reward insertion.
+
+Implementation: `runtime/account_claim.inc`, `runtime/account.c/.h`, `runtime/ui/launcher_lg.mm`, `server/accounts/app.py`. Source and worker generation checks isolate account/profile changes. Windows adds only the system `crypt32` dependency; login credentials continue using Credential Manager independently.
+
+Verification: `tests/runs/account-gift-api-20261027-143256-dfd461/` passed all 14 API/native scenarios. A local QA proxy allowed an isolated server to commit a real claim and then dropped its reply. The actual launcher retained the encrypted retry, restarted, resumed the same allocation and left one claim/code use. Native probes also verify actual DPAPI roundtrip and wrong-account rejection. Test assets use disposable accounts, isolated databases/ports, copied settings/saves and protected metadata under ignored `tests/`. See the [handoff roadmap](ACCOUNTS-MYSTERY-GIFTS-ROADMAP.md) for next steps and limits.

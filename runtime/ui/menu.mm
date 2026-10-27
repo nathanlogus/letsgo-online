@@ -811,7 +811,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         CoopTeamUp team={};coop_net_teamup(&team);
         if(team.state==1 && team.from_slot!=coop_net_local_slot())
             ImGui::TextUnformatted("Tag-up invitation | Friends: F8 / Communicate");
-        else if(team.state==2)ImGui::TextUnformatted("Tagged up for travel | Individual battles");
+        else if(team.state==2){CoopOptions o;coop_net_options(&o);
+            ImGui::TextUnformatted(o.teamup_battles ? "Tagged up | Team-up trainer battles" : "Tagged up for travel | Individual battles");}
         ImGui::End();
 
         CoopPlate local_plate;

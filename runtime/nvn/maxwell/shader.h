@@ -53,8 +53,10 @@ typedef struct {
     // positions the velocity is computed from (the velocity carries no jitter)
     uint8_t jitter;
     uint8_t glowck;   // fragment: day/night - 1: the glass pixels of a lit texture's draw (pale cyan) are multiplied by gck.rgb, a uniform at binding 21;
-                      // 2: the water's draw gets the moon's sheen and ripples (gck = strength, seconds, width, height)
+                      // 2: the water's draw gets the moon's sheen and ripples (gck = strength, seconds, width, height); 3: dark glass, gck.rgb added (warm light)
     uint8_t zoom;     // LARECOMP_ZOOM: the main scene's vertex shaders scale gl_Position.xy by zoom / 100 (0: off)
+    uint8_t xfb;      // vertex: ray-traced light shadows (runtime/nvn/vulkan/rt.c) - the clip position, before zoom and jitter, to
+                      // transform feedback buffer 0 (16 bytes a vertex)
 } ShaderKey;
 
 typedef struct {

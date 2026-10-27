@@ -9,12 +9,20 @@ typedef struct {
     uint32_t turn, sequence;
     uint16_t move;
     uint8_t trainer, party_index, move_index, target;
+    // A party slot + 1 to switch in instead of the move above (0: the move).
+    uint8_t switch_to;
+    // Replay: native request kind (2 action, 4 replacement after a faint, 5 mid-turn switch), the
+    // controller's reply count and its first native command (low nibble 1 fight, 2 item, 3 change).
+    uint8_t kind, count;
+    uint32_t packet;
 } CoopBattleMove;
 
 typedef struct {
     uint16_t moves[4];
     uint8_t pp[4], party_index;
     uint32_t targets[4]; // bit per native target position; supplied by the authority
+    uint8_t kind;        // 2 action (moves or a switch), 4/5 replacement (a switch only)
+    uint8_t switches;    // bit per party slot the player may switch in
 } CoopBattleChoices;
 
 typedef enum {

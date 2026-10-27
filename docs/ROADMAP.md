@@ -1,5 +1,7 @@
 # Roadmap to a mature native port
 
+For the current accounts and Mystery Gift implementation, remaining work and agent handoff, see [Accounts and Mystery Gifts roadmap](ACCOUNTS-MYSTERY-GIFTS-ROADMAP.md).
+
 _2026-10-17. Inventory of the code and the current documentation. This file is a verifiable backlog, not a claim that every item is a bug. The status of each item should be updated with links to reproductions, logs, captures or tests before a release._
 
 ## Scope and priority

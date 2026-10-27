@@ -6,7 +6,27 @@ This prototype relays player presence and emote packets between two matching gam
 
 Upstream `raulzrrs/letsgo-recomp` was merged through `60b8bdf` (0.7.3). This includes renderer/optical-flow optimizations, SSE4.2 game-code support, setup validation/rebuild fixes and the native CATCH implementation. The local Eevee classic battle-Bag catching mode remains the default; upstream CATCH/GO-return hooks run in the alternate mode (`LARECOMP_WILDBATTLE_CLASSIC=0`) to avoid two battle implementations modifying the same callbacks. Frame generation method is also exposed in native PC Options.
 
-Protocol **5** adds voluntary social tag-ups. Both clients and the relay must be updated together. Friends and Communicate → Play With Others → Players → remote trainer → Team up offer an invitation, accept/decline, cancellation and end-tag controls. Invitations expire after 45 seconds. Both trainers must have fresh poses, be exploring the same area and be within 30 metres; the relay checks these conditions again on acceptance. Disconnect, removal and resumed sessions cancel the tag. The HUD identifies incoming invitations and an accepted social tag. Battles, rewards and saves remain individual; synchronized battles are not implemented by this invitation foundation.
+Protocol **5** added voluntary social tag-ups; protocol **6** added team-up trainer battles and protocol **7** lets each partner switch in their own Pokémon (below). Both clients and the relay must be updated together. Friends and Communicate → Play With Others → Players → remote trainer → Team up offer an invitation, accept/decline, cancellation and end-tag controls. Invitations expire after 45 seconds. Both trainers must have fresh poses, be exploring the same area and be within 30 metres; the relay checks these conditions again on acceptance. Disconnect, removal and resumed sessions cancel the tag. The HUD identifies incoming invitations and an accepted social tag. Battles, rewards and saves remain individual; synchronized battles are not implemented by this invitation foundation.
+
+## Team-up trainer battles
+
+On Let's Go Eevee 1.0.0, two tagged-up players can fight ordinary trainers together. Nothing needs to be set up beyond the tag-up:
+
+1. Tag up through **Communicate → Play With Others → Players → (your friend) → Team up**, or **Friends (F8) → Invite to tag up**. Both trainers must be close together in the overworld.
+2. When a trainer challenges the **room host** (sees them or is talked to), the trainer's first line stays on screen for up to **10 seconds** and the partner gets a prompt: "*Host* was challenged by *trainer*! Join the battle with your Pokemon?" (Join / Decline; Enter / A to join, Escape / B to decline).
+3. If the partner joins, the host and the partner fight two copies of the trainer's team, each with their own party: the partner's lead goes first and the rest of the partner's party stays in reserve. Both players choose in the game's own battle menu, each for their own Pokémon, and see the other's trainer model. A player who has not chosen within **30 seconds** gets the NPC's choice for that turn only; the next turn is theirs again. The partner's game replays the same battle.
+   - **Switching:** *Pokémon* in the battle menu lists the player's own party and switches one of their own Pokémon in.
+   - **Fainting:** when a player's Pokémon faints, that player picks the replacement from their own party list. Without a choice within the 30 seconds, the NPC picks it. A player with no Pokémon left is out; the other player fights on alone, as in the game's own multi battles.
+   - **Items:** the host uses their Bag as usual, and the item comes from the host's bag only. The partner's Bag is refused in team-ups (the game's "can't use items" message): the partner's game is a replay, and an item there would come from no one's bag.
+4. If the partner declines, does not answer within 10 seconds, or is busy (in a menu, a battle, a story scene or loading), the host fights the trainer alone, as in the unmodified game.
+
+Rewards stay with each save. The host gets the normal single-battle prize money (not double), the trainer's items and the "trainer beaten" flag. The partner's save is not changed at all: no money, items, flags, EXP, PP or fainted Pokémon (the partner's Pokémon fight as copies, which are not written back). The partner can still battle that trainer in their own world.
+
+Only ordinary overworld trainers are offered; gym leaders, the rival, Team Rocket, the Elite Four, story double battles and Master trainers stay solo, and so do battles started by the room's guest. Other game versions (Pikachu, other updates) cannot go online with this build.
+
+**Setting:** *Team-up battles* (default on) is in **Communicate → Play With Others → Online settings → More settings**, or the **Team-up battles** checkbox in Friends (F8). It is saved in `coop.ini` (`teamup_battles=0/1`). Off, the host never offers a team-up and the partner declines every offer automatically, so both play their trainer battles solo. Each player's setting applies to themselves only.
+
+Team-up battles need protocol 7 on both clients and the relay. An older client or relay is refused when connecting ("protocol mismatch"), so mixed versions play solo instead.
 
 Native Communicate queues invite/accept until the player returns to the overworld. A fresh snapshot is sent before that action, avoiding a race against the menu's busy state. Native connection pages now provide retry/cancel actions. Outfit changes automatically cycle the virtual P2 controller and rebuild its model with the new resource block.
 
@@ -101,11 +121,11 @@ Screenshots are saved separately as `host/host-window.png` and `join/join-window
 
 ## Wire protocol
 
-Each TCP message is a little-endian 16-bit byte length followed by a one-byte opcode and body (maximum 256 bytes). Protocol **5** requires matching relay and client versions. `C` creates, `J` joins and `R` resumes. The handshake body is version (u8), title ID and main build ID (u64 LE each), code length/code for `J` or `R`, name length/UTF-8 name, profile identity (16 bytes), and resume token (16 bytes; zero for a new session).
+Each TCP message is a little-endian 16-bit byte length followed by a one-byte opcode and body (maximum 256 bytes). Protocol **6** requires matching relay and client versions. `C` creates, `J` joins and `R` resumes. The handshake body is version (u8), title ID and main build ID (u64 LE each), code length/code for `J` or `R`, name length/UTF-8 name, profile identity (16 bytes), and resume token (16 bytes; zero for a new session).
 
 `A` accepts with slot, code length/code, host slot, lock flag and a 16-byte token. `P` announces slot, name length/name and 16-byte identity. `H` reports host slot/lock flag. Host-only `K` sets the lock (one byte) and `D` removes another slot (one byte). `L` explicitly leaves; host leave closes the room. An unexpected drop preserves its reservation for 30 seconds. `X` rejects/ends with a length-prefixed reason. `Q`/`q` echo a 32-bit monotonic millisecond counter for RTT.
 
-A 28-byte snapshot is area fingerprint (u32), sequence (u32), x/y/z centimetres (i32 each), yaw (u16 turns), motion/readiness (u8), left-stick axes (i16 each), and activity (u8: 0 loading, 1 exploring, 2 menu/loading, 3 battle, 4 story). Bit 7 of motion signals overworld readiness. Unready heartbeats zero the axes. `T` appearance is gender/style (u8 each) and 80 bytes of native resource IDs. `E` carries one emote byte. `U` client actions carry command (u8: 0 invite, 1 accept, 2 decline, 3 cancel/end) and invitation ID (u32 LE). Server `U` status is state (u8: 0 none, 1 pending, 2 tagged), initiator slot (u8; 255 when none), reason (u8), invitation ID and remaining milliseconds (u32 LE each). Invalid or stale actions cannot change another invitation; no save/party data is transferred. Forwarded `S`, `T` and `E` prepend the sender slot. Normal social packets carry no save blocks, party data, inventory or event flags. The opt-in `B` battle channel below exchanges an accepted guest lead and turn decisions.
+A 28-byte snapshot is area fingerprint (u32), sequence (u32), x/y/z centimetres (i32 each), yaw (u16 turns), motion/readiness (u8), left-stick axes (i16 each), and activity (u8: 0 loading, 1 exploring, 2 menu/loading, 3 battle, 4 story). Bit 7 of motion signals overworld readiness. Unready heartbeats zero the axes. `T` appearance is gender/style (u8 each) and 80 bytes of native resource IDs. `E` carries one emote byte. `U` client actions carry command (u8: 0 invite, 1 accept, 2 decline, 3 cancel/end) and invitation ID (u32 LE). Server `U` status is state (u8: 0 none, 1 pending, 2 tagged), initiator slot (u8; 255 when none), reason (u8), invitation ID and remaining milliseconds (u32 LE each). Invalid or stale actions cannot change another invitation; no save/party data is transferred. Forwarded `S`, `T` and `E` prepend the sender slot. Normal social packets carry no save blocks, party data, inventory or event flags. The `B` battle channel below exchanges an accepted guest lead, the host's temporary battle party and turn decisions.
 
 ## Verification on 25 October 2026
 
@@ -137,9 +157,9 @@ Testing found and fixed a launcher Host/Join ImGui stack imbalance, missing in-g
 - Native Communicate displayed an incoming invitation, queued acceptance until returning to the overworld, and both sides acknowledged the accepted social tag. Captures and packet log: `tests/runs/teamup-final`.
 
 
-## Opt-in battle extension
+## Battle channel
 
-`LARECOMP_COOP_GUEST_CONTROL=1` enables the controlled Eevee 1.0.0 trainer trial described in [the native battle notes](COOP-BATTLE-PROTOTYPE.md#two-client-guest-move-injection-and-npc-timeout). The default social tag still leaves ordinary encounters independent. Both clients and the relay must contain this extension; capability negotiation with older relays is not implemented.
+Team-up trainer battles (above) use this channel in normal play since protocol 6; [the native battle notes](COOP-BATTLE-PROTOTYPE.md#two-client-guest-move-injection-and-npc-timeout) describe its development. QA variables remain for tests only: `LARECOMP_COOP_GUEST_CONTROL=0` / `LARECOMP_COOP_BATTLE_MIRROR=0` turn the channel / the guest replay off, and `LARECOMP_COOP_PARTY_TEST_DIR` (journals and party files), `LARECOMP_COOP_BATTLE_SEED`, `LARECOMP_COOP_MIRROR_CORRUPT_ROUND`, `LARECOMP_COOP_BATTLE_AUTO_ACCEPT` / `_AUTO_MOVE`, `LARECOMP_COOP_AUTO_TAG`, `LARECOMP_COOP_TRAINER_TEST_AT`, `LARECOMP_COOP_SAVE_DUMP` and `LARECOMP_COOP_ALLY_TIMEOUT_SECONDS` keep their test behaviour. Without them the game writes no co-op files.
 
 `B` payloads begin with subtype u8 and battle ID u64 LE. The relay enforces host/guest roles, explicit acceptance, current turn/sequence, legal choices and deadlines. Subtypes:
 
@@ -158,4 +178,4 @@ Testing found and fixed a launcher Host/Join ImGui stack imbalance, missing in-g
 
 A guest replay ends normally only on a finished 18-byte end whose counts match the commands it received. Any other end, a desync notice, or losing the connection marks the replay aborted. The guest prompt closes min(2 x relay RTT, a quarter of the time) early so a last-moment choice still reaches the host before its deadline; a late choice is dropped and the NPC takes that turn.
 
-A deadline defaults to 30 seconds. NPC fallback closes only the current decision; the next eligible turn returns control to the guest. Guest disconnect lets the host continue with the NPC. No guest reward, inventory or story writes are performed. This is a host-engine prototype with a guest decision overlay; full guest battle presentation remains unfinished.
+A deadline defaults to 30 seconds. NPC fallback closes only the current decision; the next eligible turn returns control to the guest. Guest disconnect lets the host continue with the NPC. No guest reward, inventory or story writes are performed. A guest that receives an offer while "Team-up battles" is off, or that is not on the overworld for 0.5 s while an offer is open, answers with end reason 1 (declined).

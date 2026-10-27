@@ -516,14 +516,25 @@ bool romfs_image_file(const char *path, int *fd, uint64_t *off, uint64_t *size) 
 
 // ------------------------------------------------------------------ host-directory filesystem
 typedef struct { char root[1024]; } HostFs;
-typedef struct { int fd; char path[1100]; } HostFile;
+typedef struct { int fd; char path[1100]; bool save; int64_t size_due; } HostFile;  // size_due: see save_settle
 typedef struct { DIR *d; char path[1024]; int mode; } HostDir;
+
+// The game saves with SetSize(0), one Write of the whole 1 MB savedata.bin, Flush, Commit. Done in place, a crash or a
+// full disk in between left an empty or torn save (the Switch's journaled save FS doesn't), so a save file's SetSize
+// waits (size_due) and a Write that covers the whole file goes to a flushed copy that then replaces it: the file is
+// always the old save or the new one. Anything else applies the waiting SetSize first.
+static bool save_settle(HostFile *f) {
+    if (f->size_due < 0) return true;
+    int64_t n = f->size_due;
+    f->size_due = -1;
+    return !ftruncate(f->fd, n);
+}
 
 // The game closed the file / directory: close the host one too (LAS Recomp 1c805c2). They stayed open for the whole
 // run: one leaked descriptor per open, and on Windows an open file can't be replaced or deleted.
 static void file_close(Service *s) {
     HostFile *f = s->state;
-    if (f) { close(f->fd); free(f); s->state = NULL; }
+    if (f) { save_settle(f); close(f->fd); free(f); s->state = NULL; }
 }
 static void dir_close(Service *s) {
     HostDir *d = s->state;
@@ -548,8 +559,32 @@ static uint32_t errno_result(void) {
 }
 
 uint64_t g_savedata_guest;  // in-memory save image, for co-op QA diffs
+
+// A whole-file write of a save (see save_settle). LARECOMP_SAVE_FAULT (QA): fail = report a write error and change
+// nothing; crash-copy / crash-replaced = end the process before / after the replace.
+static bool save_replace(HostFile *f, const void *data, size_t size) {
+    const char *fault = getenv("LARECOMP_SAVE_FAULT");
+    int64_t due = f->size_due;
+    f->size_due = -1;  // (a failed save must not truncate the old one later)
+    if (fault && !strcmp(fault, "fail")) { LOG("[save] QA fault: write fails\n"); return false; }
+    char tmp[1200];
+    snprintf(tmp, sizeof tmp, "%s.tmp", f->path);
+    int fd = open(tmp, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    bool ok = fd >= 0 && pwrite(fd, data, size, 0) == (ssize_t)size && !fsync(fd);
+    if (fd >= 0) close(fd);
+    if (ok && fault && !strcmp(fault, "crash-copy")) { LOG("[save] QA fault: end before replace\n"); _exit(3); }
+    close(f->fd);  // (Windows can't replace an open file)
+    ok = ok && plat_replace_file(tmp, f->path);
+    if (!ok) { LOG("[save] write failed (errno %d): the save is unchanged\n", errno); unlink(tmp); }
+    else if (fault && !strcmp(fault, "crash-replaced")) { LOG("[save] QA fault: end after replace\n"); _exit(3); }
+    f->fd = open(f->path, O_RDWR);
+    if (f->fd < 0) { LOG("[save] cannot reopen %s (errno %d)\n", f->path, errno); return false; }
+    if (ok && due > (int64_t)size) ok = !ftruncate(f->fd, due);  // (a SetSize past the data: zeros)
+    return ok;
+}
 static void file(Service *s, IpcReq *req, IpcResp *resp) {
     HostFile *f = s->state;
+    if (req->cmd != 1 && req->cmd != 3 && req->cmd != 4 && !save_settle(f)) { resp->result = errno_result(); return; }
     switch (req->cmd) {
     case 0: {  // Read(option, offset, size) -> B
         int64_t off = IN(int64_t, 8), size = IN(int64_t, 16);
@@ -568,17 +603,27 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
     case 1: {  // Write(option, offset, size) <- A
         int64_t off = IN(int64_t, 8), size = IN(int64_t, 16);
         IpcBuf *a = in_buf(req, 0);
-        if (strstr(f->path, "savedata"))
-            LOG("[save] write %s off %lld size %lld <- guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)a->addr);
-        if (pwrite(f->fd, (void *)(uintptr_t)a->addr, (size_t)size, off) < 0) resp->result = errno_result();
+        struct stat sb;
+        bool whole = f->save && off == 0 && (f->size_due >= 0 ? f->size_due : !fstat(f->fd, &sb) ? sb.st_size : INT64_MAX) <= size;
+        if (f->save)
+            LOG("[save] write %s off %lld size %lld <- guest %llx%s\n", f->path, (long long)off, (long long)size,
+                (unsigned long long)a->addr, whole ? " (replace)" : "");
+        if (whole) { if (!save_replace(f, (const void *)(uintptr_t)a->addr, (size_t)size)) resp->result = MAKE_RESULT(2, 4000); }
+        else if (!save_settle(f) || pwrite(f->fd, (void *)(uintptr_t)a->addr, (size_t)size, off) < 0) resp->result = errno_result();
         break;
     }
-    case 2: fsync(f->fd); break;
-    case 3: if (ftruncate(f->fd, IN(int64_t, 0))) resp->result = errno_result(); break;
+    case 2:
+        if (f->save) LOG("[save] flush %s\n", f->path);
+        fsync(f->fd);
+        break;
+    case 3:
+        if (f->save) { f->size_due = IN(int64_t, 0); break; }
+        if (ftruncate(f->fd, IN(int64_t, 0))) resp->result = errno_result();
+        break;
     case 4: {
         struct stat sb;
         fstat(f->fd, &sb);
-        OUT(int64_t, 0) = sb.st_size;
+        OUT(int64_t, 0) = f->size_due >= 0 ? f->size_due : sb.st_size;
         resp_size(resp, 8);
         break;
     }
@@ -684,6 +729,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         HostFile *f = calloc(1, sizeof *f);
         f->fd = fd;
         strlcpy(f->path, p, sizeof f->path);
+        f->save = strstr(p, "savedata") != NULL, f->size_due = -1;
         Service *fsvc = service_new("IFile", file, f);
         fsvc->on_close = file_close;
         ipc_return_object(resp, fsvc);
@@ -701,7 +747,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         ipc_return_object(resp, dsvc);
         break;
     }
-    case 10: break;  // Commit
+    case 10: LOG("[save] commit %s\n", fs->root); break;  // (whole-save writes are already durable: save_replace)
     case 11: case 12: OUT(int64_t, 0) = 0x40000000; resp_size(resp, 8); break;
     case 13: rm_rf(p, true); break;
     case 14: memset(resp->data, 0, 0x20); resp_size(resp, 0x20); break;

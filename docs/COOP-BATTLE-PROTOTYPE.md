@@ -126,3 +126,113 @@ The first live two-engine run, `mirror-native1`, completed on both clients and r
 Turn digests now include the five status conditions and a raw hash of each battle Pokemon (+0x78..+0x2e0, skipping 8-byte slots that hold guest pointers, so stat stages and volatile counters are covered). The old fields are journaled as `partial_digest`. Field effects (weather, terrain, screens) are not covered yet. Both sides report the digest through `coop_battle_link_mirror_digest`. A mismatch, a link abort, an incomplete end or a lost link journals `mirror_aborted` with its reason once. The guest then stops taking replay commands and lets the native AI finish its local copy, with results and partner writes still discarded. The host logs `mirror_aborted_host` and keeps its battle. `LARECOMP_COOP_MIRROR_CORRUPT_ROUND=<n>` corrupts the guest's report for one round (QA only). `mirror-abort1` aborted at round 1, returned to the overworld and passed the guest save check. One earlier run also mismatched on the extended digest without injection. Its raw data was pruned, so `LARECOMP_COOP_TURN_RAW=1` now writes `turn-raw.txt` for the next case.
 
 Ownership check (`mirror-ui1`, guest driven through its own prompt by `tests/tools/drive-mirror-ui.py`): the host's native Fight menu decided only trainer 0 (`move_committed` actor 0). The guest prompt listed only the guest lead's moves; turn 1 was the guest's Bite on target 3 (`ally_injected`). Turn 2 timed out, the NPC chose that turn only, and the guest replay applied the same commands. Both sides' digests matched.
+
+## Native battle menu for the guest (26 October 2026)
+
+In the mirror trial the guest now chooses in the game's own battle menu (Fight -> move -> target) for its slot-2 Pokemon, and each player waits in the native battle message window ("Waiting for <partner name>...") while the other has not chosen. `LARECOMP_COOP_BATTLE_OVERLAY=1` keeps the overlay panel and waiting bar; the overlay also returns if no battle UI client is found.
+
+- Local multiplayer is not the way in: the controller factory (`0x70009ef8e0`) makes exactly one human controller, for the local slot (`context+0x18c`, from setup `+0x66`); Let's Go's local P2 gets a second active Pokemon inside trainer slot 0 (the human step `0x7000a5a180` loops over `0x70009d9b80` Pokemon), not a slot-2 menu. Controller type is `+0x1fb` (0 human, 1 AI, 2 link); the per-kind handler table is `0x70015d0c68` (kind 1 = action select: human `0x7000a574f0`, AI `0x7000a577f0`, link `0x7000a57be0`).
+- The guest runs the human action handler `0x7000a574f0` on its slot-2 AI controller with its own state, after the AI job and digest of that turn, lending it the battle's single UI client (`context+0x1a8[context+0x18c]+0x280`) through the controller setter `0x7000a57000`. The controller fields the human flow writes (`+0x1e0..+0x27f`, `+0x288..+0x2af`, `+0x3b8..+0x3cb`) are snapshotted and restored, so the replay still applies only the host's canonical slot-2 command. The chosen move/target goes to the host as before (op 4). A target cursor left on a fainted foe is mapped to the only remaining foe; Bag/Pokemon or an unsupported move reopens the menu.
+- Deadline: the native link-battle time limit closes the menu (`+0x260` nonzero, `+0x200` time up; every human sub-step checks them and the time-up step `0x7000a5a340` closes the menu through UI `+0xc0` and auto-picks). It fires at the guest deadline, when the host's command arrives first, on abort or when the link stops waiting. The host's NPC then chooses that turn and the menu opens again next turn.
+- Waiting message: UI vtable `+0x1b0` opens a battle message from a 0x24-byte parameter (`0x7000a6f000` layout: u16 line, type 1 = btl_std). btl_std line 201 (a link-battle-only "The opposing player's time has run out!") is shown, and its decrypted text (`0x70006786b0`) is replaced with "Waiting for <CoopRemote.name>...". Host: once its slot-0 handler returned 1 and the guest has not answered. Guest: once its slot-2 command is in and the host's slot-0 command is not.
+- The turn digest no longer hashes battle Pokemon `+0x218`: the same seeded battle had bit 3 there or not from run to run on one engine (host and guest alike), which aborted two of the first runs (since pruned) at round 1 without any real difference.
+
+Verified (copied saves, `tests/tools/run-mirror-save.ps1 -UI -Timeout 20 -Driver drive-native-menu.py`, game input via `key:` presses): `native-ui7` - guest captures `guest-menu-t1.png` (native Fight/Pokemon/Bag), `guest-timeout-t1.png` / `guest-after-timeout-t1.png` (menu closed, NPC chose, battle continued), `guest-menu-t2.png`, `guest-moves-t2.png` (Machamp's own moves and PP), `guest-targets-t2.png`, `guest-waiting.png` ("Waiting for Host..."); host `host-waiting-1.png` ("Waiting for Ally..."). Turn 2 guest Bite reached the host (`ally_injected` 44/1), both digests matched, both returned to the overworld, guest party unchanged. `native-ui6 -SaveCheck`: guest save PASS, digests matched; an earlier aborted run (pruned) closed the open menu cleanly and its guest save also passed.
+
+## Normal play (27 October 2026)
+
+The trainer team-up (ordinary trainers, mirror mode, native guest menu, partner avatar, 30 s deadline) no longer needs QA variables: the hooks install on every Eevee 1.0.0 boot and pass through unless a team-up runs, the battle channel and the guest replay are on by default, and the setting "Team-up battles" (`coop.ini`, default on) turns offers off. Protocol 6. Journals, party files, fixed seeds, fault injection, auto accept/move/tag, the factory trigger and save dumps stay behind their variables; see [COOP-ONLINE.md](COOP-ONLINE.md#team-up-trainer-battles) and [COOP-TRAINER-ENCOUNTERS.md](COOP-TRAINER-ENCOUNTERS.md#8-normal-play-27-october-2026).
+
+## Switches, replacements and items (27 October 2026)
+
+Roadmap priority 4. Each player now controls only their own Pokemon for every native decision, not just moves. Protocol 7.
+Eevee 1.0.0 addresses; decompiled with Ghidra headless (`tests/cache/ghidra/decomp.sh <out> <addr>...`, ignored).
+
+### How a controller decides
+
+- The battle server sends each trainer controller a request. The request id is at controller `+0x21c`; the
+  dispatchers `0x7000a55bf8` / `0x7000a56760` pick a handler from the table `0x70015d0c68` (0x38 bytes per entry:
+  request id, then human, NPC and link handlers). Request 2 is the action menu (human `0x7000a574f0`, NPC
+  `0x7000a577f0`). Request 4 is the switch-in after a faint and request 5 the mid-turn one (human `0x7000a57ff0` /
+  `0x7000a584f0`, both `0x7000a5d470`; NPC `0x7000a58000` for both).
+- A handler that returns 1 has answered. Its reply is `+0x220` -> `+0x230`: a count byte and one u32 command per
+  active Pokemon (0x2c bytes). One trainer has one active Pokemon in a team-up, so the count is 1.
+- Command word, low nibble = kind:
+  - 1 fight: bits 4-7 target, 8-23 move, bit 27 a flag (`0x7000a50a90`).
+  - 2 item: bits 4-6 position, 7-22 item, 23-30 an argument (`0x7000a50c30`).
+  - 3 change: bits 4-6 the position, 7-9 the battle-party slot (`0x7000a50c50`); `0x403` means no change (`0x7000a50c70`).
+- Request 4 goes to every controller after any faint. A controller answers for the positions it owns: the
+  request lists them (`0x7000a51c70`) and `0x70009d9f00` gives each position's trainer. A trainer with nothing to
+  replace answers command 0; one with no Pokemon left answers `0x403`.
+- The party list shows "its" party from the UI's owner controller (UI `+0x60`, read by UI `+0x6b8` through
+  `0x7000a64700`), not from the controller it serves. The UI is built for the local slot by `0x70009d57d0`
+  (UI constructor `0x7000a77cd0`, vtable `0x70015d3268`).
+
+### What the team-up does with it
+
+- **The guest's whole party is the ally party.** B2 sends the guest's party, up to six, as `count, chunk index`.
+  `trainer_party_hook` imports it into the trainer's battle party (slots `0x7000721b00`, count `+0x88`). It does
+  this on the host from the received party and on the guest from the party it sent. So the ally sends in only the
+  guest's own Pokemon. The party is copied into the battle and never written back.
+- **Every decision is published as its command word.** B9 (30 bytes) carries the request kind, the reply count
+  and the first command. Both clients count every decision of a slot in the same order: each kind-2 menu round
+  of slot 2, each switch-in request of slot 2, and every slot-0 handler completion. The host publishes:
+  - slot 0 when its handler returns 1 (`human_select_hook`, `switch_in_hook`), forced actions included;
+  - slot 2 when it injects the guest's move or switch, when the NPC commits (`npc_commit_hook`), and from
+    `ai_switch_hook`.
+
+  The guest's slot-0 handlers take the host's decision before their menu (step state 2 for moves). For forced
+  actions they take it at completion and reply with the host's command. A request whose kind differs from the
+  host's aborts the replay. The host's moves, items and switches are replayed as they are; only the guest's own
+  moves are checked against its Pokemon.
+- **Guest switches.**
+  - B3 (54 bytes) adds the request kind and a mask of the party slots the guest may send in: past the trainer's
+    active ones (`0x70009daa20`) and not fainted (`0x70009e3a20`).
+  - B4 (23 bytes) adds `switch_to`, a slot + 1.
+  - The guest's own native menu (`native_menu`) now also handles *Pokemon* in the action menu and the switch-in
+    party list (requests 4/5). While the UI is lent, its owner (UI `+0x60`) is the slot-2 controller, so both lists
+    show the guest's party with the slots the commands use.
+  - The host accepts only an offered slot (`coop_ally_submit`), and so does the relay (B4 and B9 against the B3
+    mask). It builds the command itself: `0x7000a50c50` with the slot for an action-menu switch. For a switch-in,
+    the NPC handler runs once on both clients and its command's slot bits are replaced by the guest's slot.
+- **Timeouts.** A switch-in waits for the guest under the same ally deadline (`LARECOMP_COOP_ALLY_TIMEOUT_SECONDS`,
+  default 30). After the deadline the NPC's pick stands for that request only (B5 closes the guest's list).
+  Nothing is asked when the guest has nothing to replace or no Pokemon left. Then the native multi battle goes on
+  with the host alone.
+- **Items.** The battle spends an item from the local bag only for the local slot (`0x70009da170` ->
+  `0x70001c9490`). So the host's own Bag works normally and spends from the host's bag. The guest replays the
+  host's item command, and its bag removal is skipped (`item_use_hook`). The guest's Bag is refused: the action
+  dispatcher `0x7000a5a810` asks `0x70009e3e50(Pokemon, 0x22)` before opening the Bag. When it holds (the call that
+  returns to `0x7000a5a918`), the game refuses natively and the action menu comes back. `bag_check_hook` makes it
+  hold while the guest's menu is lent. A guest item would have come from no one's bag on the host. An item command
+  that still reaches the guest's menu brings the menu back.
+
+### Verification (copied saves, two clients, `tests/scripts/run-teamup-play.sh` + `teamup-start.sh`)
+
+Fixtures: `party-fixtures setmon <in> <out> <slot> <hp> <status> [move1] [level]` sets a lead to level 2, HP 1 and
+Double-Edge, so its recoil knocks it out without knocking out a Kakuna (`tests/saves/teamup-switch/`).
+`NOWILD=1` (`LARECOMP_WILDBATTLE_NONE`, test-only) stops wild Pokemon from touching the idle clients. `QA=1` adds the
+journals. `RAW=1` writes each round's battle-Pokemon dump (`LARECOMP_COOP_TURN_RAW=<file>`).
+
+| Run (`tests/runs/`) | Covered | Result |
+| --- | --- | --- |
+| `teamup-switch2/guest-faint` (QA) | Host switch on turn 1 (`0x83`); guest lead knocked out by recoil; the guest picks its replacement in its party list (`a_g_replace*.png`); the NPC's turn, then the end | Guest slot 3 (`0x183`) replayed; digests of rounds 1 and 3 matched; the guest's Charizard Lv 50 is in on both (`a_t3.png`). Guest save orig/post: only the known load noise. This run predates the UI-owner fix, so its lists showed the host's party, with correct slots. |
+| `teamup-switch2/both-faint` (QA) | Both leads knocked out on turn 1; the host picks natively, the guest in its own list (`b_repl.png`, guest Lv 50 party); turn 2: guest action-menu switch (`b_g_list.png`, `0x103`) and host Revive on its fainted Eevee (`b_h_*.png`, `0x7f800e02`) | All decisions replayed; rounds 1, 3 and 4 matched; `mirror_item_use_discarded` on the guest. Host save: Revive 30 -> 29, Eevee revived (7/15), money +36, 3 Poke Balls, flag 2742. Guest save: bag, money and party unchanged (known noise only). |
+| `teamup-switch2/guest-out` (QA, 15 s deadline) | Guest party of two level-2 leads; first knocked out; replacement list (`c_g_repl.png`) left unanswered; second knocked out; host alone to the end | The NPC took the replacement after 15 s (`0x83`, NPC), the menu closed. The second faint asked nothing (mask 0, `0x403`). The battle went on with the host alone (`c_now.png`) and ended normally. Rounds 1, 2 and 4 matched. Guest save: party 2 -> 2, unchanged. Host: +36, 3 Poke Balls, flag 2742. |
+| `teamup-switch3/final` (no QA variables, `RAW=1`) | Both knocked out; host native pick; guest own list; guest action-menu switch (`e_g_list.png`); host Revive; guest Bag refused (`e_g_bagB/D.png`: no Bag, the menu returns); request 4 when only the host's Pokemon fainted asked the guest nothing | Rounds 1, 3 and 4 matched, and the guest finished its replay. Both windows were closed from outside at t = 592 s, before the post-battle save. |
+| `teamup-switch3/raw` | A request 4 for a guest with nothing to replace | Found the "asked anyway" bug: the guest's list reopened until the deadline. Fixed with the position check above. |
+
+Unit and relay tests: `tests/scripts/run-battle-link-tests.sh` (all pass). They cover the switch and replacement
+choices limited to offered slots, the full-party B2, B9 kinds and commands, and relay rejection of unoffered slots.
+
+### Known issues
+
+- A round-1 digest mismatch appeared in 2 of 9 two-client runs (`teamup-switch3/normal`, and one earlier run).
+  Both had neither `QA` nor `RAW`, and their RNG and rounds were otherwise identical. The guest then stops the
+  replay safely: it finishes locally and discards the results, and the host keeps its battle. This already showed
+  up before this work (see `+0x218` above). It is probably a battle-Pokemon field written outside the battle
+  thread's order. `RAW=1` now dumps both sides' fields at each round so the next occurrence names the field.
+  After an abort the host still waits for the guest's choice each turn, up to the deadline.
+- The overlay (`LARECOMP_COOP_BATTLE_OVERLAY=1`) lists moves only. A replacement there falls to the NPC at the deadline.
+- The host does not check trapping (Mean Look and similar) for a guest switch. The guest's own native menu refuses it.
+- Only the first command of a reply travels. That is enough for one active Pokemon per trainer.

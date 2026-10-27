@@ -9,7 +9,7 @@
 #include "platform/win_compat.h"
 #endif
 extern bool romfs_image_file(const char *,int *,uint64_t *,uint64_t *);
-static char moves[743][64],species[810][64];
+static char moves[743][64],species[810][64],trainers[1024][64];
 static atomic_bool ready;
 static uint16_t u16(const uint8_t *p){return p[0]|(uint16_t)p[1]<<8;}
 static uint32_t u32(const uint8_t *p){return u16(p)|(uint32_t)u16(p+2)<<16;}
@@ -40,7 +40,9 @@ void coop_battle_names_load(void){
     if(atomic_load_explicit(&ready,memory_order_acquire))return;
     load("bin/message/English/common/wazaname.dat",moves,743);
     load("bin/message/English/common/monsname.dat",species,810);
+    load("bin/message/English/common/trname.dat",trainers,1024);
     atomic_store_explicit(&ready,true,memory_order_release);
 }
 const char *coop_battle_move_name(unsigned id){return atomic_load_explicit(&ready,memory_order_acquire) && id<743 && moves[id][0] ? moves[id] : "Move";}
+const char *coop_battle_trainer_name(unsigned id){return atomic_load_explicit(&ready,memory_order_acquire) && id<1024 && trainers[id][0] ? trainers[id] : "a trainer";}
 const char *coop_battle_species_name(unsigned id){return atomic_load_explicit(&ready,memory_order_acquire) && id<810 && species[id][0] ? species[id] : "Opponent";}

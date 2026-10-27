@@ -81,7 +81,7 @@ OSFLAGS  := -D_FILE_OFFSET_BITS=64 -D_POSIX_THREAD_SAFE_FUNCTIONS -D_CRT_RAND_S 
 GENARCH  ?= -march=x86-64-v3
 GENFLAGS += -D_FILE_OFFSET_BITS=64 $(GENARCH)
 LDFLAGS  := -fuse-ld=lld -Wl,--stack,16777216 $(if $(DEPS),-L$(DEPS)/lib) -lSDL3 -lavformat -lavcodec -lavutil -lswscale \
-            -lvulkan-1 -lwinmm -lws2_32 -ldwmapi -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
+            -lvulkan-1 -lwinmm -lws2_32 -lwinhttp -lbcrypt -ladvapi32 -lcrypt32 -ldwmapi -lole32 -lshell32 -lcomdlg32 -luuid -lshaderc_shared \
             $(if $(RELEASE),-Wl$(comma)--subsystem$(comma)windows)  # release: no console window (log -> lasrecomp.log)
 BACKEND_SRC := $(wildcard runtime/nvn/vulkan/*.c) $(wildcard runtime/nvn/vulkan/*.cpp)
 BACKEND_OBJ := $(patsubst runtime/%.cpp,$(B)/rt/%.o,$(patsubst runtime/%.c,$(B)/rt/%.o,$(BACKEND_SRC)))
@@ -153,6 +153,7 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 	LC_ALL=C tr -d '\r' < $< | LC_ALL=C tr '\200-\377' '?' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
+$(B)/rt/account.o: third_party/jsmn/jsmn.h runtime/account_data.inc runtime/account_claim.inc
 
 $(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
 	@mkdir -p $(dir $@)
@@ -234,6 +235,7 @@ dist:
 	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
 	cp third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$(DIST)/"  # (FSR 3.1, loaded at run time: without it, FSR 1)
 	cp third_party/fidelityfx/LICENSE.txt "$(DIST)/FidelityFX-LICENSE.txt"
+	cp third_party/jsmn/LICENSE "$(DIST)/jsmn-LICENSE.txt"
 	cp LICENSE "$(DIST)/LICENSE.txt"
 	cp LICENSE-LASRecomp "$(DIST)/LICENSE-LASRecomp.txt"
 	cp docs/release-README.txt "$(DIST)/README.txt"

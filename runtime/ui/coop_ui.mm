@@ -44,7 +44,8 @@ void coop_battle_ui_draw(float scale) {
     bool back=ImGui::IsKeyPressed(ImGuiKey_Escape,false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight,false);
     if(offer && back){input_quarantine_pad();input_reset();coop_battle_link_end();ImGui::End();return;}
     if(offer){
-        ImGui::TextWrapped("Join your friend's battle with your lead Pokemon?");
+        CoopRemote host;const char *name=coop_net_remote(&host)?host.name:"Your friend";
+        ImGui::TextWrapped("%s was challenged by %s! Join the battle with your Pokemon?",name,coop_battle_trainer_name(v.trainer));
         ImGui::TextWrapped("Your story progress stays independent.");
         ImGui::BeginDisabled(!v.party_ready);
         if(new_prompt && v.party_ready)ImGui::SetKeyboardFocusHere();
@@ -157,7 +158,7 @@ bool coop_ui_page(bool launcher) {
             } else ImGui::TextWrapped("Waiting for your friend. A disconnected trainer has 30 seconds to reconnect.");
             if(present) {
                 ImGui::Separator();
-                ImGui::TextWrapped("Social tag-up: travel together. Battles and progression remain individual.");
+                ImGui::TextWrapped("Social tag-up: travel together. Progression stays individual.");
                 if(team.state==2) {
                     ImGui::TextUnformatted("Tagged up");
                     if(ui_button("End tag-up"))coop_net_teamup_action(3);
@@ -174,6 +175,9 @@ bool coop_ui_page(bool launcher) {
                     if(ui_button("Invite to tag up"))coop_net_teamup_action(0);
                     ImGui::EndDisabled();
                 }
+                CoopOptions prefs;coop_net_options(&prefs);
+                if(ImGui::Checkbox("Team-up battles",&prefs.teamup_battles))coop_net_preferences(&prefs);
+                ImGui::TextWrapped("Tagged up, a trainer who challenges the host asks the partner to join.");
                 if(team.reason) {
                     const char *reasons[]={"","Invitation declined","Tag-up ended","Another invitation is active",
                         "Both trainers must be nearby in the overworld","Invitation expired","Friend disconnected","Invitation is no longer valid"};

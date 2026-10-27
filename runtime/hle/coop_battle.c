@@ -186,6 +186,7 @@ static void journal(const char *event,uint64_t frame,const uint32_t *choice) {
     if(choice)fprintf(f,",\"menu_choice\":%u",*choice);
     fprintf(f,"}\n");fclose(f);
 }
+static bool dir_set(void){const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");return dir && *dir;}
 static int command_hook(Cpu *c,uint64_t addr) {
     if(!supported)return previous_command ? previous_command(c,addr) : 0;
     uint64_t frame=c->x[0];
@@ -197,7 +198,9 @@ static int command_hook(Cpu *c,uint64_t addr) {
     if(guest(choice,0x14))memcpy(&value,(const void *)(uintptr_t)(choice+0x10),sizeof value);
     if(player_clone_party){CoopParty current;const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");
         if(dir && coop_battle_capture_party(c,&current))save_party(dir,"party-at-command.bin",&current);}
-    battle_seen=true;journal("top_level_choice",renderer_game_frame(),&value);return 1;
+    // (an online solo battle is none of this file's business: only team-ups and QA observe it)
+    if(trial_active || dir_set())battle_seen=true;
+    journal("top_level_choice",renderer_game_frame(),&value);return 1;
 }
 static uint8_t selected_move_slot[24];
 static uint16_t selected_move_id[24];
@@ -245,14 +248,8 @@ static int target_result_hook(Cpu *c,uint64_t addr) {
                 // The native result getter has now committed both the move and
                 // mapped target. Copy the value; no UI pointers leave this hook.
                 bool mapped=actor<24 && selected_move_slot[actor]<4 && selected_move_id[actor]==((value>>8)&0xffff);
-                if(mapped){
-                    observed_sequence++;
-                    if(actor<6){CoopBattleLinkView link;coop_battle_link_view(&link);
-                        CoopBattleMove command={.battle=link.battle,.turn=observed_sequence,.sequence=observed_sequence,.trainer=0,
-                            .party_index=actor,.move_index=selected_move_slot[actor],.move=(value>>8)&65535,.target=(value>>4)&15};
-                        coop_battle_link_mirror_commit(&command,false);
-                    }
-                }
+                // (journal only: the host's slot-0 decision is published when its handler completes, human_select_hook)
+                if(mapped)observed_sequence++;
                 journal_move(mapped ? "move_committed" : "move_unmapped",actor,value);
                 if(actor<24){selected_move_slot[actor]=255;selected_move_id[actor]=0;}
             }
@@ -265,7 +262,7 @@ static int target_result_hook(Cpu *c,uint64_t addr) {
 }
 static CoopAllyWait ally_wait;
 static uint32_t ally_round;
-static bool ally_prepared,ally_native;
+static bool ally_prepared,ally_native,ally_publish_ai;
 // The context owns a native xoroshiro RNG at +0x90. Limit seed probing to
 // initialization inside this game-thread context callback, never world/AI RNGs.
 static _Thread_local uint64_t initializing_context;
@@ -324,9 +321,13 @@ static uint64_t journal_turn_state(Cpu *cpu,uint64_t controller){
                 }
                 // (+0x218 skipped: the same seeded battle shows bit 3 there or not from run to run on one engine,
                 // likely a controller running in parallel with this snapshot; it aborted otherwise identical replays.)
+                // LARECOMP_COOP_TURN_RAW=1 writes turn-raw.txt in the QA directory; =<file> writes there (no QA directory needed)
+                const char *rawp=ENV("LARECOMP_COOP_TURN_RAW");char rp[1400]={0};
+                if(rawp && dir && *dir)snprintf(rp,sizeof rp,"%s/turn-raw.txt",dir);else if(rawp && strlen(rawp)>1)snprintf(rp,sizeof rp,"%s",rawp);
+                FILE *r=rp[0]?fopen(rp,"a"):NULL;
                 for(unsigned o=0x78;o<0x2e0;o+=8){uint64_t v=*(uint64_t *)(uintptr_t)(mon+o);if(!guest(v,1) && o!=0x218)hash_field(&raw,v,8);
-                    if(dir && ENV("LARECOMP_COOP_TURN_RAW") && !guest(v,1)){char rp[1400];snprintf(rp,sizeof rp,"%s/turn-raw.txt",dir);FILE *r=fopen(rp,"a");
-                        if(r){fprintf(r,"%u %u %03x %016llx\n",ally_round,trainer,o,(unsigned long long)v);fclose(r);}}}
+                    if(r)fprintf(r,"%u %u %03x %016llx%s\n",ally_round,trainer,o,(unsigned long long)(guest(v,1)?0:v),guest(v,1)?" ptr":"");}
+                if(r)fclose(r);
             }
         }
         hash_field(&partial,trainer,1);hash_field(&partial,species,2);hash_field(&partial,hp,2);hash_field(&partial,maxhp,2);
@@ -342,6 +343,7 @@ static uint64_t journal_turn_state(Cpu *cpu,uint64_t controller){
     const char *corrupt=ENV("LARECOMP_COOP_MIRROR_CORRUPT_ROUND");
     if(mirrored_guest && corrupt && strtoul(corrupt,NULL,10)==ally_round)digest^=1;
     if(f){fprintf(f,"],\"partial_digest\":\"%016llx\",\"digest\":\"%016llx\"}\n",(unsigned long long)partial,(unsigned long long)digest);fclose(f);}
+    LOG("[coop-battle] round %u digest %016llx (rng %016llx %016llx)\n",ally_round,(unsigned long long)digest,(unsigned long long)rng[0],(unsigned long long)rng[1]);
     return digest;
 }
 static unsigned ally_timeout(void){const char *p=ENV("LARECOMP_COOP_ALLY_TIMEOUT_SECONDS");unsigned n=p?(unsigned)strtoul(p,NULL,10):30;return (n<1?1:n>60?60:n)*1000;}
@@ -386,14 +388,7 @@ static int wait_text_hook(Cpu *c,uint64_t addr){ // 0x70006786b0 decrypts a mess
     for(;wait_text[n] && n+1<cap;n++)buf[n]=wait_text[n];
     buf[n]=0;*(uint16_t *)(uintptr_t)(sb+0x7a)=(uint16_t)n;c->x[30]=lr;c->sp=sp;c->x[0]=sb;return 1;
 }
-// Host: its own slot-0 choice is complete when the local human action handler (0x7000a574f0) returns 1.
 static bool local_done;
-static int human_select_hook(Cpu *c,uint64_t addr){
-    uint64_t controller=c->x[0],state=c->x[1];bool first=guest(state,4) && *(uint32_t *)(uintptr_t)state==0;
-    if(!previous_human_select || !previous_human_select(c,addr))rt_call_original(c,addr);
-    if(supported && trial_active && guest(controller,0x3d0) && *(uint8_t *)(uintptr_t)(controller+0x1fa)==0){if(first)local_done=false;if(c->x[0]&1)local_done=true;}
-    return 1;
-}
 // A broken replay never falls back silently: journal the reason once, stop
 // taking commands and let the native AI finish locally. The mirrored result
 // phase and partner writes stay discarded, so the guest save is untouched.
@@ -406,6 +401,20 @@ static void mirror_abort(const CoopBattleMirrorSetup *status,bool ready){
     const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");if(!dir)return;
     char path[1400];snprintf(path,sizeof path,"%s/battle.jsonl",dir);FILE *f=fopen(path,"a");
     if(f){fprintf(f,"{\"event\":\"mirror_aborted\",\"frame\":%llu,\"round\":%u,\"reason\":%u}\n",(unsigned long long)renderer_game_frame(),ally_round,reason);fclose(f);}
+}
+// Battle-party slots this controller's trainer may send in: past its active ones (0x9daa20) and not fainted.
+// The ally's battle party is the guest's own party (trainer_party_hook), so the guest only ever sends in its own.
+static uint8_t party_switches(Cpu *cpu,uint64_t controller){
+    uint64_t ctx=ptr(controller+0x58),party=ptr(controller+0x268);if(!guest(ctx,0x1d0) || !guest(party,8))return 0;
+    Cpu call=*cpu;call.x[0]=party;rt_call_original(&call,0x70009df300ull);unsigned n=(uint8_t)call.x[0];
+    call.x[0]=ctx;call.x[1]=*(uint8_t *)(uintptr_t)(controller+0x1fa);rt_call_original(&call,0x70009daa20ull);
+    uint8_t mask=0;
+    for(unsigned p=(uint8_t)call.x[0];p<n && p<6;p++){
+        call.x[0]=party;call.x[1]=p;rt_call_original(&call,0x70009df470ull);uint64_t mon=call.x[0];
+        if(!guest(mon,0x2e1))continue;
+        call.x[0]=mon;rt_call_original(&call,0x70009e3a20ull);if(!(call.x[0]&1))mask|=1u<<p;
+    }
+    return mask;
 }
 static bool ally_choices(Cpu *cpu,uint64_t controller,CoopBattleChoices *out,uint16_t species[2],uint16_t hp[2],uint16_t maxhp[2]){
     Cpu call=*cpu;uint64_t mon=ptr(controller+0x78),pool=ptr(controller+0x70),ctx=ptr(controller+0x58);
@@ -424,7 +433,8 @@ static bool ally_choices(Cpu *cpu,uint64_t controller,CoopBattleChoices *out,uin
         // actor's default opponent; applying it again would target our own side.
         if(position<4)targets|=1u<<position;
     }
-    bool any=false;
+    out->kind=2;out->switches=party_switches(cpu,controller);
+    bool any=out->switches!=0;
     for(unsigned i=0;i<4;i++){
         call.x[0]=mon;call.x[1]=i;rt_call_original(&call,0x70009e4950ull);out->moves[i]=(uint16_t)call.x[0];
         if(!out->moves[i])continue;
@@ -449,6 +459,51 @@ static bool native_command_valid(Cpu *c,uint64_t controller,const CoopBattleMove
         if(!ally_choices(c,controller,&choices,species,hp,maxhp) || !(choices.targets[move->move_index]&(1u<<move->target)))return false;}
     return true;
 }
+// Host: one decision of trainer slot 0 or 2 for the guest's replay. Every native decision (move, switch, item,
+// replacement after a faint) is a command word in the controller's reply (+0x230 count, +0x234 first command).
+static uint32_t local_seq;
+static void publish(Cpu *c,uint64_t controller,unsigned trainer,uint32_t seq,unsigned kind,bool ai,uint32_t packet,unsigned count){
+    CoopBattleLinkView link;coop_battle_link_view(&link);
+    CoopBattleMove m={.battle=link.battle,.turn=seq,.sequence=seq,.trainer=trainer,.kind=kind,.count=count,.packet=packet};
+    uint64_t mon=ptr(controller+0x78);
+    if((packet&15)==1){
+        m.move=(packet>>8)&0xffff;m.target=(packet>>4)&15;
+        for(unsigned i=0;i<4 && guest(mon,0x2e1);i++){Cpu call=*c;call.x[0]=mon;call.x[1]=i;rt_call_original(&call,0x70009e4950ull);if(call.x[0]==m.move){m.move_index=i;break;}}
+    }
+    if(!coop_battle_link_mirror_commit(&m,ai))LOG("[coop-battle] slot %u decision %u not published\n",trainer,seq);
+    else LOG("[coop-battle] slot %u decision %u published: request %u, command %08x x%u%s\n",trainer,seq,kind,packet,count,ai?" (NPC)":"");
+    ally_event(trainer?"slot2_published":"slot0_published",&m);
+}
+// A controller's reply set to the host's decision (only the first command: one active Pokemon per trainer).
+static void reply(uint64_t controller,const CoopBattleMove *m){
+    uint8_t *ctl=(uint8_t *)(uintptr_t)controller;
+    ctl[0x230]=m->count;memcpy(ctl+0x234,&m->packet,4);memcpy(ctl+0x288,&m->packet,4);
+    *(uint64_t *)(ctl+0x220)=controller+0x230;*(uint32_t *)(ctl+0x228)=0x2c;
+}
+// Guest: the host's decision for slot 0, taken once per native decision (kinds 2, 4, 5) in the host's order.
+static CoopBattleCanonical slot0;
+static bool slot0_have,slot0_pending;
+static bool slot0_take(Cpu *c,uint64_t controller,unsigned kind){
+    if(slot0_have)return true;
+    if(!remote_waiting){remote_waiting=true;remote_round++;battle_seen=true;wait_shown=false;}
+    CoopBattleMirrorSetup status;bool ready=coop_battle_link_mirror_setup(&status);
+    if(!mirror_aborted && coop_battle_link_mirror_take(native_mirror.battle,0,remote_round,&slot0)){
+        LOG("[coop-battle] replaying host slot 0 decision %u: request %u, command %08x\n",remote_round,slot0.move.kind,slot0.move.packet);
+        if(slot0.move.kind==kind)return slot0_have=true;
+        LOG("[coop-battle] host decision %u is kind %u, this replay is at kind %u\n",remote_round,slot0.move.kind,kind);
+        CoopBattleMirrorSetup bad={.aborted=true,.reason=COOP_MIRROR_DIGEST};mirror_abort(&bad,true);
+    } else if(!mirror_aborted && ready && !status.aborted && !status.ended){
+        // The guest has chosen for slot 2 this turn; the host has not chosen yet.
+        if(kind==2 && native_ui() && !wait_shown && ally_done_round==remote_round)wait_shown=show_wait(c,ptr(controller+0x280));
+    } else mirror_abort(&status,ready);
+    return false;
+}
+// 1 once the guest's slot-0 reply is the host's (0: still waiting for it).
+static uint64_t finish_slot0(Cpu *c,uint64_t controller,unsigned kind){
+    if(!mirror_aborted && !slot0_take(c,controller,kind) && !mirror_aborted)return 0;
+    if(slot0_have && !mirror_aborted)reply(controller,&slot0.move),ally_event("slot0_replayed",&slot0.move);
+    slot0_have=slot0_pending=remote_waiting=false;return 1;
+}
 static int remote_player_test_hook(Cpu *c,uint64_t addr){
     uint64_t controller=c->x[0],state=c->x[1];const char *choice=ENV("LARECOMP_COOP_BATTLE_REMOTE_MOVE");
     if(!supported || !trial_active || !player_clone_party || (!choice && !mirrored_guest) || !guest(controller,0x3d0) || !guest(state,4) ||
@@ -456,17 +511,10 @@ static int remote_player_test_hook(Cpu *c,uint64_t addr){
         return previous_remote_player?previous_remote_player(c,addr):0;
     CoopBattleMove move={0};
     if(mirrored_guest){
-        if(!remote_waiting){remote_waiting=true;remote_round++;battle_seen=true;wait_shown=false;}
-        CoopBattleCanonical canonical;CoopBattleMirrorSetup status;
-        bool ready=coop_battle_link_mirror_setup(&status);
-        if(!mirror_aborted && coop_battle_link_mirror_take(native_mirror.battle,0,remote_round,&canonical))move=canonical.move;
-        else if(!mirror_aborted && ready && !status.aborted && !status.ended){
-            // The guest has chosen for slot 2 this turn; the host has not chosen yet.
-            if(native_ui() && !wait_shown && ally_done_round==remote_round)wait_shown=show_wait(c,ptr(controller+0x280));
-            c->x[0]=0;return 1;}
-        else mirror_abort(&status,ready);
+        if(slot0_take(c,controller,2))move=slot0.move;
+        else if(!mirror_aborted){c->x[0]=0;return 1;}
     }
-    if(!move.move){
+    if(!move.kind){
         CoopBattleChoices choices;uint16_t species[2],hp[2],maxhp[2];unsigned index=choice?(unsigned)strtoul(choice,NULL,10):0;
         if(!ally_choices(c,controller,&choices,species,hp,maxhp))return previous_remote_player?previous_remote_player(c,addr):0;
         if(index>=4 || !choices.pp[index] || !choices.targets[index]){
@@ -476,14 +524,47 @@ static int remote_player_test_hook(Cpu *c,uint64_t addr){
         unsigned target=0;while(!(choices.targets[index]&(1u<<target)))target++;
         move=(CoopBattleMove){.battle=native_mirror.battle,.turn=remote_round,.sequence=remote_round,.trainer=0,.move_index=index,.move=choices.moves[index],.target=target};
     }
-    if(!native_command_valid(c,controller,&move)){ally_event("mirror_command_rejected",&move);c->x[0]=0;return 1;}
+    // (the host's own decision, whatever its targeting, is replayed as it is; only the local fallback move is checked)
+    if(!move.kind && !native_command_valid(c,controller,&move)){ally_event("mirror_command_rejected",&move);c->x[0]=0;return 1;}
     uint64_t output=ptr(controller+0x80);if(!guest(output,4))return 0;
-    Cpu call=*c;call.x[0]=output;call.x[1]=move.move;call.x[2]=move.target;call.x[3]=0;rt_call_original(&call,0x7000a50a90ull);
+    Cpu call=*c;
+    if(move.kind)memcpy((void *)(uintptr_t)output,&move.packet,4);
+    else{call.x[0]=output;call.x[1]=move.move;call.x[2]=move.target;call.x[3]=0;rt_call_original(&call,0x7000a50a90ull);}
     *(uint8_t *)(uintptr_t)(controller+0x20c)=1;*(uint8_t *)(uintptr_t)(controller+0x388)=0;*(uint32_t *)(uintptr_t)state=3;
     call=*c;rt_call_original(&call,0x7000a577f0ull);*c=call;
-    remote_waiting=false;battle_seen=true;ally_event("remote_player_injected",&move);
+    if(!slot0_have)remote_waiting=false;
+    battle_seen=true;ally_event("remote_player_injected",&move);
     const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");CoopParty current;
     if(dir && coop_battle_capture_party(c,&current))save_party(dir,"party-at-command.bin",&current);
+    return 1;
+}
+// Slot 0's action select (human handler 0x7000a574f0). Host: its choice is complete when the handler returns 1, and
+// the reply is published. Guest: a forced action (never reaching the menu step) still takes the host's decision, so
+// both sides count every slot-0 decision.
+static int human_select_hook(Cpu *c,uint64_t addr){
+    uint64_t controller=c->x[0],state=c->x[1];bool first=guest(state,4) && *(uint32_t *)(uintptr_t)state==0;
+    bool slot=supported && trial_active && guest(controller,0x3d0) && *(uint8_t *)(uintptr_t)(controller+0x1fa)==0;
+    bool replay=slot && mirrored_guest && !mirror_aborted;
+    if(replay && slot0_pending){c->x[0]=finish_slot0(c,controller,2);return 1;}
+    if(!previous_human_select || !previous_human_select(c,addr))rt_call_original(c,addr);
+    if(!slot)return 1;
+    if(first)local_done=false;
+    if(!(c->x[0]&1))return 1;
+    local_done=true;
+    if(replay){slot0_pending=true;c->x[0]=finish_slot0(c,controller,2);}
+    else if(!mirrored_guest)publish(c,controller,0,++local_seq,2,false,*(uint32_t *)(uintptr_t)(controller+0x234),*(uint8_t *)(uintptr_t)(controller+0x230));
+    return 1;
+}
+// Slot 0's switch-in (human 0x7000a57ff0 after a faint, request 4; 0x7000a584f0 mid-turn, request 5). The host picks
+// natively and publishes; the guest never opens the host's party list and replies with the host's pick.
+static RuntimeFnHook previous_switch_in[2];
+static int switch_in_hook(Cpu *c,uint64_t addr){
+    unsigned kind=addr==0x7000a57ff0ull?4:5;RuntimeFnHook previous=previous_switch_in[kind-4];uint64_t controller=c->x[0];
+    bool slot=supported && trial_active && guest(controller,0x3d0) && *(uint8_t *)(uintptr_t)(controller+0x1fa)==0;
+    if(slot && mirrored_guest && !mirror_aborted){c->x[0]=finish_slot0(c,controller,kind);return 1;}
+    if(!previous || !previous(c,addr))rt_call_original(c,addr);
+    if(slot && !mirrored_guest && (c->x[0]&1))
+        publish(c,controller,0,++local_seq,kind,false,*(uint32_t *)(uintptr_t)(controller+0x234),*(uint8_t *)(uintptr_t)(controller+0x230));
     return 1;
 }
 static int npc_commit_hook(Cpu *c,uint64_t addr){
@@ -502,14 +583,13 @@ static int npc_commit_hook(Cpu *c,uint64_t addr){
                         Cpu call=*c;call.x[0]=command;call.x[1]=target;rt_call_original(&call,0x7000a50ac0ull);
                         LOG("[coop-ally] NPC target normalized to opposing position %u\n",target);
                     }
-                    if(ally_wait.phase==COOP_ALLY_DONE && ally_native){
-                        CoopBattleMove m={.battle=ally_wait.battle,.turn=ally_wait.turn,.sequence=ally_wait.sequence,.trainer=2,
-                            .party_index=choices.party_index,.move_index=i,.move=choices.moves[i],.target=target};
-                        ally_event("ally_npc_choice",&m);coop_battle_link_mirror_commit(&m,true);
-                    }
                     break;
                 }
             }
+        }
+        // Whatever the NPC chose this round (a move, a switch or an item) is what the guest replays.
+        if(ally_publish_ai && !mirrored_guest){
+            ally_publish_ai=false;publish(c,controller,2,ally_round,2,true,*(uint32_t *)(uintptr_t)command,1);ally_event("ally_npc_choice",NULL);
         }
     }
     return 1;
@@ -525,39 +605,67 @@ static int npc_commit_hook(Cpu *c,uint64_t addr){
 static CoopBattleCanonical held;
 static bool have_held,menu_forced;
 static uint32_t menu_state,menu_turn;
-static uint8_t menu_saved[0xa0],menu_saved_commands[0x28],menu_saved_steps[0x14];
+static uint8_t menu_saved[0xa0],menu_saved_commands[0x28],menu_saved_steps[0x14],menu_saved_list[0x38];
+// The UI reads "its" party (party lists, UI +0x6b8 -> 0x7000a64700) from its owner controller at UI +0x60, set
+// when the battle built it for the local slot: while lent, the owner is the slot-2 controller, so the lists show
+// the guest's own party with the slot numbers the commands use.
+static uint64_t ui_owner;
 static void lend_ui(Cpu *c,uint64_t controller,uint64_t ui){
+    uint64_t lent=ui?ui:ptr(controller+0x280);
+    if(guest(lent,0x68)){
+        if(ui){ui_owner=ptr(ui+0x60);*(uint64_t *)(uintptr_t)(ui+0x60)=controller;}
+        else if(ui_owner){*(uint64_t *)(uintptr_t)(lent+0x60)=ui_owner;ui_owner=0;}
+    }
     Cpu call=*c;call.x[0]=controller;call.x[1]=(uint64_t)(uintptr_t)&ui;rt_call_original(&call,SET_UI);
 }
-static bool native_menu(Cpu *c,uint64_t controller){
+// kind 2: the action menu (Fight / Pokemon; the guest's Bag is refused, see below). kind 4/5: the party list of a
+// replacement (human 0x7000a57ff0 / 0x7000a584f0), which shows this controller's battle party: the guest's own.
+static bool native_menu(Cpu *c,uint64_t controller,unsigned kind){
     CoopBattleLinkView v;coop_battle_link_view(&v);uint64_t now=plat_now_ns();
     uint8_t *ctl=(uint8_t *)(uintptr_t)controller;
     if(!menu_open){
-        if(!native_ui() || have_held || mirror_aborted || !v.waiting || v.submitted || now>=v.deadline_ns || menu_turn==v.turn)return false;
+        if(!native_ui() || have_held || mirror_aborted || !v.waiting || v.submitted || v.choices.kind!=kind || now>=v.deadline_ns || menu_turn==v.turn)return false;
         uint64_t ui=local_ui(controller);
         if(!ui){native_failed=true;LOG("[coop-ally] no battle UI client; the overlay chooses\n");return false;}
         memcpy(menu_saved,ctl+0x1e0,sizeof menu_saved);memcpy(menu_saved_commands,ctl+0x288,sizeof menu_saved_commands);
-        memcpy(menu_saved_steps,ctl+0x3b8,sizeof menu_saved_steps);
+        memcpy(menu_saved_steps,ctl+0x3b8,sizeof menu_saved_steps);memcpy(menu_saved_list,ctl+0x418,sizeof menu_saved_list);
         lend_ui(c,controller,ui);menu_open=true;menu_forced=false;menu_state=0;menu_turn=v.turn;ally_event("native_menu_open",NULL);
     }
     if(!menu_forced && (have_held || mirror_aborted || !v.waiting || now>=v.deadline_ns)){
         *(uint16_t *)(ctl+0x260)=1;ctl[0x200]=1;menu_forced=true;ally_event("native_menu_timeout",NULL);
     }
-    Cpu call=*c;call.x[0]=controller;call.x[1]=(uint64_t)(uintptr_t)&menu_state;rt_call_original(&call,HUMAN_SELECT);
+    Cpu call=*c;call.x[0]=controller;call.x[1]=(uint64_t)(uintptr_t)&menu_state;
+    rt_call_original(&call,kind==2?HUMAN_SELECT:kind==4?0x7000a57ff0ull:0x7000a584f0ull);
     if(!(call.x[0]&1))return true;
-    uint64_t out=ptr(controller+0x80);uint32_t packet=guest(out,4)?*(uint32_t *)(uintptr_t)out:0;
+    uint64_t out=ptr(controller+0x80);uint32_t packet=kind!=2?(ctl[0x230]?*(uint32_t *)(ctl+0x234):0):guest(out,4)?*(uint32_t *)(uintptr_t)out:0;
     unsigned move=(packet>>8)&0xffff,target=(packet>>4)&15,index=0;
-    while(index<4 && v.choices.moves[index]!=move)index++;
-    // The menu's cursor may rest on a fainted foe (the engine would redirect): with one foe left, that one.
-    unsigned mask=index<4?v.choices.targets[index]:0;
-    if(mask && !(mask&(1u<<target)) && !(mask&(mask-1)))for(target=0;!(mask&(1u<<target));target++){}
-    bool sent=!menu_forced && (packet&15)==1 && coop_battle_link_choose(index,target);
+    bool sent=false;
+    if(menu_forced){}
+    // A switch (change command, bits 7-9 the battle-party slot; bit 10 set means "no change").
+    else if((packet&15)==3 && !(packet&0x400))sent=coop_battle_link_choose_switch((packet>>7)&7);
+    else if(kind==2 && (packet&15)==1){
+        while(index<4 && v.choices.moves[index]!=move)index++;
+        // The menu's cursor may rest on a fainted foe (the engine would redirect): with one foe left, that one.
+        unsigned mask=index<4?v.choices.targets[index]:0;
+        if(mask && !(mask&(1u<<target)) && !(mask&(mask-1)))for(target=0;!(mask&(1u<<target));target++){}
+        sent=coop_battle_link_choose(index,target);
+    }
     lend_ui(c,controller,0);
     memcpy(ctl+0x1e0,menu_saved,sizeof menu_saved);memcpy(ctl+0x288,menu_saved_commands,sizeof menu_saved_commands);
-    memcpy(ctl+0x3b8,menu_saved_steps,sizeof menu_saved_steps);menu_open=false;
-    CoopBattleMove m={.move=move,.target=target};ally_event(sent?"native_menu_choice":menu_forced?"native_menu_closed":"native_menu_retry",&m);
-    if(!sent && !menu_forced){menu_turn=0;return true;} // Bag / Pokemon / an unsupported move: the menu again
+    memcpy(ctl+0x3b8,menu_saved_steps,sizeof menu_saved_steps);memcpy(ctl+0x418,menu_saved_list,sizeof menu_saved_list);menu_open=false;
+    CoopBattleMove m={.move=move,.target=target,.packet=packet};ally_event(sent?"native_menu_choice":menu_forced?"native_menu_closed":"native_menu_retry",&m);
+    // An item that still gets here (the Bag is refused, bag_check_hook) or an unsupported move: the menu again.
+    if(!sent && !menu_forced && kind==2){menu_turn=0;return true;}
     return false;
+}
+// Guest: the host's decision for slot 2 this round, once it is in; it must be of the kind this engine is at.
+static void take_held(unsigned kind){
+    if(have_held || mirror_aborted || !coop_battle_link_mirror_take(native_mirror.battle,2,ally_round,&held))return;
+    have_held=true;LOG("[coop-battle] replaying host slot 2 decision %u: request %u, command %08x%s\n",ally_round,held.move.kind,held.move.packet,held.native_ai?" (NPC)":"");
+    if(held.move.kind!=kind){
+        LOG("[coop-battle] host decision %u for slot 2 is kind %u, this replay is at kind %u\n",ally_round,held.move.kind,kind);
+        CoopBattleMirrorSetup bad={.aborted=true,.reason=COOP_MIRROR_DIGEST};mirror_abort(&bad,true);
+    }
 }
 static int mirror_ally_select(Cpu *c,uint64_t controller,uint64_t state){
     Cpu call=*c;
@@ -569,8 +677,8 @@ static int mirror_ally_select(Cpu *c,uint64_t controller,uint64_t state){
         CoopBattleMirrorSetup status;bool ready=coop_battle_link_mirror_setup(&status);
         if(!coop_battle_link_mirror_digest(ally_round,journal_turn_state(c,controller)))mirror_abort(&status,ready);
     }
-    if(!have_held && !mirror_aborted)have_held=coop_battle_link_mirror_take(native_mirror.battle,2,ally_round,&held);
-    if(native_menu(c,controller)){c->x[0]=0;return 1;}
+    take_held(2);
+    if(native_menu(c,controller,2)){c->x[0]=0;return 1;}
     CoopBattleCanonical canonical=held;CoopBattleMirrorSetup status;
     bool ready=coop_battle_link_mirror_setup(&status);
     if(mirror_aborted || !have_held){
@@ -578,15 +686,19 @@ static int mirror_ally_select(Cpu *c,uint64_t controller,uint64_t state){
         mirror_abort(&status,ready);ally_native=true;return 0;
     }
     have_held=false;ally_done_round=ally_round;
-    if(!native_command_valid(c,controller,&canonical.move)){ally_event("mirror_command_rejected",&canonical.move);c->x[0]=0;return 1;}
+    // The NPC's choice (any targeting) is replayed as it is; the guest's own move must still fit its Pokemon.
+    if(!canonical.native_ai && (canonical.move.packet&15)==1 && !native_command_valid(c,controller,&canonical.move)){
+        ally_event("mirror_command_rejected",&canonical.move);CoopBattleMirrorSetup bad={.aborted=true,.reason=COOP_MIRROR_DIGEST};
+        mirror_abort(&bad,true);ally_native=true;return 0;
+    }
     if(canonical.native_ai){
         call=*c;call.x[0]=ptr(controller+0x368);rt_call_original(&call,0x7000a6d240ull);uint64_t result=call.x[0];
         call.x[0]=controller;call.x[1]=ptr(controller+0x80);call.x[2]=controller+0x20b;call.x[3]=*(uint8_t *)(uintptr_t)(controller+0x270);
         call.x[4]=ptr(controller+0x78);call.x[5]=ptr(controller+0x268);call.x[6]=result;rt_call_original(&call,0x7000a5c9a0ull);
         *(uint64_t *)(uintptr_t)(controller+0x80)=call.x[0];
     }
-    call=*c;call.x[0]=ptr(controller+0x80);call.x[1]=canonical.move.move;call.x[2]=canonical.move.target;call.x[3]=0;
-    rt_call_original(&call,0x7000a50a90ull);*(uint8_t *)(uintptr_t)(controller+0x20c)=1;
+    uint64_t output=ptr(controller+0x80);if(guest(output,4))memcpy((void *)(uintptr_t)output,&canonical.move.packet,4);
+    *(uint8_t *)(uintptr_t)(controller+0x20c)=1;
     *(uint32_t *)(uintptr_t)state=3;c->x[0]=0;ally_event("mirror_ally_injected",&canonical.move);return 1;
 }
 static int ally_select_hook(Cpu *c,uint64_t addr){
@@ -594,7 +706,7 @@ static int ally_select_hook(Cpu *c,uint64_t addr){
     if(!supported || !trial_active || !coop_battle_link_enabled() || !guest(controller,0x3d0) || !guest(state,4) ||
         *(uint8_t *)(uintptr_t)(controller+0x1fa)!=2)return previous_ally_select ? previous_ally_select(c,addr):0;
     unsigned phase=*(uint32_t *)(uintptr_t)state;
-    if(!phase){ally_prepared=ally_native=false;memset(&ally_wait,0,sizeof ally_wait);}
+    if(!phase){ally_prepared=ally_native=ally_publish_ai=false;memset(&ally_wait,0,sizeof ally_wait);}
     if(phase!=2 || (*(uint8_t *)(uintptr_t)(controller+0x270)!=0 && !menu_open) || ally_native)return previous_ally_select ? previous_ally_select(c,addr):0;
     if(mirrored_guest)return mirror_ally_select(c,controller,state);
     CoopBattleLinkView link;coop_battle_link_view(&link);uint64_t now=plat_now_ns();
@@ -608,13 +720,14 @@ static int ally_select_hook(Cpu *c,uint64_t addr){
         if(!(call.x[0]&1)){c->x[0]=0;return 1;}
         uint64_t mon=ptr(controller+0x78),command=ptr(controller+0x80);
         if(!guest(mon,0x2e1) || !guest(command,4))return previous_ally_select ? previous_ally_select(c,addr):0;
+        // Every round reaching this state counts on both clients (the guest replay counts it too), even when the NPC
+        // decides it: its decision is published then (npc_commit_hook).
+        ally_round++;coop_battle_link_mirror_digest(ally_round,journal_turn_state(c,controller));
         CoopBattleChoices choices;uint16_t species[2],hp[2],maxhp[2];
-        if(!ally_choices(c,controller,&choices,species,hp,maxhp)){ally_native=true;return previous_ally_select ? previous_ally_select(c,addr):0;}
-        ally_round++;
-        if(!coop_ally_begin(&ally_wait,link.battle,ally_round,ally_round,&choices,now,ally_timeout())){ally_native=true;return 0;}
+        if(!ally_choices(c,controller,&choices,species,hp,maxhp)){ally_native=ally_publish_ai=true;return previous_ally_select ? previous_ally_select(c,addr):0;}
+        if(!coop_ally_begin(&ally_wait,link.battle,ally_round,ally_round,&choices,now,ally_timeout())){ally_native=ally_publish_ai=true;return 0;}
         ally_prepared=true;wait_shown=local_done=false;
         if(!coop_battle_link_request(&ally_wait,species,hp,maxhp))ally_wait.deadline_ns=now;
-        coop_battle_link_mirror_digest(ally_round,journal_turn_state(c,controller));
         CoopBattleMirrorSetup status;
         if(coop_battle_link_mirror_setup(&status) && status.aborted && !mirror_aborted){
             // The host keeps its battle and NPC fallback; only log the guest replay failure.
@@ -630,13 +743,84 @@ static int ally_select_hook(Cpu *c,uint64_t addr){
         if(native_ui() && local_done && !wait_shown && !(wait_shown=show_wait(c,local_ui(controller))))native_failed=true;
         c->x[0]=0;return 1;}
     bool ai;if(!coop_ally_consume(&ally_wait,&command,&ai)){c->x[0]=0;return 1;}
-    if(ai){ally_native=true;coop_battle_link_complete(true);ally_event("ally_npc_fallback",NULL);
+    if(ai){ally_native=ally_publish_ai=true;coop_battle_link_complete(true);ally_event("ally_npc_fallback",NULL);
         return previous_ally_select ? previous_ally_select(c,addr):0;}
-    Cpu call=*c;call.x[0]=ptr(controller+0x80);call.x[1]=command.move;call.x[2]=command.target;call.x[3]=0;
-    rt_call_original(&call,0x7000a50a90ull);
+    uint64_t output=ptr(controller+0x80);
+    // The host builds the command itself: a move (0x7000a50a90) or a switch to the guest's battle-party slot (0x7000a50c50).
+    Cpu call=*c;call.x[0]=output;
+    if(command.switch_to){call.x[1]=*(uint8_t *)(uintptr_t)(controller+0x270);call.x[2]=command.switch_to-1;rt_call_original(&call,0x7000a50c50ull);}
+    else{call.x[1]=command.move;call.x[2]=command.target;call.x[3]=0;rt_call_original(&call,0x7000a50a90ull);}
     *(uint8_t *)(uintptr_t)(controller+0x20c)=1;
-    *(uint32_t *)(uintptr_t)state=3;c->x[0]=0;coop_battle_link_complete(false);coop_battle_link_mirror_commit(&command,false);ally_event("ally_injected",&command);
-    LOG("[coop-ally] injected guest move %u target %u for turn %u\n",command.move,command.target,command.turn);return 1;
+    *(uint32_t *)(uintptr_t)state=3;c->x[0]=0;coop_battle_link_complete(false);
+    publish(c,controller,2,ally_wait.sequence,2,false,*(uint32_t *)(uintptr_t)output,1);ally_event("ally_injected",&command);
+    if(command.switch_to)LOG("[coop-ally] injected guest switch to party slot %u for turn %u\n",command.switch_to-1,command.turn);
+    else LOG("[coop-ally] injected guest move %u target %u for turn %u\n",command.move,command.target,command.turn);
+    return 1;
+}
+// Slot 2's switch-in (the NPC handler 0x7000a58000 for requests 4, after a faint, and 5, mid-turn). Host: the guest
+// picks one of its own Pokemon within the ally timeout (its party list, native_menu), else the NPC does; the
+// NPC's handler always runs once on both clients, and the guest's pick replaces its party slot. Guest: its party
+// list while waiting, then the host's decision.
+static bool repl_prepared,repl_native;
+static RuntimeFnHook previous_ai_switch;
+static int ai_switch_hook(Cpu *c,uint64_t addr){
+    uint64_t controller=c->x[0];
+    if(!supported || !trial_active || !coop_battle_link_enabled() || !guest(controller,0x3d0) || *(uint8_t *)(uintptr_t)(controller+0x1fa)!=2)
+        return previous_ai_switch?previous_ai_switch(c,addr):0;
+    unsigned kind=*(uint32_t *)(uintptr_t)(controller+0x21c)==5?5:4;
+    CoopBattleLinkView link;coop_battle_link_view(&link);uint64_t now=plat_now_ns();
+    if(!repl_prepared){
+        repl_prepared=true;repl_native=true;ally_round++;have_held=false;
+        // Request 4 goes to every controller after any faint: only ask when one of this trainer's positions is
+        // listed (0x7000a51c70 lists them, 0x70009d9f00 owns one), as the handlers do.
+        Cpu call=*c;uint64_t list=0;unsigned mine=0;
+        call.x[0]=ptr(controller+0x120);call.x[1]=(uint64_t)(uintptr_t)&list;rt_call_original(&call,0x7000a51c70ull);
+        for(unsigned i=0,n=(uint8_t)call.x[0];i<n && guest(list+i,1);i++){
+            call.x[0]=ptr(controller+0x58);call.x[1]=*(uint8_t *)(uintptr_t)(list+i);rt_call_original(&call,0x70009d9f00ull);
+            mine+=(uint8_t)call.x[0]==*(uint8_t *)(uintptr_t)(controller+0x1fa);
+        }
+        uint8_t mask=mine?party_switches(c,controller):0;
+        if(!mirrored_guest && mask && link.host && link.phase==COOP_LINK_ACTIVE){
+            CoopBattleChoices choices={.kind=kind,.switches=mask};uint16_t none[2]={0};
+            memset(&ally_wait,0,sizeof ally_wait);
+            if(coop_ally_begin(&ally_wait,link.battle,ally_round,ally_round,&choices,now,ally_timeout())){
+                repl_native=false;wait_shown=false;
+                if(!coop_battle_link_request(&ally_wait,none,none,none))ally_wait.deadline_ns=now;
+                LOG("[coop-ally] guest's Pokemon fainted: waiting for its replacement, slots %02x, timeout %u ms\n",mask,ally_timeout());
+            }
+        }
+        ally_event(mirrored_guest?"mirror_switch_waiting":"ally_switch_waiting",NULL);
+        LOG("[coop-battle] slot 2 switch-in, request %u, round %u, party slots %02x\n",kind,ally_round,mask);
+    }
+    bool ai=true;CoopBattleMove command={0};
+    if(mirrored_guest){
+        take_held(kind);
+        if(native_menu(c,controller,kind)){c->x[0]=0;return 1;}
+        if(!have_held && !mirror_aborted){
+            CoopBattleMirrorSetup status;bool ready=coop_battle_link_mirror_setup(&status);
+            if(ready && !status.aborted && !status.ended){c->x[0]=0;return 1;}
+            mirror_abort(&status,ready);
+        }
+    } else if(!repl_native){
+        uint64_t received;CoopBattleMove in;
+        if(coop_battle_link_take(&in,&received) && !coop_ally_submit(&ally_wait,&in,received))ally_event("ally_rejected",&in);
+        if(link.phase!=COOP_LINK_ACTIVE)ally_wait.deadline_ns=now;
+        if(coop_ally_poll(&ally_wait,now)==COOP_ALLY_WAITING || !coop_ally_consume(&ally_wait,&command,&ai)){c->x[0]=0;return 1;}
+        coop_battle_link_complete(ai);
+    }
+    if(!previous_ai_switch || !previous_ai_switch(c,addr))rt_call_original(c,addr);
+    uint8_t *ctl=(uint8_t *)(uintptr_t)controller;uint32_t packet;memcpy(&packet,ctl+0x234,4);
+    if(mirrored_guest){
+        if(have_held && !mirror_aborted){reply(controller,&held.move);ally_event("mirror_switch_injected",&held.move);}
+        ally_done_round=ally_round;
+    } else {
+        if(!ai && command.switch_to && ctl[0x230] && (packet&15)==3 && !(packet&0x400)){
+            packet=(packet&~(7u<<7))|(uint32_t)(command.switch_to-1)<<7;memcpy(ctl+0x234,&packet,4);memcpy(ctl+0x288,&packet,4);
+            LOG("[coop-ally] guest sent in its party slot %u\n",command.switch_to-1);
+        } else ai=true;
+        publish(c,controller,2,ally_round,kind,ai,packet,ctl[0x230]);ally_event(ai?"ally_switch_npc":"ally_switch_injected",NULL);
+    }
+    have_held=repl_prepared=false;c->x[0]=1;return 1;
 }
 static int trainer_party_hook(Cpu *c,uint64_t addr) {
     uint64_t party=c->x[0];unsigned id=(unsigned)c->x[2];
@@ -650,21 +834,25 @@ static int trainer_party_hook(Cpu *c,uint64_t addr) {
             party==ptr(trainer_process+0xe0+0xc0)) {
             CoopParty remote,before,after;Cpu call=*c;uint8_t roundtrip[COOP_PB7_BYTES];
             bool loaded=false;
-            if(coop_battle_link_enabled()){uint64_t id;memset(&remote,0,sizeof remote);remote.count=1;
-                loaded=mirrored_guest?coop_battle_link_local_lead(remote.pokemon[0]):coop_battle_link_lead(remote.pokemon[0],&id);}
+            if(coop_battle_link_enabled()){uint64_t id;
+                loaded=mirrored_guest?coop_battle_link_local_party(&remote):coop_battle_link_guest_party(&remote,&id);}
             else loaded=load_party(peer,&remote);
             if(loaded && coop_battle_capture_party(&call,&before)) {
-                call.x[0]=party;call.x[1]=0;rt_call_original(&call,ptr(ptr(party)+0x58));
-                uint64_t mon=call.x[0];
-                if(guest(mon,0xb8)) {
-                    call.x[0]=mon;call.x[1]=(uint64_t)(uintptr_t)remote.pokemon[0];rt_call_original(&call,IMPORT);
-                    serialize(&call,mon,roundtrip);
-                    bool unchanged=coop_battle_capture_party(&call,&after) && before.count==after.count &&
-                        !memcmp(before.pokemon,after.pokemon,before.count*COOP_PB7_BYTES);
-                    bool exact=!memcmp(roundtrip,remote.pokemon[0],sizeof roundtrip);
-                    LOG("[coop-battle] temporary ally guest lead: exact %u local party unchanged %u\n",exact,unchanged);
-                    journal(exact && unchanged ? "guest_lead_imported" : "guest_lead_failed",renderer_game_frame(),NULL);
+                // The guest's whole party replaces the trainer's: the ally only ever sends in the guest's own Pokemon.
+                bool exact=true;unsigned n=0;
+                for(;n<remote.count;n++){
+                    call.x[0]=party;call.x[1]=n;rt_call_original(&call,0x7000721b00ull);uint64_t mon=call.x[0];
+                    if(!guest(mon,0xb8))break;
+                    call.x[0]=mon;call.x[1]=(uint64_t)(uintptr_t)remote.pokemon[n];rt_call_original(&call,IMPORT);
+                    serialize(&call,mon,roundtrip);exact&=!memcmp(roundtrip,remote.pokemon[n],sizeof roundtrip);
                 }
+                // (published once every Pokemon is in, as make_party_clone)
+                if(n)*(uint8_t *)(uintptr_t)(party+0x88)=(uint8_t)n;
+                exact&=n==remote.count;
+                bool unchanged=coop_battle_capture_party(&call,&after) && before.count==after.count &&
+                    !memcmp(before.pokemon,after.pokemon,before.count*COOP_PB7_BYTES);
+                LOG("[coop-battle] temporary ally guest party: %u of %u, exact %u local party unchanged %u\n",n,remote.count,exact,unchanged);
+                journal(exact && unchanged ? "guest_lead_imported" : "guest_lead_failed",renderer_game_frame(),NULL);
             }
         }
     }
@@ -718,12 +906,117 @@ static int battle_party_hook(Cpu *c,uint64_t addr) {
     if(!previous_battle_party || !previous_battle_party(c,addr))rt_call_original(c,addr);
     return 1;
 }
+// Ordinary overworld trainers (docs/COOP-TRAINER-ENCOUNTERS.md): the offer goes out at the trainer's pre-battle
+// text (GetTrainerMsgID type 0), the text is held up to 10 s while the partner answers (IsMsgWinEnd_), and an
+// accepted, validated lead turns the native call into the verified team-up {1,T,T,T}. Otherwise the battle is solo.
+static enum {ENTRY_IDLE,ENTRY_OFFERED,ENTRY_READY} entry;
+static unsigned entry_trainer;
+static uint64_t entry_deadline;
+static bool script_battle,factory_battle,capture_process;
+static RuntimeFnHook previous_trainer_msg,previous_msg_end,previous_trainer_core,previous_process_setter;
+static void entry_solo(const char *why){
+    if(entry==ENTRY_IDLE)return;
+    coop_battle_link_end();entry=ENTRY_IDLE;
+    LOG("[coop-battle] trainer %u: solo battle (%s)\n",entry_trainer,why);journal(why,renderer_game_frame(),NULL);
+}
+// Still holding the text: the partner has not answered within the hold.
+static bool entry_poll(Cpu *c){
+    CoopBattleLinkView v;coop_battle_link_view(&v);CoopParty check;uint64_t id;
+    if(v.phase==COOP_LINK_NONE || !v.host){entry_solo("entry_ended");return false;} // declined, expired (B6) or disconnected
+    if(coop_battle_link_guest_party(&check,&id)){
+        uint16_t species[6];
+        if(!coop_battle_check_import(c,&check,species)){entry_solo("entry_bad_lead");return false;}
+        entry=ENTRY_READY;journal("entry_accepted",renderer_game_frame(),NULL);return false;
+    }
+    if(plat_now_ns()>=entry_deadline){entry_solo("entry_timeout");return false;}
+    return true;
+}
+static int trainer_msg_hook(Cpu *c,uint64_t addr){
+    uint64_t params=c->x[1];unsigned trainer=(unsigned)ptr(params+8);
+    CoopSession s;coop_net_session(&s);CoopTeamUp team;coop_net_teamup(&team);CoopBattleLinkView v;coop_battle_link_view(&v);
+    // Pre-battle text only (type 0; an already-beaten trainer shows type 2). Master trainers (452-597) are excluded.
+    if(supported && coop_battle_link_enabled() && entry==ENTRY_IDLE && !trial_active && guest(params,24) && ptr(params+16)==0 &&
+        trainer>=1 && trainer<=601 && (trainer<452 || trainer>597) && s.connection==COOP_CONNECTED && s.local_slot==s.host_slot &&
+        team.state==2 && v.phase==COOP_LINK_NONE && coop_net_remote_near(3000)){
+        uint64_t now=plat_now_ns();
+        if(coop_battle_link_offer(now,ally_timeout(),trainer)){
+            entry=ENTRY_OFFERED;entry_trainer=trainer;entry_deadline=now+10000000000ull;coop_battle_link_offer_deadline(entry_deadline);
+            LOG("[coop-battle] trainer %u (%s): team-up offered, holding the text up to 10 s\n",trainer,coop_battle_trainer_name(trainer));journal("entry_offered",renderer_game_frame(),NULL);
+        } else LOG("[coop-battle] trainer %u: no team-up offer (Team-up battles off)\n",trainer);
+    } else if(supported && coop_battle_link_enabled() && s.connection==COOP_CONNECTED && guest(params,24) && ptr(params+16)==0)
+        LOG("[coop-battle] trainer %u: no team-up offer (connection %u host %u tag %u link %u near %u)\n",trainer,s.connection,
+            s.local_slot==s.host_slot,team.state,v.phase,coop_net_remote_near(3000));
+    return previous_trainer_msg?previous_trainer_msg(c,addr):0;
+}
+static int msg_end_hook(Cpu *c,uint64_t addr){
+    if(supported && entry==ENTRY_OFFERED && entry_poll(c)){c->x[0]=0;return 1;}
+    return previous_msg_end?previous_msg_end(c,addr):0;
+}
+static int process_setter_hook(Cpu *c,uint64_t addr){
+    if(capture_process && guest(c->x[0],0x740))trainer_process=c->x[0]; // CallTrainerBattleCore's first setter gets the new process
+    return previous_process_setter?previous_process_setter(c,addr):0;
+}
+// {1,T,T,T} has two copies of the trainer, so the result's prize (0x7000319bc0 adds its +0x504 total here) is
+// twice the single battle's. The host keeps the solo prize. shortcut: halves the whole total (Pay Day included).
+static RuntimeFnHook previous_money,previous_item;
+static int money_hook(Cpu *c,uint64_t addr){
+    if(supported && script_battle && c->x[30]==0x7000319e0cull){
+        LOG("[coop-battle] team-up prize %u -> %u (one trainer's)\n",(unsigned)c->x[1],(unsigned)c->x[1]/2);
+        c->x[1]=(uint32_t)c->x[1]/2;journal("prize_halved",renderer_game_frame(),NULL);
+    }
+    return previous_money?previous_money(c,addr):0;
+}
+// The mirrored guest's replay gives no items either (the trainer's Poke Balls are added during the battle, before
+// the discarded result phase). The native add reports success so the battle continues as usual.
+static int item_hook(Cpu *c,uint64_t addr){
+    if(supported && trial_active && mirrored_guest){journal("mirror_item_discarded",renderer_game_frame(),NULL);c->x[0]=1;return 1;}
+    return previous_item?previous_item(c,addr):0;
+}
+// The guest's Bag in its lent menu takes the game's own "can't use items" path: the action dispatcher 0x7000a5a810
+// asks 0x70009e3e50(Pokemon, 0x22) before opening the Bag (the call returning to 0x7000a5a918) and, when it holds,
+// shows the native refusal and returns to the menu. Its items would come from no one's bag on the host.
+static RuntimeFnHook previous_bag_check;
+static int bag_check_hook(Cpu *c,uint64_t addr){
+    if(supported && trial_active && mirrored_guest && menu_open && c->x[30]==0x7000a5a918ull){
+        journal("guest_bag_refused",renderer_game_frame(),NULL);c->x[0]=1;return 1;
+    }
+    return previous_bag_check?previous_bag_check(c,addr):0;
+}
+// The host's own items (its Bag, slot 0) are spent from its bag by the battle (0x70009da170 -> bag remove); the
+// guest's replay of that turn would spend them from the guest's bag, so the mirrored guest skips the removal.
+static RuntimeFnHook previous_item_use;
+static int item_use_hook(Cpu *c,uint64_t addr){
+    if(supported && trial_active && mirrored_guest){journal("mirror_item_use_discarded",renderer_game_frame(),NULL);c->x[0]=1;return 1;}
+    return previous_item_use?previous_item_use(c,addr):0;
+}
+static int trainer_core_hook(Cpu *c,uint64_t addr){
+    uint64_t params=c->x[1];
+    if(!supported || entry==ENTRY_IDLE || !guest(params,0x28))return previous_trainer_core?previous_trainer_core(c,addr):0;
+    uint64_t *p=(uint64_t *)(uintptr_t)params; // ally, opponent 1, opponent 2, flags
+    if(entry==ENTRY_OFFERED && entry_poll(c))entry_solo("entry_timeout");
+    // Only script 699's ordinary single trainer passes flags 0x200 (story, double and tag battles stay solo).
+    if(entry==ENTRY_READY && (p[1] || p[2]!=entry_trainer || p[3] || p[4]!=0x200))entry_solo("entry_not_ordinary");
+    CoopParty host_party;
+    if(entry==ENTRY_READY && coop_battle_link_mirror_enabled() && (!coop_battle_capture_party(c,&host_party) || !coop_battle_link_mirror_party(&host_party)))
+        entry_solo("entry_mirror_failed");
+    if(entry!=ENTRY_READY)return previous_trainer_core?previous_trainer_core(c,addr):0;
+    entry=ENTRY_IDLE;
+    // The native's own rule picks mode 1 once ally or opponent 2 is set: the verified team-up {1,T,T,T}.
+    p[1]=p[3]=entry_trainer;trainer_started=trial_active=script_battle=capture_process=true;trainer_process=0;
+    if(!previous_trainer_core || !previous_trainer_core(c,addr))rt_call_original(c,addr);
+    capture_process=false;p[1]=p[3]=0;
+    if(!trainer_process){trial_active=false;LOG("[coop-battle] trainer %u: no battle process\n",entry_trainer);}
+    else{LOG("[coop-battle] ordinary trainer %u launched by its script as a team-up\n",entry_trainer);journal("trainer_started",renderer_game_frame(),NULL);}
+    return 1;
+}
 static void maybe_trainer(Cpu *c) {
     const char *at=ENV("LARECOMP_COOP_TRAINER_TEST_AT");CoopBattleMirrorSetup setup;
     bool mirror_ready=coop_battle_link_mirror_enabled() && coop_battle_link_mirror_setup(&setup) && !setup.host && !setup.aborted;
     if(trainer_started || (!mirror_ready && (!at || renderer_game_frame()<strtoull(at,NULL,10))))return;
-    // Explicit isolated QA only: no script interpreter or story event is run.
-    if(!getenv("LARECOMP_SAVE_DIR") || !getenv("LARECOMP_COOP_PARTY_TEST_DIR"))return;
+    // The factory test is explicit isolated QA only: no script interpreter or story event is run.
+    if(!mirror_ready && (!getenv("LARECOMP_SAVE_DIR") || !getenv("LARECOMP_COOP_PARTY_TEST_DIR")))return;
+    // The guest's replay starts on the overworld only (it declined while busy; after accepting it waits for it).
+    CoopSession session;coop_net_session(&session);if(mirror_ready && session.activity!=COOP_OVERWORLD)return;
     uint64_t world=ptr(ptr(WORLD_GOT)),mgr=ptr(world+0x68),alloc=allocator();
     if(!guest(mgr,8) || !guest(alloc,8))return;
     unsigned trainer=mirror_ready?setup.trainer:26;const char *id=getenv("LARECOMP_COOP_TRAINER_TEST_ID");if(!mirror_ready && id)trainer=(unsigned)strtoul(id,NULL,10);
@@ -739,9 +1032,9 @@ static void maybe_trainer(Cpu *c) {
             if(trainer_offer_sent || !coop_net_remote_near(3000))return;
             trainer_offer_sent=coop_battle_link_offer(plat_now_ns(),ally_timeout(),trainer);return;
         }
-        uint8_t lead[COOP_PB7_BYTES];uint64_t id;
-        if(!coop_battle_link_lead(lead,&id))return;
-        CoopParty check={.count=1};memcpy(check.pokemon[0],lead,sizeof lead);uint16_t species[6];
+        CoopParty check;uint64_t id;
+        if(!coop_battle_link_guest_party(&check,&id))return;
+        uint16_t species[6];
         if(!coop_battle_check_import(c,&check,species)){coop_battle_link_end();return;}
         if(coop_battle_link_mirror_enabled()){
             CoopParty host_party;if(!coop_battle_capture_party(c,&host_party) || !coop_battle_link_mirror_party(&host_party))return;
@@ -755,7 +1048,7 @@ static void maybe_trainer(Cpu *c) {
     call.x[8]=(uint64_t)(uintptr_t)handle;
     extern void fps60_scene_begin(void),input_mark(void);fps60_scene_begin();input_mark();
     dump_save("save-before.bin");
-    trainer_started=trial_active=true;
+    trainer_started=trial_active=factory_battle=true;
     rt_call_original(&call,0x700028bb60ull);
     call.x[0]=(uint64_t)(uintptr_t)handle;call.x[8]=(uint64_t)(uintptr_t)&process;
     rt_call_original(&call,0x700017ef80ull);
@@ -777,7 +1070,7 @@ static void maybe_trainer(Cpu *c) {
 }
 void coop_battle_field(Cpu *c) {
     // Explicit local QA mode only. No automatic party exchange on social join.
-    if(supported && coop_battle_link_enabled()){
+    if(supported && coop_battle_link_enabled() && coop_net_enabled()){
         coop_battle_names_load();
         CoopBattleLinkView view;coop_battle_link_view(&view);
         // Serializing all six native Pokemon on every field tick needlessly
@@ -792,24 +1085,35 @@ void coop_battle_field(Cpu *c) {
             next_party_snapshot=now+1000000000ull;party_offer=view.battle;
         }
         battle_link_test_tick();
+        if(ENV("LARECOMP_COOP_AUTO_TAG")){ // QA: the host invites as soon as both are near, the guest accepts
+            static uint64_t next_tag;CoopTeamUp t;coop_net_teamup(&t);CoopSession s;coop_net_session(&s);
+            bool invite=t.state==0 && s.local_slot==s.host_slot && coop_net_remote_near(3000),accept=t.state==1 && t.from_slot!=s.local_slot;
+            if(now>=next_tag && (invite || accept) && coop_net_teamup_action(invite?0:1))next_tag=now+2000000000ull;
+        }
     }
-    const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");
-    if(!supported || !dir || !*dir)return;
+    // Files only for QA (LARECOMP_COOP_PARTY_TEST_DIR); a team-up in normal play writes none.
+    const char *dir=ENV("LARECOMP_COOP_PARTY_TEST_DIR");bool qa=dir && *dir;
+    if(!supported)return;
     const char *late=ENV("LARECOMP_COOP_PARTY_SNAPSHOT_AT");
-    if(late && !late_exported && renderer_game_frame()>=strtoull(late,NULL,10)){
+    if(qa && late && !late_exported && renderer_game_frame()>=strtoull(late,NULL,10)){
         CoopParty current;if(coop_battle_capture_party(c,&current))late_exported=save_party(dir,"party-late.bin",&current);
     }
     if(battle_seen){
         world_return_frame=renderer_game_frame();journal("world_return",world_return_frame,NULL);dump_save("save-return.bin");
-        CoopParty after;if(coop_battle_capture_party(c,&after))save_party(dir,"party-after.bin",&after);
+        if(trial_active)LOG("[coop-battle] team-up battle over: back on the overworld%s\n",mirrored_guest?" (guest replay, results discarded)":"");
+        CoopParty after;if(qa && coop_battle_capture_party(c,&after))save_party(dir,"party-after.bin",&after);
         if(player_clone_party){
-            if(capture_native_party(c,player_clone_party,&after))save_party(dir,"player-clone-after.bin",&after);
+            if(qa && capture_native_party(c,player_clone_party,&after))save_party(dir,"player-clone-after.bin",&after);
             release_party_clone(c,player_clone_party);player_clone_party=0;
         }
-        trainer_process=0;battle_seen=trial_active=false;
+        // The QA FadeIn is for factory-started battles only; a trainer's script runs its own FadeIn_.
+        if(!factory_battle)world_return_frame=0,journal("world_fade_restored",renderer_game_frame(),NULL);
+        if(script_battle)trainer_started=false;
+        trainer_process=0;battle_seen=trial_active=factory_battle=script_battle=false;
         if(mirrored_guest){coop_battle_link_mirror_clear();mirrored_guest=remote_waiting=false;}
         else coop_battle_link_end();
         mirror_aborted=false;menu_open=menu_forced=have_held=native_failed=local_done=wait_shown=false;menu_turn=ally_done_round=0;wait_text[0]=0;
+        ally_publish_ai=repl_prepared=repl_native=slot0_have=slot0_pending=false;local_seq=remote_round=ally_round=0;
     }
     if(world_return_frame && renderer_game_frame()>=world_return_frame+30) {
         // The factory-only QA has no story script to perform its final FadeIn.
@@ -818,7 +1122,7 @@ void coop_battle_field(Cpu *c) {
         journal("world_fade_restored",renderer_game_frame(),NULL);
     }
     maybe_trainer(c);
-    if(imported)return;
+    if(!qa || imported)return;
     CoopParty local;
     if(!coop_battle_capture_party(c,&local))return;
     if(!exported) {
@@ -839,8 +1143,9 @@ void coop_battle_field(Cpu *c) {
     LOG("[coop-battle] temporary guest party: roundtrip %u, party clone %u, local party unchanged %u\n",ok,cloned,unchanged);
     imported=true;
 }
+// Installed on Eevee 1.0.0 in normal play: each hook passes through unless a team-up (or QA) battle is running.
 void coop_battle_install_hooks(void) {
-    if(supported && getenv("LARECOMP_COOP_PARTY_TEST_DIR")) {
+    if(supported) {
         rt_register_fnhook_chain(0x700028be80ull,mirror_frame_hook,&previous_battle_frame);
         rt_register_fnhook_chain(0x7000a5a180ull,remote_player_test_hook,&previous_remote_player);
         rt_register_fnhook_chain(0x7000737490ull,mirror_spirit_hook,&previous_spirit);
@@ -854,12 +1159,23 @@ void coop_battle_install_hooks(void) {
         rt_register_fnhook_chain(0x7000aa5ca0ull,target_result_hook,&previous_target_result);
         rt_register_fnhook_chain(0x7000aca930ull,skill_pick_hook,&previous_skill_pick);
         rt_register_fnhook_chain(HUMAN_SELECT,human_select_hook,&previous_human_select);
+        rt_register_fnhook_chain(0x7000a57ff0ull,switch_in_hook,&previous_switch_in[0]);     // human switch-in after a faint
+        rt_register_fnhook_chain(0x7000a584f0ull,switch_in_hook,&previous_switch_in[1]);     // human mid-turn switch-in
+        rt_register_fnhook_chain(0x7000a58000ull,ai_switch_hook,&previous_ai_switch);        // NPC switch-in (both)
+        rt_register_fnhook_chain(0x70001c9490ull,item_use_hook,&previous_item_use);           // remove from the bag
+        rt_register_fnhook_chain(0x70009e3e50ull,bag_check_hook,&previous_bag_check);         // Pokemon condition check
         rt_register_fnhook_chain(0x70006786b0ull,wait_text_hook,&previous_msg);
         rt_register_fnhook_chain(0x7000b0ed20ull,trainer_party_hook,&previous_trainer_party);
         rt_register_fnhook_chain(0x70009e0940ull,battle_party_hook,&previous_battle_party);
+        rt_register_fnhook_chain(0x700017e9d0ull,trainer_msg_hook,&previous_trainer_msg);     // GetTrainerMsgID
+        rt_register_fnhook_chain(0x70001a82e0ull,msg_end_hook,&previous_msg_end);              // IsMsgWinEnd_
+        rt_register_fnhook_chain(0x700017e150ull,trainer_core_hook,&previous_trainer_core);    // CallTrainerBattleCore
+        rt_register_fnhook_chain(0x700028dd20ull,process_setter_hook,&previous_process_setter);
+        rt_register_fnhook_chain(0x70001c6f60ull,money_hook,&previous_money);                  // add money
+        rt_register_fnhook_chain(0x70001c8e20ull,item_hook,&previous_item);                    // add to the bag
         extern void coop_battle_model_install(void);coop_battle_model_install();
     }
 }
 bool coop_battle_trial_model(bool *mirrored){*mirrored=mirrored_guest;return supported && trial_active;}
-void coop_battle_configure(int build){supported=build==GAME_BUILD_EEVEE_100;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;mirrored_guest=remote_waiting=mirror_aborted=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=menu_open=menu_forced=have_held=native_failed=local_done=wait_shown=false;menu_turn=ally_done_round=0;wait_text[0]=0;memset(&ally_wait,0,sizeof ally_wait);memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}
-RT_ON_RESET(coop_battle_reset){supported=false;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;mirrored_guest=remote_waiting=mirror_aborted=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=menu_open=menu_forced=have_held=native_failed=local_done=wait_shown=false;menu_turn=ally_done_round=0;wait_text[0]=0;memset(&ally_wait,0,sizeof ally_wait);memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}
+void coop_battle_configure(int build){supported=build==GAME_BUILD_EEVEE_100;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;entry=ENTRY_IDLE;script_battle=factory_battle=capture_process=false;mirrored_guest=remote_waiting=mirror_aborted=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=menu_open=menu_forced=have_held=native_failed=local_done=wait_shown=false;menu_turn=ally_done_round=0;wait_text[0]=0;memset(&ally_wait,0,sizeof ally_wait);ally_publish_ai=repl_prepared=repl_native=slot0_have=slot0_pending=false;local_seq=0;memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}
+RT_ON_RESET(coop_battle_reset){supported=false;initializing_context=0;exported=imported=late_exported=trainer_started=trial_active=battle_seen=trainer_offer_sent=false;trainer_process=world_return_frame=player_clone_party=0;entry=ENTRY_IDLE;script_battle=factory_battle=capture_process=false;mirrored_guest=remote_waiting=mirror_aborted=false;remote_round=0;memset(&native_mirror,0,sizeof native_mirror);observed_sequence=0;ally_round=0;ally_prepared=ally_native=menu_open=menu_forced=have_held=native_failed=local_done=wait_shown=false;menu_turn=ally_done_round=0;wait_text[0]=0;memset(&ally_wait,0,sizeof ally_wait);ally_publish_ai=repl_prepared=repl_native=slot0_have=slot0_pending=false;local_seq=0;memset(selected_move_slot,255,sizeof selected_move_slot);memset(selected_move_id,0,sizeof selected_move_id);}

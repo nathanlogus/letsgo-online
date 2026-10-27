@@ -25,7 +25,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-PROTO = 5
+PROTO = 7  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; mixed versions are refused and play solo
 RECONNECT_GRACE = 30
 TEAM_INVITE_SECONDS = 45  # Leave time to navigate Communicate and return to the overworld.
 MAX_FRAME = 256
@@ -96,6 +96,7 @@ class Room:
     battle_deadline: float = 0
     battle_sent: bool = False
     battle_chunks: int = 0
+    battle_count: int = 0
     battle_choices: bytes = b""
     mirror_count: int = 0
     mirror_chunks: int = 0
@@ -111,7 +112,7 @@ class Relay:
         if room.battle_id:
             body=body or b"\x06"+struct.pack('<QB',room.battle_id,reason)
             for p in room.peers:p.send(b"B",body)
-        room.battle_id=room.battle_phase=room.battle_turn=room.battle_sequence=room.battle_chunks=0
+        room.battle_id=room.battle_phase=room.battle_turn=room.battle_sequence=room.battle_chunks=room.battle_count=0
         room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b""
         room.mirror_count=room.mirror_chunks=room.mirror_digest=0;room.mirror_seed=room.mirror_aborted=False;room.mirror_sequences=[0,0]
 
@@ -127,27 +128,31 @@ class Relay:
         other=others[0];host=peer.identity==room.owner;now=time.monotonic()
         if op==0 and len(body)==13 and host and not room.battle_id:
             timeout,trainer=struct.unpack_from('<HH',body,9)
-            if not 1000<=timeout<=60000 or not 1<=trainer<=601 or not self.team_near(peer,other):return
+            if not 1000<=timeout<=60000 or not 1<=trainer<=601 or room.team_state!=2 or not self.team_near(peer,other):return
             room.battle_id=battle;room.battle_phase=1;room.battle_chunks=0
             asyncio.create_task(self.expire_battle_offer(room,battle))
         elif battle!=room.battle_id:return
         elif op==1 and len(body)==9 and not host and room.battle_phase==1:room.battle_phase=2
-        elif op==2 and len(body)==140 and not host and room.battle_phase==2 and body[9]<2:
-            bit=1<<body[9]
-            if room.battle_chunks&bit:return
-            room.battle_chunks|=bit
-        elif op==3 and len(body)==52 and host and room.battle_phase==2 and room.battle_chunks==3:
+        elif op==2 and len(body)==141 and not host and room.battle_phase==2 and 1<=body[9]<=6 and body[10]<2*body[9]:
+            # The guest's whole party, two chunks per Pokemon.
+            bit=1<<body[10]
+            if room.battle_chunks&bit or (room.battle_count and room.battle_count!=body[9]):return
+            room.battle_count=body[9];room.battle_chunks|=bit
+        elif op==3 and len(body)==54 and host and room.battle_phase==2 and self.party_done(room):
             turn,sequence,timeout=struct.unpack_from('<IIH',body,9)
             if turn<=room.battle_turn or sequence<=room.battle_sequence or not 1<=timeout<=60000 or body[19]>=6:return
             room.battle_turn=turn;room.battle_sequence=sequence;room.battle_deadline=now+timeout/1000
             room.battle_sent=False;room.battle_choices=body
-        elif op==4 and len(body)==22 and not host and room.battle_phase==2:
+        elif op==4 and len(body)==23 and not host and room.battle_phase==2:
             turn,sequence=struct.unpack_from('<II',body,9)
             if room.battle_sent or now>=room.battle_deadline or turn!=room.battle_turn or sequence!=room.battle_sequence:return
-            choice=room.battle_choices;index=body[18];target=body[21]
+            choice=room.battle_choices;index=body[18];target=body[21];switch=body[22]
             if not choice or index>=4 or target>=16 or body[17]!=choice[19]:return
-            move=struct.unpack_from('<H',body,19)[0]
-            if not move or move!=struct.unpack_from('<H',choice,20+2*index)[0] or not choice[28+index] or not (struct.unpack_from('<H',choice,32+2*index)[0]&(1<<target)):return
+            if switch:
+                if switch>6 or not choice[53]&(1<<(switch-1)):return
+            else:
+                move=struct.unpack_from('<H',body,19)[0]
+                if not move or move!=struct.unpack_from('<H',choice,20+2*index)[0] or not choice[28+index] or not (struct.unpack_from('<H',choice,32+2*index)[0]&(1<<target)):return
             room.battle_sent=True
         elif op==5 and len(body)==18 and host and room.battle_phase==2:
             if struct.unpack_from('<II',body,9)!=(room.battle_turn,room.battle_sequence) or body[17] not in (1,2):return
@@ -163,7 +168,7 @@ class Relay:
             if digest_round<=room.mirror_digest:return
             room.mirror_digest=digest_round
         elif room.mirror_aborted and op in (7,8,9):return
-        elif op==7 and len(body)==141 and host and room.battle_phase==2 and room.battle_chunks==3:
+        elif op==7 and len(body)==141 and host and room.battle_phase==2 and self.party_done(room):
             count,index=body[9:11]
             if not 1<=count<=6 or index>=2*count or room.mirror_seed:return
             if room.mirror_count and room.mirror_count!=count:return
@@ -172,18 +177,27 @@ class Relay:
         elif op==8 and len(body)==17 and host and room.battle_phase==2:
             if room.mirror_seed or not room.mirror_count or room.mirror_chunks!=(1<<(2*room.mirror_count))-1:return
             room.mirror_seed=True
-        elif op==9 and len(body)==24 and host and room.battle_phase==2 and room.mirror_seed:
-            turn,sequence=struct.unpack_from('<II',body,9);trainer,party,index=body[17:20];move=struct.unpack_from('<H',body,20)[0];target,ai=body[22:24]
-            if trainer not in (0,2) or not turn or not sequence or party>=6 or index>=4 or not 1<=move<=742 or target>=4 or ai>1 or (ai and trainer!=2):return
+        elif op==9 and len(body)==30 and host and room.battle_phase==2 and room.mirror_seed:
+            # Any native decision as its command word (low nibble 1 fight, 3 change); request kind 2 action, 4/5 replacement.
+            turn,sequence=struct.unpack_from('<II',body,9);trainer,party,index=body[17:20];move=struct.unpack_from('<H',body,20)[0];target,ai,kind,count=body[22:26]
+            packet=struct.unpack_from('<I',body,26)[0]
+            if trainer not in (0,2) or not turn or not sequence or party>=6 or ai>1 or (ai and trainer!=2) or kind not in (2,4,5) or count>10:return
             actor=trainer//2
             if sequence!=room.mirror_sequences[actor]+1:return
-            if trainer==2:
+            if trainer==2 and not ai:
+                # The guest's own decision: it must be one the host offered it.
                 choice=room.battle_choices
                 if not choice or (turn,sequence)!=(room.battle_turn,room.battle_sequence) or party!=choice[19]:return
-                if move!=struct.unpack_from('<H',choice,20+2*index)[0] or not choice[28+index] or not (struct.unpack_from('<H',choice,32+2*index)[0]&(1<<target)):return
+                if packet&15==3:
+                    if not choice[53]&(1<<((packet>>7)&7)):return
+                elif packet&15!=1 or index>=4 or move!=struct.unpack_from('<H',choice,20+2*index)[0] or not choice[28+index] or not (struct.unpack_from('<H',choice,32+2*index)[0]&(1<<target)):return
             room.mirror_sequences[actor]=sequence
         else:return
         other.send(b"B",body)
+
+    @staticmethod
+    def party_done(room: Room) -> bool:
+        return room.battle_count>0 and room.battle_chunks==(1<<(2*room.battle_count))-1
 
     def team_status(self, room: Room, reason: int = 0, target: Peer | None = None) -> None:
         remaining=max(0,int((room.team_until-time.monotonic())*1000)) if room.team_state==1 else 0

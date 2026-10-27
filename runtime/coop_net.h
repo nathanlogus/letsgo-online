@@ -10,6 +10,7 @@ typedef struct {
     char server[256], name[25], room[17];
     bool host;
     char saved_rooms[4][17];
+    bool teamup_battles;  // "Team-up battles" (default on): ordinary trainers offer the tagged-up partner a team-up
 } CoopOptions;
 typedef struct {
     CoopConnection connection;

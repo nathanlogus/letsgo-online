@@ -11,5 +11,8 @@ bool daynight_tint(float rgb[3]);
 // with after the scene tint (1 = unchanged; > 1 = brighter than daylight, so the game's bloom picks it up). False by day
 // or for textures that do not glow. LARECOMP_GLOW_TEX=<hex key>,... (research) adds keys with a warm window glow.
 bool daynight_glow(unsigned key, float mul[3]);
-// Glass that is only a region of a bigger texture (the Mart's door is part of its wall): the multiplier for the fragment shader's colour key.
-bool daynight_glow_colorkey(unsigned key, float mul[3]);
+// Glass that is only a region of a bigger texture: the multiplier for the fragment shader's colour key, and the key's mode
+// (0 none, 1 pale cyan glass, 2 the white parts: Cycling Road's lamps).
+int daynight_glow_colorkey(unsigned key, float mul[3]);
+// Dark glass windows (nearly black textures: Celadon, Saffron): the warm light the pane adds at night, before the scene tint.
+bool daynight_glow_emissive(unsigned key, float add[3]);

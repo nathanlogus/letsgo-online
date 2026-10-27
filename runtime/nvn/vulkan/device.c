@@ -16,6 +16,7 @@
 
 #include "../../paths.h"
 #include "../../settings.h"
+#include "../../lossless.h"
 #include "../../ui/menu.h"
 #include "vk.h"
 #include "fsr3.h"
@@ -156,7 +157,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[12];
+    const char *ext[16];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     // LARECOMP_PRESENT_LOG=<file>: when each window image reached the screen (present_log_*: VK_KHR_present_wait)
@@ -177,6 +178,26 @@ static void create_device(void) {
     if (g_pipe_exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
     else if (getenv("LARECOMP_PIPE_STATS")) LOG("[vk] LARECOMP_PIPE_STATS: the driver has no VK_KHR_pipeline_executable_properties\n");
     g_fault_ext = fault;
+    // ray-traced light shadows (rt.c): the scene's triangles captured by transform feedback into an acceleration structure,
+    // traced by ray queries in the lights pass. LARECOMP_RT=0 leaves the extensions off.
+    g_vk.rt = !(getenv("LARECOMP_RT") && !strcmp(getenv("LARECOMP_RT"), "0")) &&
+              has_ext(ep, ne, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+              has_ext(ep, ne, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) && has_ext(ep, ne, VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME);
+    if (g_vk.rt) {  // (and the features: transform feedback, ray query, acceleration structures, buffer device addresses)
+        VkPhysicalDeviceTransformFeedbackFeaturesEXT qx = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT};
+        VkPhysicalDeviceRayQueryFeaturesKHR qr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, .pNext = &qx};
+        VkPhysicalDeviceAccelerationStructureFeaturesKHR qa = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+                                                              .pNext = &qr};
+        VkPhysicalDeviceVulkan12Features q12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = &qa};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q12};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        g_vk.rt = qx.transformFeedback && qr.rayQuery && qa.accelerationStructure && q12.bufferDeviceAddress;
+    }
+    LOG("[vk] ray-traced light shadows: %s\n", g_vk.rt ? "available" : "not available");
+    if (g_vk.rt) {
+        ext[n_ext++] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, ext[n_ext++] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
+        ext[n_ext++] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME, ext[n_ext++] = VK_EXT_TRANSFORM_FEEDBACK_EXTENSION_NAME;
+    }
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
@@ -211,6 +232,13 @@ static void create_device(void) {
     VkPhysicalDevicePresentIdFeaturesKHR pid = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
                                                 .presentId = VK_TRUE, .pNext = &pw};
     if (g_present_log) f.pNext = &pid;
+    VkPhysicalDeviceTransformFeedbackFeaturesEXT fx = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT,
+                                                       .transformFeedback = VK_TRUE, .pNext = f.pNext};
+    VkPhysicalDeviceRayQueryFeaturesKHR fr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR, .rayQuery = VK_TRUE,
+                                              .pNext = &fx};
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR fa = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+                                                          .accelerationStructure = VK_TRUE, .pNext = &fr};
+    if (g_vk.rt) f.pNext = &fa, f12.bufferDeviceAddress = VK_TRUE;
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
@@ -251,7 +279,8 @@ static void create_device(void) {
     LOG("[vk] %s\n", present_q != g_vk.queue ? "a second queue for presenting" : "one queue");
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
-                                 .vulkanApiVersion = VK_API_VERSION_1_3};
+                                 .vulkanApiVersion = VK_API_VERSION_1_3,
+                                 .flags = g_vk.rt ? VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT : 0};  // (rt.c's buffers)
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
     VkSemaphoreTypeCreateInfo st = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
@@ -385,7 +414,7 @@ static VkResult acquire_image(VkSemaphore sem, uint32_t *img) {
 
 // ================================================================== frames (start screen and game)
 // Acquire semaphores rotate per frame in flight; a slot is reused once the submission that waited on it is done.
-#define FRAMES 10
+#define FRAMES VK_WINDOW_FRAMES_IN_FLIGHT
 static VkSemaphore acquire_sem[FRAMES], done_sem[8];
 static uint64_t slot_seq[FRAMES];
 static int slot;
@@ -1290,5 +1319,6 @@ int ui_run(void) {
         }
         input_poll_gamepads();
         menu_apply_window_requests(window);
+        lossless_tick(window);
     }
 }

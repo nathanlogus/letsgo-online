@@ -1,6 +1,7 @@
 // GLSL -> SPIR-V (shaderc), descriptor layouts from the SPIR-V itself, translated NVN programs, built-in shaders.
 #include <pthread.h>
 #include <shaderc/shaderc.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -262,6 +263,13 @@ static const char *surf =
     "  if (dot(n, c) > 0.0) n = -n;\n"
     "}\n";
 static const char *builtin_src(const char *name, int *stage) {
+    if (!strcmp(name, "dl_apply_rt.frag")) {  // (dl_apply.frag with its ray-traced shadow: RT defined, the ray query extension on)
+        static char *rt;
+        const char *base = builtin_src("dl_apply.frag", stage), *body = strchr(base, '\n') + 1;
+        if (!rt && (rt = malloc(strlen(base) + 128)))
+            sprintf(rt, "#version 460\n#extension GL_EXT_ray_query : require\n#define RT 1\n%s", body);
+        return rt;
+    }
     if (!strcmp(name, "present.vert")) {
         *stage = STAGE_VERTEX;
         // pv[0].x: flip (lower-left origin), pv[1]: uv crop (origin, size). Fullscreen triangle; Vulkan NDC y points down.
@@ -1492,15 +1500,18 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(push_constant) uniform P { vec4 a; vec4 b; } pc;\n"  // a = (A, B, depth mode, -), b.xy = the scene's size
                "layout(location = 0) out vec4 o;\n"
                "void main() {\n"
-               "  ivec2 p = ivec2(gl_FragCoord.xy) * 4, sz = textureSize(t, 0), dsz = textureSize(dep, 0);\n"
+               // (a.w = the block: 4, fewer in frame generation's reduced in-between images - the map then covers the same scene)
+               "  int B = clamp(int(pc.a.w + 0.5), 1, 4);\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy) * B, sz = textureSize(t, 0), dsz = textureSize(dep, 0);\n"
                "  vec3 col = vec3(0.0);\n"
                "  float bi = 0.0, bz = 0.0;\n"
-               "  for (int y = 0; y < 4; y++)\n"
-               "    for (int x = 0; x < 4; x++) {\n"
+               "  for (int y = 0; y < B; y++)\n"
+               "    for (int x = 0; x < B; x++) {\n"
                "      ivec2 q = min(p + ivec2(x, y), sz - 1);\n"
                "      vec3 e = texelFetch(t, q, 0).rgb;\n"
                "      float I = clamp(log2(max(dot(e, vec3(0.2126, 0.7152, 0.0722)), 1e-3) / 1.5) * 0.8, 0.0, 1.2);\n"
                "      if (e.b - max(e.r * 1.6, e.g * 1.1) > 0.12) I = 0.0;\n"  // (water foam and glints are not lights)
+               "      if (e.b > e.r * 1.25) I = 0.0;\n"  // (nor cool glass: the Center's cyan door lit itself in a ragged patch; lamps and windows are warm)
                "      if (I > bi) {\n"
                "        bi = I;\n"
                "        col = mix(e / max(max(e.r, max(e.g, e.b)), 1e-3), vec3(1.0, 0.72, 0.38), 0.5) * I;\n"
@@ -1548,6 +1559,13 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(set = 0, binding = 5) uniform sampler2D l3;\n"
                "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; vec4 f; } pc;\n"  // f = (contrast mid, streaks, far lights, -)
                "layout(location = 0) out vec4 o;\n"
+               // (dl_apply_rt.frag, the ray-traced variant: the scene's triangles in view space, rt.c; the pool's sources' position, weighted)
+               "#ifdef RT\n"
+               "layout(set = 0, binding = 6) uniform accelerationStructureEXT tlas;\n"
+               "bool g_acc = false;\n"
+               "vec3 g_lp = vec3(0.0);\n"
+               "float g_lw = 0.0;\n"
+               "#endif\n"
                "vec4 lvl(int k, vec2 uv) {\n"
                "  return k == 0 ? texture(l0, uv) : k == 1 ? texture(l1, uv) : k == 2 ? texture(l2, uv) : texture(l3, uv);\n"
                "}\n"
@@ -1589,7 +1607,17 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 c = vec3(0.0);\n"
                "  for (int j = 0; j < 4; j++) {\n"
                "    ivec2 o = ivec2(j & 1, j >> 1);\n"
-               "    c += near(lf(k, i + o), z, width) * ((o.x == 1 ? w.x : 1.0 - w.x) * (o.y == 1 ? w.y : 1.0 - w.y));\n"
+               "    vec4 sj = lf(k, i + o);\n"
+               "    vec3 cj = near(sj, z, width) * ((o.x == 1 ? w.x : 1.0 - w.x) * (o.y == 1 ? w.y : 1.0 - w.y));\n"
+               "    c += cj;\n"
+               "#ifdef RT\n"  // (the source's view-space point: its texel's place at its own depth)
+               "    float qj = max(cj.r, max(cj.g, cj.b));\n"
+               "    if (g_acc && qj > 0.0) {\n"
+               "      vec2 ut = (vec2(i + o) + 0.5) / vec2(n);\n"
+               "      g_lp += qj * vec3((ut - 0.5) * vec2(2.0 / pc.c.x, 2.0 / pc.c.y) * sj.a, sj.a);\n"
+               "      g_lw += qj;\n"
+               "    }\n"
+               "#endif\n"
                "  }\n"
                "  return c;\n"
                "}\n"
@@ -1604,30 +1632,76 @@ static const char *builtin_src(const char *name, int *stage) {
                // far lights (as DQ HD-2D's r.LightMaxDrawDistanceScale 2.5): the depth window widens with distance, so the pyramid's
                // averaged depths still match far sources instead of dropping them
                "  float zwf = mix(1.0, pc.f.z, smoothstep(1500.0, 6000.0, zp));\n"
-               "  if (lit < 0.02 && d < 0.999999) {\n"
+               // (what is lit itself takes less of the others' light, fading out by lit 0.4: a hard cut at 0.02 split the Center's glass
+               //  door, near that brightness, into texels with and without light - a stepped edge that crawled when walking)
+               "  float rcv = 1.0 - smoothstep(0.0, 0.4, lit);\n"
+               "#ifdef RT\n"  // (LARECOMP_RT_DEBUG: a ray from the camera through the pixel - green where it hits at the depth buffer's distance, red off, blue none)
+               "  if (pc.d.w < -1.5 && d < 0.999999) {\n"
+               "    vec3 A = vec3(((vec2(p) + 0.5) / pc.c.zw - 0.5) * vec2(2.0 / pc.c.x, 2.0 / pc.c.y) * zp, zp);\n"
+               "    rayQueryEXT rq;\n"
+               "    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsOpaqueEXT, 0xFF, vec3(0.0), 1.0, normalize(A), 1e6);\n"
+               "    while (rayQueryProceedEXT(rq)) {}\n"
+               "    bool hit = rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT;\n"
+               "    float err = hit ? abs(rayQueryGetIntersectionTEXT(rq, true) - length(A)) : 0.0;\n"
+               "    o = vec4(hit ? vec3(clamp(err / 50.0, 0.0, 1.0), 1.0 - clamp(err / 50.0, 0.0, 1.0), 0.0) : vec3(0.0, 0.0, 1.0), 1.0);\n"
+               "    return;\n"
+               "  }\n"
+               "#endif\n"
+               "  if (rcv > 0.0 && d < 0.999999) {\n"
                "    float z = zp;\n"
                "    vec2 uv = (vec2(p) + 0.5) / pc.c.zw;\n"
-               "    float rpx = 380.0 * pc.c.x / z * 0.5 * pc.c.z;\n"
+               "    float rpx = 380.0 * pc.c.x / z * 0.5 * pc.c.z / pc.f.w;\n"  // (f.w = the image's scale: in full-size pixels, the map's texel is 4 of them)
                "    float lod = clamp(log2(max(rpx, 6.0) / 6.0), 0.0, 2.99);\n"
                "    vec2 us = uv - vec2(0.0, 230.0 * pc.c.y / z * 0.5 * pc.b.w);\n"
                // the pool: the pyramid level whose texel is about the light's radius (two levels blended), each texel kept by its own
                // source depth: smooth, no noise (the old 32 random taps gave a salt-and-pepper grain on walls and ground)
-               "    float rr = min(rpx, 0.4 * pc.c.z);\n"
+               "    float rr = min(rpx, 0.4 * pc.c.z / pc.f.w);\n"
                "    float a0 = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
                "    float kl = clamp(log2(max(rr, 2.0) / 2.0), 0.0, 1.999);\n"
                "    int k0 = int(floor(kl));\n"
                // the source looked up 0..150 cm above the pixel (mostly around it: no beams down the screen), nearer weighing more: the spill fades away from its source instead of
                // copying a whole lit facade onto the ground as one flat block
                "    vec3 pool = vec3(0.0);\n"
+               "#ifdef RT\n"
+               "    g_acc = true;\n"
+               "#endif\n"
                "    for (int j = 0; j < 4; j++) {\n"
                "      float hh = float[4](0.0, 40.0, 90.0, 150.0)[j], ww = float[4](0.45, 0.28, 0.17, 0.10)[j];\n"
                "      vec2 uj = uv - vec2(0.0, hh * pc.c.y / z * 0.5 * pc.b.w);\n"
                "      pool += ww * mix(lvb(k0, uj, z, 380.0 * pc.d.z * zwf), lvb(k0 + 1, uj, z, 380.0 * pc.d.z * zwf), fract(kl));\n"
                "    }\n"
                "    pool *= 0.35;\n"
+               // ray-traced shadow: one ray from the pixel toward the weighted point of the sources lighting its pool, through the scene's
+               // triangles (rt.c: captured this frame by transform feedback, in view space). It stops 50 cm short of the source (the
+               // lamp's own head and glass); something in between leaves the pool at 12 %.
+               "#ifdef RT\n"
+               "    g_acc = false;\n"
+               "    if (g_lw > 1e-4) {\n"
+               "      vec3 B = g_lp / g_lw, A = vec3((uv - 0.5) * vec2(2.0 / pc.c.x, 2.0 / pc.c.y) * z, z), D = B - A;\n"
+               "      float L = length(D);\n"
+               "      if (L > 70.0) {\n"
+               "        D /= L;\n"
+               "        float bias = 3.0 + z * 0.004;\n"  // (off the pixel's own surface: depth precision grows with distance)
+               // (and toward the camera, which sees the surface: a ray skimming along a roof toward its own windows hit it in blotches)
+               "        vec3 O = A * (1.0 - 0.015) + D * bias;\n"
+               // (4 rays toward points 60 cm around the source, turned per pixel: a soft edge instead of one ray's hard line)
+               "        vec3 T = normalize(cross(D, abs(D.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0))), U = cross(D, T);\n"
+               "        float vis = 0.0;\n"
+               "        for (int r = 0; r < 4; r++) {\n"
+               "          float an = a0 + float(r) * 1.5707963;\n"
+               "          vec3 Br = B + 60.0 * (cos(an) * T + sin(an) * U), Dr = Br - O;\n"
+               "          rayQueryEXT rq;\n"
+               "          rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, O, 0.0, normalize(Dr), max(length(Dr) - 50.0, 0.0));\n"
+               "          while (rayQueryProceedEXT(rq)) {}\n"
+               "          vis += rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT ? 0.12 : 1.0;\n"
+               "        }\n"
+               "        pool *= vis * 0.25;\n"
+               "      }\n"
+               "    }\n"
+               "#endif\n"
                // the halo: pyramid level 1, bilinear (no random taps: they grain the wall)
                "    vec3 halo = (lvb(2, uv, z, 350.0 * pc.d.z * zwf) + lvb(3, uv, z, 350.0 * pc.d.z * zwf)) * 0.6;\n"
-               "    m = pc.a.rgb * (1.0 + pc.a.w * pc.d.y * (24.0 * pool + 6.0 * halo));\n"
+               "    m = pc.a.rgb * (1.0 + rcv * pc.a.w * pc.d.y * (24.0 * pool + 6.0 * halo));\n"
                // research (LARECOMP_DL_DEBUG=1): blue where the sample above the pixel has a source, green = its depth minus the pixel's / 2000
                "    if (pc.d.w < -0.5) {\n"
                "      vec4 q = lm(us);\n"
@@ -1674,6 +1748,92 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(push_constant) uniform P { layout(row_major) mat4 vp; vec4 a; vec4 b; vec4 c; } pc;\n"
                "layout(location = 0) out vec4 o;\n"
                "vec2 scr(vec4 cl) { vec2 n = cl.xy / cl.w; return vec2(n.x * 0.5 + 0.5, pc.b.x > 0.5 ? 0.5 - n.y * 0.5 : n.y * 0.5 + 0.5) * pc.a.xy; }\n"
+               // the surface point under a pixel (false: the sky)
+               "bool at(vec2 fc, out vec3 P) {\n"
+               "  vec2 uv = fc / pc.a.xy;\n"
+               "  ivec2 dsz = textureSize(dep, 0);\n"
+               "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
+               "  P = vec3(0.0);\n"
+               "  if (d >= 0.999999) return false;\n"
+               "  vec4 wp = inverse(pc.vp) * vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "  if (abs(wp.w) < 1e-6) return false;\n"
+               "  P = wp.xyz / wp.w;\n"
+               "  return true;\n"
+               "}\n"
+               // one cell's fly, if it has one, as it lights this pixel
+               "vec3 fly(vec3 c, float zp, float s, float T) {\n"
+               "  vec4 h = fract(sin(vec4(dot(c, vec3(127.1, 311.7, 74.7)), dot(c, vec3(269.5, 183.3, 246.1)), dot(c, vec3(113.5, 271.9, 124.6)), dot(c, vec3(419.2, 371.9, 168.2)))) * 43758.5453);\n"
+               "  if (h.w > 0.35) return vec3(0.0);\n"
+               "  vec3 F = (c + 0.2 + 0.6 * h.xyz) * 150.0 + 30.0 * vec3(sin(T * (0.25 + h.x * 0.3) + h.y * 6.28), 0.5 * sin(T * (0.4 + h.z * 0.3) + h.x * 3.0), cos(T * (0.2 + h.y * 0.3) + h.x * 6.28));\n"
+               "  vec4 cl = pc.vp * vec4(F, 1.0);\n"
+               "  if (cl.w < 50.0 || cl.w > zp + 40.0) return vec3(0.0);\n"  // (behind the camera, or behind the surface here)
+               "  vec2 S = scr(cl);\n"
+               "  float r = clamp(1800.0 * s / cl.w, 1.0, 5.0 * s), dd = length(gl_FragCoord.xy - S) / r;\n"
+               "  if (dd > 5.0) return vec3(0.0);\n"
+               "  float blink = pow(max(0.0, sin(T * (0.9 + h.z * 1.5) + h.x * 40.0)), 3.0);\n"
+               "  if (pc.b.z > 0.0) blink = 1.0, dd /= 3.0;\n"  // (LARECOMP_FF_DEBUG: every fly lit, 3x)
+               "  vec3 g = texelFetch(t, clamp(ivec2(S), ivec2(0), ivec2(pc.a.xy) - 1), 0).rgb;\n"
+               "  float green = pc.b.z > 0.0 ? 1.0 : smoothstep(0.0, 0.08, g.g - max(g.r, g.b) * 1.05);\n"  // only over grass / leaves
+               "  return vec3(0.9, 1.0, 0.35) * 3.0 * blink * green * (exp(-dd * dd) + 0.12 * exp(-dd * dd * 0.12));\n"
+               "}\n"
+               "void main() {\n"
+               "  o = vec4(1.0);\n"
+               "  vec3 P;\n"
+               "  if (!at(gl_FragCoord.xy, P)) return;\n"
+               "  float zp = (pc.vp * vec4(P, 1.0)).w, s = pc.a.y / 720.0, T = pc.a.z;\n"
+               "  vec3 add = vec3(0.0), base[5];\n"
+               "  base[0] = floor(P / 150.0);\n"
+               "  for (int j = 0; j < 27; j++) add += fly(base[0] + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1), zp, s, T);\n"
+               // at a depth edge, the cells around the neighbours' surfaces too (12 px away, about a fly's glow): a fly hovering at a roof
+               // or a tree's edge was cut off where the pixels beyond it see the far ground; cells already counted are skipped
+               "  int nb = 1;\n"
+               "  for (int k = 0; k < 4; k++) {\n"
+               "    vec3 Q;\n"
+               "    if (!at(gl_FragCoord.xy + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k] * s, Q)) continue;\n"
+               "    vec3 bq = floor(Q / 150.0);\n"
+               "    bool seen = false;\n"
+               "    for (int i = 0; i < nb; i++) seen = seen || all(lessThanEqual(abs(bq - base[i]), vec3(0.5)));\n"
+               "    if (seen) continue;\n"
+               "    for (int j = 0; j < 27; j++) {\n"
+               "      vec3 c = bq + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1);\n"
+               "      bool dup = false;\n"
+               "      for (int i = 0; i < nb; i++) dup = dup || all(lessThanEqual(abs(c - base[i]), vec3(1.5)));\n"
+               "      if (!dup) add += fly(c, zp, s, T);\n"
+               "    }\n"
+               "    base[nb++] = bq;\n"
+               "  }\n"
+               "  vec3 e = texelFetch(t, ivec2(gl_FragCoord.xy), 0).rgb;\n"
+               "  vec3 m = 1.0 + pc.b.y * min(add / max(e * pc.c.rgb, vec3(0.03)), vec3(16.0));\n"
+               "  if (any(isnan(m)) || any(isinf(m))) m = vec3(1.0);\n"
+               "  o = vec4(m, 1.0);\n"
+               "}\n";
+    }
+    // clouds: their shadows drifting over the ground. The pixel's surface point (as dl_ff) -> its point on the ground along the sun ->
+    // two layers of warped fractal gradient noise scrolling with the wind; multiplied onto the scene. Depth (0); a = (width, height, seconds, depth mode),
+    // b = (y flip, strength, -, -).
+    if (!strcmp(name, "clouds.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { layout(row_major) mat4 vp; vec4 a; vec4 b; vec4 c; } pc;\n"  // c = (sun slope x, z, coverage, -)
+               "layout(location = 0) out vec4 o;\n"
+               // (an integer hash: the sin() one lost its precision on the octaves' large cell numbers - straight-edged patches)
+               "float h2(vec2 c) { uvec2 q = uvec2(ivec2(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u;\n"
+               "  h = (h ^ (h >> 16)) * 2246822519u; h = (h ^ (h >> 13)) * 3266489917u; h ^= h >> 16; return float(h) * (1.0 / 4294967296.0); }\n"
+               "float vn(vec2 x) { vec2 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);\n"
+               "  return mix(mix(h2(i), h2(i + vec2(1, 0)), f.x), mix(h2(i + vec2(0, 1)), h2(i + vec2(1, 1)), f.x), f.y); }\n"
+               // gradient noise (quintic fade: round level curves - value noise's were faceted, straight-edged shadows), 0..1
+               "vec2 gr(vec2 c) { float a = 6.2831853 * h2(c); return vec2(cos(a), sin(a)); }\n"
+               "float gn(vec2 x) { vec2 i = floor(x), f = fract(x), u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);\n"
+               "  return 0.5 + 0.7 * mix(mix(dot(gr(i), f), dot(gr(i + vec2(1, 0)), f - vec2(1, 0)), u.x),\n"
+               "                         mix(dot(gr(i + vec2(0, 1)), f - vec2(0, 1)), dot(gr(i + vec2(1, 1)), f - vec2(1, 1)), u.x), u.y); }\n"
+               // (5 octaves, each turned 37 degrees, the first too: no grid direction lines up)
+               "float fbm(vec2 x) {\n"
+               "  float s = 0.0, a = 0.5;\n"
+               "  mat2 r = mat2(0.8, 0.6, -0.6, 0.8);\n"
+               "  for (int i = 0; i < 5; i++) { x = r * x; s += a * gn(x); x = x * 2.03 + 11.7; a *= 0.5; }\n"
+               "  return s / 0.97;\n"
+               "}\n"
                "void main() {\n"
                "  o = vec4(1.0);\n"
                "  vec2 uv = gl_FragCoord.xy / pc.a.xy;\n"
@@ -1684,27 +1844,26 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec4 wp = inverse(pc.vp) * nd;\n"
                "  if (abs(wp.w) < 1e-6) return;\n"
                "  vec3 P = wp.xyz / wp.w;\n"
-               "  float zp = (pc.vp * vec4(P, 1.0)).w, s = pc.a.y / 720.0, T = pc.a.z;\n"
-               "  vec3 add = vec3(0.0), base = floor(P / 150.0);\n"
-               "  for (int j = 0; j < 27; j++) {\n"
-               "    vec3 c = base + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1);\n"
-               "    vec4 h = fract(sin(vec4(dot(c, vec3(127.1, 311.7, 74.7)), dot(c, vec3(269.5, 183.3, 246.1)), dot(c, vec3(113.5, 271.9, 124.6)), dot(c, vec3(419.2, 371.9, 168.2)))) * 43758.5453);\n"
-               "    if (h.w > 0.35) continue;\n"
-               "    vec3 F = (c + 0.2 + 0.6 * h.xyz) * 150.0 + 30.0 * vec3(sin(T * (0.25 + h.x * 0.3) + h.y * 6.28), 0.5 * sin(T * (0.4 + h.z * 0.3) + h.x * 3.0), cos(T * (0.2 + h.y * 0.3) + h.x * 6.28));\n"
-               "    vec4 cl = pc.vp * vec4(F, 1.0);\n"
-               "    if (cl.w < 50.0 || cl.w > zp + 40.0) continue;\n"  // (behind the camera, or behind the surface here)
-               "    vec2 S = scr(cl);\n"
-               "    float r = clamp(1800.0 * s / cl.w, 1.0, 5.0 * s), dd = length(gl_FragCoord.xy - S) / r;\n"
-               "    if (dd > 5.0) continue;\n"
-               "    float blink = pow(max(0.0, sin(T * (0.9 + h.z * 1.5) + h.x * 40.0)), 3.0);\n"
-               "    vec3 g = texelFetch(t, clamp(ivec2(S), ivec2(0), ivec2(pc.a.xy) - 1), 0).rgb;\n"
-               "    float green = smoothstep(0.0, 0.08, g.g - max(g.r, g.b) * 1.05);\n"  // only over grass / leaves
-               "    add += vec3(0.9, 1.0, 0.35) * 3.0 * blink * green * (exp(-dd * dd) + 0.12 * exp(-dd * dd * 0.12));\n"
-               "  }\n"
-               "  vec3 e = texelFetch(t, ivec2(gl_FragCoord.xy), 0).rgb;\n"
-               "  vec3 m = 1.0 + pc.b.y * min(add / max(e * pc.c.rgb, vec3(0.03)), vec3(16.0));\n"
-               "  if (any(isnan(m)) || any(isinf(m))) m = vec3(1.0);\n"
-               "  o = vec4(m, 1.0);\n"
+               // (cm: clouds ~12 m, drifting ~40 cm/s; a wall's height moves its point along the sun; none past 30-50 m: the sky dome
+               //  and the battles' far mountains)
+               // (along the sun to the clouds' plane: its slope c.xy = sun.xz / sun.y - a wall's or a roof's point moves with its height)
+               "  vec2 Q = P.xz - P.y * pc.c.xy;\n"
+               // two layers, as EntroPi's Cloud Shadows: big slow clouds, their outline warped by a second noise (rounded, billowy), and
+               // smaller wisps drifting faster another way at 45 %; each by coverage and softness (its smoothstep), composited as
+               // "multiply inverse": lit = (1 - a) x (1 - 0.45 b)
+               "  float T = pc.a.z;\n"
+               "  vec2 g = Q / 1600.0 + T * vec2(0.022, 0.009);\n"
+               "  vec2 w = vec2(fbm(g * 0.7 + 3.1), fbm(g * 0.7 + 7.7));\n"
+               "  float n1 = clamp((fbm(g + 3.0 * (w - 0.5)) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
+               "  vec2 g2 = mat2(0.9, 0.44, -0.44, 0.9) * Q / 650.0 + T * vec2(0.05, -0.03);\n"
+               "  float n2 = clamp((fbm(g2 + 5.3) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
+               "  float cov = pc.c.z, s1 = 0.12, s2 = 0.3;\n"
+               "  float st1 = -s1 + (1.0 - cov) * (1.0 + 2.0 * s1), st2 = -s2 + (1.0 - 0.8 * cov) * (1.0 + 2.0 * s2);\n"
+               "  float a1 = smoothstep(st1 - s1, st1 + s1, n1), a2 = smoothstep(st2 - s2, st2 + s2, n2);\n"
+               "  float sh = (1.0 - (1.0 - a1) * (1.0 - 0.45 * a2)) * (1.0 - smoothstep(3000.0, 5000.0, (pc.vp * vec4(P, 1.0)).w));\n"
+               "  o = vec4(vec3(1.0 - pc.b.y * sh), 1.0);\n"
+               "  if (pc.b.z > 1.5) { vec2 c = floor(P.xz / 200.0); o = vec4(0.4 + 0.6 * vec3(h2(c), h2(c + 7.0), h2(c + 13.0)), 1.0); return; }\n"  // (=2: 2 m world cells, each its own tint)
+               "  if (pc.b.z > 0.0) { vec2 gl = step(fract(P.xz / 100.0), vec2(0.08)); o = vec4(1.0 - 0.8 * max(gl.x, gl.y)); }\n"  // (LARECOMP_CLOUDS_DEBUG: a 1 m world grid, dark lines)
                "}\n";
     }
     // Day/night: a constant colour, multiplied onto the scene by the blend (exec.c ssao_run)
