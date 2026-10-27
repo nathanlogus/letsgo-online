@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.5 (2026-10-25)
+
+- **Fix: at 60 fps, the wild battle that comes back after a ball breaks ran as a menu** - at 60 with in-between
+  images, and its menus flickered. It now stays at 30 fps like every battle.
+
+## 0.7.4 (2026-10-25)
+
+- **Fix: walking at 60 / 120 fps, the world gave little jumps** once per stride: the world's time step was a hair short
+  of 1/60 s, so the walking animation's timers turned over one update late and the player lost a step, then took a
+  double one. It is now rounded as the game's own 30 fps step. (Letting go of the stick still gives one double step.)
+- **Steadier 60 fps when something new comes on screen**: a draw whose pipeline is still being built waited up to 20 ms
+  a frame, sized for 30 fps; it now waits up to 60 % of the frame. The same walk at 60 fps: 1 % low 40 -> 55 fps.
+
 ## 0.7.3 (2026-10-24)
 
 - **Fix: a game data image the game can't read closed the game at start with 2002-6063** (issue #31). The setup now

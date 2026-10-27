@@ -9,6 +9,34 @@ Period: 14 and 15/10/2026. Current state and open items: [PROGRESS.md](PROGRESS.
 
 ---
 
+## 25/10/2026 — 60 fps: the world gave "little jumps" while walking, and the 1 % low (upstream 0.7.4)
+
+- **Report (user):** walking sideways at 60 fps, the world gave little jumps to keep up with the character, as if out of
+  sync; not at 30. Poor 1 % low.
+- **Measure:** `LARECOMP_CAM_LOG=1` walking at real pace: the camera moves 6.52 cm a frame, but once per stride it gave
+  -1.00 (only the fixed part of the motion: the animation added nothing), then a double step; at 30 fps, 13.04 every frame.
+  The bad frames fell when two of the player's animation timers (`f_70005fec30`: `t += rate x step x speed`, `[0,40]`)
+  turned over one frame late: `39 -> 40.000 (no turn) -> 1`.
+- **Cause:** the world's step at 60 fps was `1e9 / 60 = 16666666` ns (integer division, `follow_setting`): in float a hair
+  below 1/60 (`60 x step = 0.99999994`), so the timer stopped at 39.99999 instead of 40. The game's own at 30 is 33333334
+  (rounded up) and lands exactly.
+- **Fix:** `g1_for(rate)` rounds up (16666667 at 60, 8333334 at 120). The lost and double steps mid-walk are gone.
+  Still open: letting go of the stick at 60 fps gives one double step (the braking animation's first frame).
+- **1 % low:** the hitches (25-30 ms) were new pipelines: a draw whose pipeline is still compiling waits up to a budget per
+  frame (`wait_built`), fixed at 20 ms - sized for 30 fps. Now 60 % of the frame (20 / 10 / 5 ms at 30 / 60 / 120). Same
+  walk: 1 % low 40.4 -> 54.6 fps, frames over 22 ms 7 -> 0; skipped draws (an object one frame late) 74 -> 441 in ~1000 frames.
+
+## 25/10/2026 — Wild battles at 60 fps: the one after a ball breaks ran as a menu and flickered (upstream 0.7.5)
+
+- **Report (user):** at 60 fps battles run at 30, but the one that comes back after a ball breaks ran at 60 and its menus
+  flickered.
+- **Cause:** that battle is started from inside a world update (wildbattle's `field_hook`): `start_battle` calls
+  `fps60_scene_begin`, but the end of that update (fps60's `field_hook`) undid the mark, and the world doesn't run again
+  during the battle.
+- **Fix:** the battle event hook says it again on each update while our battle is active. Tested at 60 fps with balls
+  breaking: each return goes to `battle / capture: 30 fps` two or three frames in. The hidden opening's limit went from
+  900 to 1500 frames (one return at 60 fps reached 860 and was shown before its menu).
+
 ## 25/10/2026 — Black screen after a catch in battle
 
 - **Symptom:** after a catch on Route 1, the screen went dark and the game did not
