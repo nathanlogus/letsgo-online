@@ -5375,7 +5375,9 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
             if (!mat4_inverse(ao.vp, ivp)) memset(ivp, 0, sizeof ivp);
             for (int i = 0; i < 16; i++) pc[i] = (float)ivp[i];
             float rest[16] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 1000000) / 1000.0f, mo, hor[0], hor[1], hor[2], stars,
-                              zen[0], zen[1], zen[2], fog[3], fog[0], fog[1], fog[2], 0};
+                              zen[0], zen[1], zen[2], fog[3], fog[0], fog[1], fog[2],
+                              fmodf(daynight_hour() + 6.0f, 24.0f) / 12.0f};  // (the moon: 0 at 18:00 .. 1 at 6:00)
+            if (getenv("LARECOMP_MOON_VIEW")) rest[15] = -1;  // (tests: the moon on the screen)
             memcpy(pc + 16, rest, sizeof rest);
             VkPipeline p_copy = post_pipeline_ex("copy.frag", ao.cfmt, 0), p_atmo = post_pipeline_ex("atmo.frag", ao.cfmt, 2);
             TexBackend *ac = post_image_fmt(54, ao.cw, ao.ch, ao.cfmt);

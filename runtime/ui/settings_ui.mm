@@ -672,6 +672,8 @@ void ui_page_image_sound(void) {
     ImGui::EndDisabled();
     ui_toggle("##rtao", "Ray-traced occlusion", x, &g_settings.rt_ao);
     ui_tip("Soft shade where objects meet, traced on the GPU (about 0.9 ms). Needs a ray tracing graphics card.");
+    ui_toggle("##sharpsh", "Sharper sun shadows", x, &g_settings.sharp_shadows);
+    ui_tip("The sun's shadows drawn at twice the detail (about 0.3-0.9 ms). Takes effect at the next area change.");
     ui_toggle("##rtsun", "Ray-traced sun shadows", x, &g_settings.rt_sun);
     ui_tip("Small things - grass, fences, feet - cast sun shadows the game's shadow map misses, traced on the GPU. Needs a ray tracing graphics card.");
     ui_group_gap();

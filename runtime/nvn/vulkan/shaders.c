@@ -625,6 +625,21 @@ static const char *builtin_src(const char *name, int *stage) {
             "  if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {\n"
             "    float t = rayQueryGetIntersectionTEXT(rq, true) / pc.b.x;\n"
             "    sh = 1.0 - t * t;\n"
+            "  } else {\n"
+            // (no triangle: the cut-out leaves and grass are not in the structure - their cut is in the depth, so the ray is marched
+            //  through it as contact.frag does)
+            "    float jit = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"
+            "    vec3 st = c + n * (0.003 * c.z);\n"
+            "    int N = int(pc.b.w);\n"
+            "    for (int i = 0; i < N; i++) {\n"
+            "      float t = (float(i) + jit) / float(N);\n"
+            "      vec3 q = st + L * (pc.b.x * t);\n"
+            "      if (q.z <= 1.0) break;\n"
+            "      vec2 uv = vec2(q.x * pc.a.x, q.y * pc.a.y) / q.z * 0.5 + 0.5;\n"
+            "      if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) break;\n"
+            "      float dz = q.z - lin(texelFetch(dep, ivec2(uv * vec2(sz)), 0).r);\n"
+            "      if (dz > 0.002 * q.z && dz < pc.c.w) { sh = 1.0 - t * t; break; }\n"
+            "    }\n"
             "  }\n"
             "  float fade = clamp(2.0 - c.z / 2000.0, 0.0, 1.0);\n"
             "  o = vec4(1.0 - pc.b.y * sh * fade, 0.0, 0.0, 1.0);\n"
@@ -1718,16 +1733,20 @@ static const char *builtin_src(const char *name, int *stage) {
                "        vec3 O = A * (1.0 - 0.015) + D * bias;\n"
                // (4 rays toward points 60 cm around the source, turned per pixel: a soft edge instead of one ray's hard line)
                "        vec3 T = normalize(cross(D, abs(D.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0))), U = cross(D, T);\n"
-               "        float vis = 0.0;\n"
+               "        float rv = 0.0;\n"
                "        for (int r = 0; r < 4; r++) {\n"
                "          float an = a0 + float(r) * 1.5707963 + fract(pc.d.x * 0.618) * 6.2831853;\n"  // (turned each frame: TAA averages the 4 rays' pattern away)
                "          vec3 Br = B + 60.0 * (cos(an) * T + sin(an) * U), Dr = Br - O;\n"
                "          rayQueryEXT rq;\n"
                "          rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, O, 0.0, normalize(Dr), max(length(Dr) - 50.0, 0.0));\n"
                "          while (rayQueryProceedEXT(rq)) {}\n"
-               "          vis += rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT ? 0.12 : 1.0;\n"
+               "          rv += rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT ? 0.12 : 1.0;\n"
                "        }\n"
-               "        pool *= vis * 0.25;\n"
+               // (and through the depth toward the source: the cut-out leaves are not in the structure, but their cut is in the depth -
+               //  a tree's crown between a lamp and the ground shades the pool)
+               "        vec2 ks = vec2(2.0 / pc.c.x, 2.0 / pc.c.y);\n"
+               "        float sv = B.z > 1.0 ? vis(uv, z, B.xy / (B.z * ks) + 0.5, B.z, a0 / 6.2831853) : 1.0;\n"
+               "        pool *= min(rv * 0.25, sv);\n"
                "      }\n"
                "    }\n"
                "#endif\n"
@@ -2041,7 +2060,11 @@ static const char *builtin_src(const char *name, int *stage) {
                "        float tw = 0.65 + 0.35 * sin(pc.a.z * (1.5 + 3.0 * h3(cell + 7.0)) + hs * 60.0);\n"
                "        st = exp(-dot(f, f) * 14.0) * tw * (0.6 + 2.0 * h3(cell + 3.0));\n"
                "      }\n"
-               "      vec3 md = normalize(vec3(-0.35, 0.45, 0.82));\n"
+               // the moon by the hour (d.w: 0 at dusk .. 1 at dawn): up from the east, highest at midnight, down in the west; d.w < 0
+               // (LARECOMP_MOON_VIEW, tests): on the screen, above its middle
+               "      float mh = clamp(pc.d.w, 0.0, 1.0), maz = -1.3 + 2.6 * mh, mel = 0.12 + 0.55 * sin(3.14159 * mh);\n"
+               "      vec3 md = pc.d.w < 0.0 ? normalize(unproj(vec2(0.55, 0.3), pc.a.w > 0.5 ? 0.999 : 0.9995) - C)\n"
+               "                             : vec3(sin(maz) * cos(mel), sin(mel), cos(maz) * cos(mel));\n"
                "      float ca = dot(dir, md);\n"
                "      vec3 moon = vec3(0.95, 0.96, 1.0) * 2.2 * smoothstep(0.99935, 0.99955, ca) + vec3(0.3, 0.35, 0.5) * 0.25 * pow(max(ca, 0.0), 300.0);\n"
                "      col += pc.b.w * (vec3(0.8, 0.85, 1.0) * st * smoothstep(0.02, 0.25, el) + moon);\n"

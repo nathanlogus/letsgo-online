@@ -429,6 +429,26 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   1080p. Tried and dropped: the 8 nearest cells instead of 27 (the top-down camera sees a fly a metre up over ground well behind
   it - half-moon flies), and hashing "has a fly" first (no gain: a pixel group pays when any pixel finds one). The 8-cell try was
   swept into another session's commit (70ca149) and is undone here.
+- Sharper sun shadows (setting `sharp_shadows`, off by default; `LARECOMP_SHADOW_SCALE` wins): the shadow pass draws into a 2048-square
+  RGBA8 colour target as well as the depth, and the pass takes its size from the colour target - with only the depth made larger
+  the casters went into a quarter of it (every shadow gone). Both now take the 2x. +0.3-0.9 ms an image; a new area's targets take
+  the setting. `results/shadow_1x_vs_2x.png` (gfx/).
+- Ray-traced sun shadows (setting `rt_sun`, off by default; `contact_rt.frag`): the contact shadows' ray, traced through rt.c's
+  structure (built before the contact pass now), 150 cm; where no triangle is hit, the ray is marched through the depth as
+  contact.frag does - the cut-out leaves and grass are not in the structure but their cut is in the depth. 1.47 / 0.76 ms with the
+  blurs. Grass tufts, flowers and the bench get their small shadows (`rtsun_off_on.png`).
+- The ray-traced lamp shadows also march the depth toward the source (dl_apply's `vis`, unused since the ray tracing came in): a tree
+  crown between a lamp and the ground shades the pool. Not yet checked in an image (the run was stopped: low memory).
+- Light shafts from above (`beams.frag`, after the clouds, with the light shafts setting): the air lit through the clouds' gaps, 12
+  steps along the view ray (50 m) looked up in the cloud map; warm, strongest at dawn / dusk. 0.18 / 0.05 ms. `LARECOMP_BEAMS`.
+- Cross streaks of the night lights at the light map's size (`dl_streak.frag`, added by `dl_streak_add.frag`): dl_apply 1.19 -> 1.04
+  ms + 0.07 (Celadon 22:00, 1080p). The pools are most of dl_apply's cost.
+- The moon rises and sets with the hour (east at dusk, highest at midnight, west by dawn); `LARECOMP_MOON_VIEW=1` puts it on the
+  screen for a look up close. Not yet seen in an image (stopped run).
+- Ray-traced occlusion off by default (2.6 ms at 1080p; frame generation then halved its in-between images).
+- Town nights at 1080p, the player's settings (TAA, frame generation, SSAO / GI medium): Celadon 17.4 -> 15.8 ms (49-60 fps), Saffron
+  16.3 ms (54-60), 1440p Celadon 16.2 ms (40-44 fps), 4K 32 ms (20-30 fps: SSAO 3.1, night lights 4.8, fireflies 3.1 ms on the real
+  frame). Cinnabar: neither tour point lands in the town (trees at (0, 0); the sea at (1300, -4000)) - its centre still to find.
 - Checked, not issues: the world's first frames skip draws (pop-in) only while the screen is still black from the fade (frame
   1347 is whole); the summary screen's Pokémon stays untinted - a lit studio backdrop, not the world. A night freeze (the renderer
   stopped, the game ran on) happened once in 8 night walks and not again: `tests/scripts/hang_catch.sh` reruns and dumps every

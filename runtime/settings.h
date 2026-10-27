@@ -91,7 +91,8 @@ typedef struct {
     bool reflections;    // water (and wet ground) reflections (default on; ssr.frag)
     bool light_shafts;   // sun shafts at dawn and dusk (default on; shafts.frag)
     bool rt_ao;          // ray-traced ambient occlusion, on a GPU with ray queries (default off: 2.6 ms; rtao.frag)
-    bool rt_sun;         // ray-traced sun shadows: short rays toward the sun through the scene (default off; contact_rt.frag)
+    bool sharp_shadows;  // the sun's shadow map at 2x (textures.c tex_shadow_k; default off: +0.3-0.9 ms; a new map takes it)
+    bool rt_sun;       // ray-traced sun shadows: short rays toward the sun through the scene (default off; contact_rt.frag)
     bool moving_sun;     // the sun crosses the sky with the hour: long morning / evening shadows (default on; runtime/daynight.c)
     int weather;         // 0 clear, 1 rain, 2 changing, 3 cloudy, 4 storm, 5 snow, 6 fog (runtime/daynight.c daynight_weather; default 0)
     bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
