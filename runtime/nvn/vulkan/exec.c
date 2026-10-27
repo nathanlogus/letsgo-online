@@ -1021,7 +1021,31 @@ bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 
 // (LARECOMP_VK_PROF) called once per presented frame: frames over 50 ms are logged with where their time went.
 // present_ns: time in backend_present's acquire/blit/present.
+// Always on (LARECOMP_HITCH_MS, default 50; 0 off): a present that came over that long after the one before is logged
+// as "[slow]" with what this backend did meanwhile - draws that waited for or skipped their shader, programs and
+// pipelines built on the workers, GPU waits, uploads (the 2 s counters, read as deltas: a reset between counts as 0).
+static void slow_frame(uint64_t frame, uint64_t present_ns) {
+    static long ms = -1;
+    if (ms < 0) ms = getenv("LARECOMP_HITCH_MS") ? atol(getenv("LARECOMP_HITCH_MS")) : 50;
+    static uint64_t last_t, l_wait, l_draws, l_skip, l_up, l_sw, l_tr, l_sp, l_pi;
+    static int l_comp, nlog;
+    uint64_t now = SDL_GetTicksNS(), tr = atomic_load(&stat_translate_ns), sp = atomic_load(&stat_spirv_ns), pi = atomic_load(&stat_pipe_ns);
+    int comp = atomic_load(&stat_compiles);
+#define D(c, l) ((c) >= (l) ? (c) - (l) : (c))
+    if (ms > 0 && last_t && now - last_t > (uint64_t)ms * 1000000 && nlog < 400) {
+        nlog++;
+        LOG("[slow] present %llu: %.0f ms | shaders: %.1f ms waited, %llu draws skipped, %d built (workers: translate %.0f, spirv %.0f, "
+            "pipelines %.0f ms) | GPU waits %.1f ms, present %.1f ms, %llu draws, upload %.1f MB\n", (unsigned long long)frame,
+            (now - last_t) / 1e6, D(stat_shader_wait_ns, l_sw) / 1e6, (unsigned long long)D(stat_skipped, l_skip),
+            comp >= l_comp ? comp - l_comp : comp, D(tr, l_tr) / 1e6, D(sp, l_sp) / 1e6, D(pi, l_pi) / 1e6,
+            (cum_wait - l_wait) / 1e6, present_ns / 1e6, (unsigned long long)(cum_draws - l_draws), D(stat_upload_bytes, l_up) / 1048576.0);
+    }
+#undef D
+    last_t = now, l_wait = cum_wait, l_draws = cum_draws, l_skip = stat_skipped, l_up = stat_upload_bytes, l_sw = stat_shader_wait_ns;
+    l_tr = tr, l_sp = sp, l_pi = pi, l_comp = comp;
+}
 void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
+    slow_frame(frame, present_ns);
     if (!prof) return;
     static uint64_t last_t, l_exec, l_wait, l_draws, l_subs;
     uint64_t now = SDL_GetTicksNS();

@@ -410,3 +410,12 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
 - Clouds, second step: the noise is made once a frame into a 768 x 768 map of the clouds' plane (`clouds_map.frag`, 192 m around the
   camera, 25 cm a texel, its corner on the texel grid) and each pixel samples it: 0.48 -> ~0.21-0.27 ms (another game shared the GPU
   in that run). The sun's slope is held to 1.5 so all that is in view (50 m) falls on the map.
+- Hitches: every present over 50 ms is now logged as `[slow]` (LARECOMP_HITCH_MS; 0 off) with the shader waits, skipped
+  draws, programs built and GPU waits since the one before. Entering the world: ~5 frames of 70-140 ms, each with its
+  20 ms shader-wait budget spent and hundreds of draws skipped; walking afterwards built nothing.
+- The GLSL cache (cache/glsl.pak) was cold at every start: builds running side by side reset it in turn, and Windows
+  refused the reset while the other had it open, so both appended to an 800 MB pak neither could use (read whole at each
+  start, ~1.2 s). Each build now has its own `cache/glsl-<build>.pak`; others are deleted when free. Warm: world-entry
+  translation 118-226 -> 20-59 ms on the workers. A start-up read-ahead of the listed translations and their SPIR-V
+  (LASRecomp's shader prep, adapted) was tried and dropped: world entry was the same with and without it (113 vs 110 ms
+  worst frame) - the time left is pipelines and the per-frame wait budget, not reading caches.

@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include <sys/stat.h>
+#include <dirent.h>
 
 #include "platform.h"  // (mkdir)
 #include "shader.h"
@@ -2309,7 +2310,7 @@ static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, co
 
 // ---------------------------------------------------------- GLSL disk cache
 // Entering the world translates ~370 different programs (~1190 translations: programs share their shaders): ~1 s of
-// CPU on the workers before their SPIR-V (cached on its own: vulkan/shaders.c) could even be looked up. cache/glsl.pak
+// CPU on the workers before their SPIR-V (cached on its own: vulkan/shaders.c) could even be looked up. cache/glsl-<build>.pak
 // keeps each translation's ShaderInfo and source, found again by a key of everything the output depends on: the
 // program's bytes (headers + instructions up to its end), the stage, the ShaderKey's fields, the heap's base and size
 // (in the global memory code) and the research switches the translator reads (LARECOMP_NO_DISCARD,
@@ -2321,7 +2322,7 @@ static ShaderInfo *translate(const uint8_t *blob, size_t max_size, int stage, co
 // read; the pak is read up to its first bad record (a crash mid-write, a garbled file) and cut there, so the programs
 // after it are translated and written again. Failed translations are not stored. Off with LARECOMP_GLSL_CACHE=0; not
 // used for the debug outputs (LARECOMP_SAVE_MSL, maxwell_dbg_*).
-#define GLC_PAK "cache/glsl.pak"
+static char GLC_PAK[48], GLC_PAK_TMP[56];  // cache/glsl-<build>.pak and its .tmp (glc_names)
 #define GLC_MAGIC 0x31434c47u  // "GLC1": a record
 #define GLC_HEAD_MAGIC 0x504c4347u  // "GCLP": the pak
 static const char glc_build[32] = __DATE__ " " __TIME__;
@@ -2375,10 +2376,29 @@ static size_t glc_check(const uint8_t *d, size_t n) {
     memcpy(&sum, d + GLC_REC + ml, 8);
     return sum == glc_sum(d, GLC_REC + ml) ? GLC_REC + ml + 8 : 0;
 }
+// The pak is this build's own (a name from glc_build). With one pak for every build, reset when another build opened it,
+// each build rewrote it - and while the other build's game had it open Windows refused the reset, so both appended to a
+// pak neither could read again (cold at every start, 800 MB read in for nothing). Other builds' paks, and the old shared
+// one, are deleted when nothing has them open.
+static void glc_names(void) {
+    uint32_t b = 2166136261u;
+    for (int i = 0; i < 32; i++) b = (b ^ (uint8_t)glc_build[i]) * 16777619u;
+    snprintf(GLC_PAK, sizeof GLC_PAK, "cache/glsl-%08x.pak", b);
+    snprintf(GLC_PAK_TMP, sizeof GLC_PAK_TMP, "%s.tmp", GLC_PAK);
+    remove("cache/glsl.pak");
+    DIR *dir = opendir("cache");
+    for (struct dirent *e; dir && (e = readdir(dir));) {
+        char path[300];
+        snprintf(path, sizeof path, "cache/%s", e->d_name);
+        if (!strncmp(e->d_name, "glsl-", 5) && strcmp(path, GLC_PAK) && strcmp(path, GLC_PAK_TMP)) remove(path);
+    }
+    if (dir) closedir(dir);
+}
 // (under glc_lock) the pak read in: its records indexed; a pak of another build, or none, made anew; one with a bad
 // record cut before it
 static void glc_open(void) {
     glc_opened = true;
+    glc_names();
     uint8_t *d = NULL;
     long n = 0;
     FILE *f = fopen(GLC_PAK, "rb");
@@ -2409,11 +2429,11 @@ static void glc_open(void) {
             memcpy(d, &mg, 4), memcpy(d + 4, &sz, 4), memcpy(d + 8, glc_build, sizeof glc_build);
         }
         mkdir("cache", 0755);
-        if ((f = fopen(GLC_PAK ".tmp", "wb"))) {
+        if ((f = fopen(GLC_PAK_TMP, "wb"))) {
             bool ok = fwrite(d, 1, good, f) == good;
             fclose(f);
             if (ok) remove(GLC_PAK);  // (Windows' rename does not replace)
-            if (!ok || rename(GLC_PAK ".tmp", GLC_PAK) != 0) remove(GLC_PAK ".tmp");
+            if (!ok || rename(GLC_PAK_TMP, GLC_PAK) != 0) remove(GLC_PAK_TMP);
         }
         if (n) fprintf(stderr, "[glsl] %s: %s, %zu translations kept\n", GLC_PAK, n < GLC_HEAD || mg != GLC_HEAD_MAGIC || good == GLC_HEAD ?
                    "another build's (or unreadable): started again" : "cut at a bad record", glc_n);
