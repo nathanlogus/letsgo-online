@@ -34,6 +34,7 @@ area at 2x. Not Switch captures.* ▶ [Showcase video](https://youtu.be/mGk-wBu1
 - Experimental **two-controller local co-op input** (the second gamepad joins through a simulated shake; overworld joining, movement and viewport follow have been tried in-game)
 - Experimental **social online co-op** with independent saves, remote trainer avatars, coloured button nameplates, and Friends controls in Communicate → Play With Others, the launcher or F8 ([setup and limits](docs/COOP-ONLINE.md)). **R3 / F10** opens an eight-emote wheel with animated speech bubbles in the overworld.
 - Experimental **wild battles** (enabled by default): classic combat, defeat XP and catching from the battle Bag on Eevee 1.0.0; plus **skip controller selection**
+- Experimental **Let's Go Online accounts and Mystery Gifts**: sign in on the launcher's **Account** page, link your save, and claim gifts (items or Pokémon) from the **Gifts** page or with a code. They arrive through the game's own **Mystery Gift → Get via internet**, which our service now answers ([Online services](#online-services))
 - Shaders cached on disk
 
 ## Launcher
@@ -91,6 +92,28 @@ packs: translations, textures, models). Tick the ones to use; where two change t
 Mods of the game's code (exefs, IPS, cheats) don't work. Tested with the Brazilian Portuguese fan translation by
 **Pokémon Switch Brasil** (not included; distributed by its authors). The launcher and settings are in English only.
 
+## Online services
+
+Let's Go Online runs as one Docker Compose project, `server/accounts/compose.yml`:
+
+- **Accounts and Mystery Gift API**: accounts, linked saves, gift campaigns, codes and claims (PostgreSQL). A claimed
+  gift becomes a one-time Mystery Gift card that the game receives in its own Mystery Gift menu and records in the save;
+  the launcher then confirms the delivery. Gifts can be items (from the 207 that can safely be given) or any of the 153
+  Pokémon in Let's Go, with level, shiny, nature, IVs, moves and Poké Ball.
+- **Admin dashboard** at `/admin/`: create campaigns (with item and Pokémon pickers and a live card preview), publish or
+  pause them, make codes, see claims, manage players, watch and close co-op rooms, and read the activity log. Staff sign
+  in with Keycloak.
+- **Co-op relay**: the social co-op server ([docs/COOP-ONLINE.md](docs/COOP-ONLINE.md)).
+- **Keycloak** (optional profile `identity`): sign-in, with a Let's Go login theme for the game's clients.
+
+Setup, configuration and operations: [server/accounts/README.md](server/accounts/README.md). Design and status:
+[docs/ACCOUNTS-MYSTERY-GIFTS.md](docs/ACCOUNTS-MYSTERY-GIFTS.md) and its
+[roadmap](docs/ACCOUNTS-MYSTERY-GIFTS-ROADMAP.md).
+
+The dashboard's and the login theme's artwork (game textures and art from the official Let's Go website) is collected
+from your own game files and the website into a local folder by `server/accounts/dashboard/collect_assets.py`, and is
+never committed.
+
 ## Known issues
 
 - 60 / 120 fps and frame generation are experimental; battles and captures stay at 30 fps
@@ -98,6 +121,7 @@ Mods of the game's code (exefs, IPS, cheats) don't work. Tested with the Brazili
 - Switching to TAA while playing shows one or two black frames
 - The 2x interface shows a few frames of thin stripes during an area change
 - Nintendo's online features, local wireless, and the Poké Ball Plus aren't supported. The separate social co-op relay is experimental; shared battles, trades and story progression are not implemented.
+- Let's Go Online Mystery Gifts are experimental. Receiving item cards in the game's Mystery Gift is verified on Eevee 1.0.0; receiving Pokémon cards, the full launcher-to-game delivery and entering codes in the game's **Get with code/password** screen are not verified in the game yet, and in-game codes need Eevee 1.0.0.
 
 Crashes: please open an issue with `lasrecomp.log` ([CONTRIBUTING.md](CONTRIBUTING.md)). What changed in each
 release: [CHANGELOG.md](CHANGELOG.md).
@@ -109,6 +133,10 @@ release: [CHANGELOG.md](CHANGELOG.md).
   text, frame generation (FSR 3.1's, then the in-house 2x / 3x / 4x), 120 fps and the walking fix, skipping the
   controller screen, the menus' look, the Xbox controller layout, SSAO Ultra
 - **Pokémon Switch Brasil**: the Brazilian Portuguese fan translation used in testing
+- **[PKHeX](https://github.com/kwsch/PKHeX)**: its Let's Go save and Mystery Gift card formats and game data guided the
+  Mystery Gift work (test tools only; the item, Pokémon and move catalog was generated from it)
+- The dashboard's style follows the official [Let's Go website](https://pokemonletsgo.pokemon.com/); the project icon
+  is a Poké Ball drawn after its favicon. Pokémon images © Nintendo, Creatures, GAME FREAK, The Pokémon Company
 - Libraries: SDL 3, FFmpeg (LGPL), Dear ImGui, Vulkan Memory Allocator, shaderc, SMAA, AMD FidelityFX (FSR 1, FSR 3.1),
   bcdec, stb, waifu2x-ncnn-vulkan, the Baloo 2 font (OFL), Capstone, Unicorn, PyInstaller, Zig
 
