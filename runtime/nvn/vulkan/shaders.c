@@ -1824,11 +1824,13 @@ static const char *builtin_src(const char *name, int *stage) {
     // clouds: their shadows drifting over the ground. The pixel's surface point (as dl_ff) -> its point on the ground along the sun ->
     // two layers of warped fractal gradient noise scrolling with the wind; multiplied onto the scene. Depth (0); a = (width, height, seconds, depth mode),
     // b = (y flip, strength, -, -).
-    if (!strcmp(name, "clouds.frag")) {
+    // clouds_map: the cloud shadow over a 192 m square of the clouds' plane (768 x 768, 25 cm a texel; exec.c dn_run), which
+    // clouds.frag samples per pixel - the noise per screen pixel was 0.48 ms at 1080p, twice with frame generation. a = (the
+    // square's corner x, z in cm, seconds, coverage).
+    if (!strcmp(name, "clouds_map.frag")) {
         *stage = STAGE_FRAGMENT;
         return "#version 450\n"
-               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
-               "layout(push_constant) uniform P { layout(row_major) mat4 ivp; vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"  // c = (sun slope x, z, coverage, -)
+               "layout(push_constant) uniform P { vec4 a; } pc;\n"
                "layout(location = 0) out vec4 o;\n"
                // (an integer hash: the sin() one lost its precision on the octaves' large cell numbers - straight-edged patches)
                "float h2(vec2 c) { uvec2 q = uvec2(ivec2(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u;\n"
@@ -1848,19 +1850,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  return s / (1.0 - exp2(-float(n)));\n"
                "}\n"
                "void main() {\n"
-               "  o = vec4(1.0);\n"
-               "  vec2 uv = gl_FragCoord.xy / pc.a.xy;\n"
-               "  ivec2 dsz = textureSize(dep, 0);\n"
-               "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
-               "  if (d >= 0.999999) return;\n"
-               "  vec4 nd = vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
-               "  vec4 wp = pc.ivp * nd;\n"
-               "  if (abs(wp.w) < 1e-6) return;\n"
-               "  vec3 P = wp.xyz / wp.w;\n"
-               // (cm: clouds ~12 m, drifting ~40 cm/s; a wall's height moves its point along the sun; none past 30-50 m: the sky dome
-               //  and the battles' far mountains)
-               // (along the sun to the clouds' plane: its slope c.xy = sun.xz / sun.y - a wall's or a roof's point moves with its height)
-               "  vec2 Q = P.xz - P.y * pc.c.xy;\n"
+               "  vec2 Q = pc.a.xy + gl_FragCoord.xy * 25.0;\n"
                // two layers, as EntroPi's Cloud Shadows: big slow clouds, their outline warped by a second noise (rounded, billowy), and
                // smaller wisps drifting faster another way at 45 %; each by coverage and softness (its smoothstep), composited as
                // "multiply inverse": lit = (1 - a) x (1 - 0.45 b)
@@ -1870,10 +1860,40 @@ static const char *builtin_src(const char *name, int *stage) {
                "  float n1 = clamp((fbm(g + 3.0 * (w - 0.5), 4) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
                "  vec2 g2 = mat2(0.9, 0.44, -0.44, 0.9) * Q / 650.0 + T * vec2(0.05, -0.03);\n"
                "  float n2 = clamp((fbm(g2 + 5.3, 3) - 0.5) * 2.4 + 0.5, 0.0, 1.0);\n"
-               "  float cov = pc.c.z, s1 = 0.12, s2 = 0.3;\n"
+               "  float cov = pc.a.w, s1 = 0.12, s2 = 0.3;\n"
                "  float st1 = -s1 + (1.0 - cov) * (1.0 + 2.0 * s1), st2 = -s2 + (1.0 - 0.8 * cov) * (1.0 + 2.0 * s2);\n"
                "  float a1 = smoothstep(st1 - s1, st1 + s1, n1), a2 = smoothstep(st2 - s2, st2 + s2, n2);\n"
-               "  float sh = (1.0 - (1.0 - a1) * (1.0 - 0.45 * a2)) * (1.0 - smoothstep(3000.0, 5000.0, (pc.d.y / ((pc.a.w > 0.5 ? d * 2.0 - 1.0 : d) + pc.d.x))));\n"
+               "  o = vec4(1.0 - (1.0 - a1) * (1.0 - 0.45 * a2), 0.0, 0.0, 1.0);\n"
+               "}\n";
+    }
+    // clouds: the cloud shadows drifting over the ground (exec.c dn_run), multiplied onto the scene: each pixel's point in the world
+    // (cm), along the sun to the clouds' plane, looked up in clouds_map. Depth (0), the map (1). c = (sun slope x, z, -, the map's
+    // corner z), b.w: its corner x.
+    if (!strcmp(name, "clouds.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D map;\n"
+               "layout(push_constant) uniform P { layout(row_major) mat4 ivp; vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float h2(vec2 c) { uvec2 q = uvec2(ivec2(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u;\n"
+               "  h = (h ^ (h >> 16)) * 2246822519u; h = (h ^ (h >> 13)) * 3266489917u; h ^= h >> 16; return float(h) * (1.0 / 4294967296.0); }\n"
+               "void main() {\n"
+               "  o = vec4(1.0);\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.a.xy;\n"
+               "  ivec2 dsz = textureSize(dep, 0);\n"
+               "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
+               "  if (d >= 0.999999) return;\n"
+               "  vec4 nd = vec4(uv.x * 2.0 - 1.0, pc.b.x > 0.5 ? 1.0 - uv.y * 2.0 : uv.y * 2.0 - 1.0, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "  vec4 wp = pc.ivp * nd;\n"
+               "  if (abs(wp.w) < 1e-6) return;\n"
+               "  vec3 P = wp.xyz / wp.w;\n"
+               // (cm: clouds ~12 m, drifting ~40 cm/s; none past 30-50 m: the sky dome and the battles' far mountains)
+               // (along the sun to the clouds' plane: its slope c.xy = sun.xz / sun.y - a wall's or a roof's point moves with its height)
+               "  vec2 m = (P.xz - P.y * pc.c.xy - vec2(pc.b.w, pc.c.w)) / 19200.0;\n"
+               "  vec2 e = min(m, 1.0 - m);\n"  // (outside the map: none, faded over its last 5 %)
+               "  float sh = texture(map, m).r * clamp(min(e.x, e.y) * 20.0, 0.0, 1.0)\n"
+               "           * (1.0 - smoothstep(3000.0, 5000.0, (pc.d.y / ((pc.a.w > 0.5 ? d * 2.0 - 1.0 : d) + pc.d.x))));\n"
                "  o = vec4(vec3(1.0 - pc.b.y * sh), 1.0);\n"
                "  if (pc.b.z > 1.5) { vec2 c = floor(P.xz / 200.0); o = vec4(0.4 + 0.6 * vec3(h2(c), h2(c + 7.0), h2(c + 13.0)), 1.0); return; }\n"  // (=2: 2 m world cells, each its own tint)
                "  if (pc.b.z > 0.0) { vec2 gl = step(fract(P.xz / 100.0), vec2(0.08)); o = vec4(1.0 - 0.8 * max(gl.x, gl.y)); }\n"  // (LARECOMP_CLOUDS_DEBUG: a 1 m world grid, dark lines)

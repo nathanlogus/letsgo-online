@@ -5266,14 +5266,27 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
             float L[3] = {0.4f, 1, 0.3f}, slope[2];
             if (!sun_dir(fx_frame(), L) || L[1] < 0.2f) L[0] = 0.4f, L[1] = 1, L[2] = 0.3f;
             slope[0] = L[0] / L[1], slope[1] = L[2] / L[1];
+            {   float sl = sqrtf(slope[0] * slope[0] + slope[1] * slope[1]);  // (at most 1.5: what the 50 m in view reaches stays on the map)
+                if (sl > 1.5f) slope[0] *= 1.5f / sl, slope[1] *= 1.5f / sl; }
             {   static int said;
                 if (said++ == 300) LOG("[clouds] sun (%.2f, %.2f, %.2f)%s\n", L[0], L[1], L[2], sun.frame == fx_frame() && sun.votes > 0 ? "" : " (fixed slant: no shadow map light)"); }
             float rest[12] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 40000000) / 1000.0f, mo, 0.0f /* (as mv.frag) */,
                               cl_k * (1.0f - 0.67f * night) * (1.0f + 0.6f * wx.cloud), getenv("LARECOMP_CLOUDS_DEBUG") ? (float)atof(getenv("LARECOMP_CLOUDS_DEBUG")) : 0.0f, 0,
                               slope[0], slope[1], cover + (0.85f - cover) * wx.cloud, 0};  // (cloudy / rain / storm: overcast)
             memcpy(pc + 16, rest, sizeof rest);
+            // (the map: 192 m around the camera's point on the clouds' plane, its corner on the 25 cm texel grid - no crawl as it moves)
+            double nz = mo > 0.5f ? -1.0 : 0.0, cw = ivp[14] * nz + ivp[15];  // (the camera: the near plane's centre)
+            if (fabs(cw) < 1e-9) cw = 1;
+            double cx = (ivp[2] * nz + ivp[3]) / cw, cy = (ivp[6] * nz + ivp[7]) / cw, cz = (ivp[10] * nz + ivp[11]) / cw;
+            pc[23] = 25.0f * floorf((float)(cx - cy * slope[0]) / 25.0f - 384.0f);
+            pc[27] = 25.0f * floorf((float)(cz - cy * slope[1]) / 25.0f - 384.0f);
+            TexBackend *cm = post_image(56, 768, 768);
+            float pm[8] = {pc[23], pc[27], rest[2], rest[10]};
             vk_full_barrier(cb);
-            post_pass_view(cb, post_pipeline_ex("clouds.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+            post_pass_view(cb, post_pipeline("clouds_map.frag"), NULL, 0, post_view(cm), 768, 768, pm, 32, false, false);
+            vk_full_barrier(cb);
+            VkImageView ci[4] = {dv, post_view(cm)};
+            post_pass_view(cb, post_pipeline_ex("clouds.frag", ao.cfmt, 1), ci, 2, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
         }
         gp_mark(cb, "ours: atmosphere");
         static int atmo = -1;  // LARECOMP_ATMO=0: no sky colours, stars or haze by hour (atmo.frag, runtime/daynight.c daynight_atmo)

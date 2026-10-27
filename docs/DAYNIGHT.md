@@ -407,3 +407,6 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   fireflies make theirs once per pixel instead of up to 5 times. The frame measured 13.7 ms.
 - The moving sun's search for the game's copies (16 MB read) retried every frame for up to 120 frames after a load; now every
   15 frames, 8 times, comparing one word first.
+- Clouds, second step: the noise is made once a frame into a 768 x 768 map of the clouds' plane (`clouds_map.frag`, 192 m around the
+  camera, 25 cm a texel, its corner on the texel grid) and each pixel samples it: 0.48 -> ~0.21-0.27 ms (another game shared the GPU
+  in that run). The sun's slope is held to 1.5 so all that is in view (50 m) falls on the map.
