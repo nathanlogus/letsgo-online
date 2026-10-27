@@ -12,6 +12,8 @@ float daynight_rain(void);
 // The weather, each 0..1 (the setting: clear / rain / changing / cloudy / storm / snow / fog; LARECOMP_WEATHER=<name>)
 typedef struct { float rain, snow, fog, cloud, storm; } Weather;
 void daynight_weather(Weather *w);
+// The moving sun: the game's light tables turned by the hour (each outdoor frame, exec.c)
+void daynight_sun_update(void);
 // The scene's multiplier (linear light) when the cycle is on and the world is on screen (not a battle or capture).
 bool daynight_tint(float rgb[3]);
 // Night lights: a texture (content key, exec.c tex_content_key >> 32) that glows, as the multiplier its draw should end up

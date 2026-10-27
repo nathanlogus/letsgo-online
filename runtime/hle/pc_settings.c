@@ -75,6 +75,7 @@ static const Row rows[] = {
     TG("Sky and haze", "The sky's colours, stars and distance haze follow the hour. Needs Day and night.", sky_fx, WITH_DN),
     TG("Water reflections", "The pond and the sea reflect what is around them; wet ground too in the rain.", reflections, WITH_DN),
     TG("Light shafts", "Rays of sunlight through trees and roofs at dawn and dusk.", light_shafts, WITH_DN),
+    TG("Moving sun", "The sun crosses the sky with the hour: long shadows in the morning and evening. Needs Day and night.", moving_sun, WITH_DN),
     TG("Ray-traced occlusion", "Soft shade where objects meet, traced on the GPU. Needs a ray tracing graphics card.", rt_ao, ALWAYS),
     PC("TAA sharpness", "Sharpen the TAA image. Available when anti-aliasing is set to TAA.", taa_sharpness, 0, 1, WITH_TAA),
     TG("Object motion", "Track moving objects as well as the camera for TAA, FSR 3.1 and frame generation.", mv_objects, ALWAYS),

@@ -381,3 +381,18 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
 - Checked: the Options rows (Weather to Cloudy, Cloud shadows 40 -> 30, saved); storm in the Center and snow in Mt. Moon - both
   clear; snow in a night battle; the Mart door walking at 60 fps / TAA / frame generation - steady (the doorway is bright: the
   game's bloom on its pale glass); the game's sun does not move with the hour, so the clouds' projection never goes low.
+
+## Moving sun (2026-10-27)
+
+- The game's sun is fixed: `field/draw_env/default/EnvShadowLight.gfblt` (the shadow map's light, (0.395, -0.819, -0.415)) and
+  `EnvDirLight0-2.gfblt` (the shading's), a float3 at byte 40. `fs.c` notes where each loads (`note_sun`); the game reads them
+  once and keeps its own copies (found 2 MB around each table, `sun_find`: the shadow light ~30 KB away, the shading's 3), and
+  writes per-frame constant buffers from those. `daynight_sun_update` (each outdoor frame) turns every direction: azimuth
+  +-70 degrees from 6:00 to 18:00 (east to west), height from 40 % of the game's at the ends to all of it at noon; night holds the
+  evening's. Writes are checked: a place whose value is neither the original nor what was written is left alone (reused memory).
+- Setting `moving_sun` (Options "Moving sun", default on, with day and night); `LARECOMP_MOVING_SUN=0/1`; research:
+  `LARECOMP_SUN_TEST=x,y,z` (into the tables at load), `LARECOMP_SUN_SCAN=1` (heap search), `LARECOMP_SUN_SKIP=<bits>`.
+- `results/moving_sun_8_12_16.png`: at 8:00 the lamp's shadow falls back and left, at noon the game's short shadows, at 16:00 long
+  shadows to the right; the shading turns with it. The clouds follow (they read the shadow map's light).
+- Regression found on the way: the 2x sun shadow map (`LARECOMP_SHADOW_SCALE`) removed every sun shadow - default back to 1
+  (the game's), and a comment that had swallowed the end of `tex_shadow_k` (it returned garbage after the first call) fixed.

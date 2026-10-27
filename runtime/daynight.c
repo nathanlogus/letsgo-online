@@ -205,3 +205,18 @@ int daynight_glow_colorkey(unsigned key, float mul[3]) {
         }
     return 0;
 }
+
+// The moving sun (runtime/services/fs.c fs_sun_apply: the game's light tables, read each frame): from 6:00 to 18:00 its azimuth sweeps
+// 140 degrees around the game's own (east to west), its height from 40 % of the game's at the ends of the day to all of it at noon;
+// the night holds the evening's. Setting moving_sun; LARECOMP_MOVING_SUN=0 / 1.
+void fs_sun_apply(float daz, float ek);
+void daynight_sun_update(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("LARECOMP_MOVING_SUN") ? atoi(getenv("LARECOMP_MOVING_SUN")) != 0 : -1;
+    bool on = (env >= 0 ? env : g_settings.moving_sun) && (g_settings.daynight || getenv("LARECOMP_HOUR"));  // (day / night off: the game's sun)
+    float h = daynight_hour(), t = 0;
+    if (on) t = fminf(fmaxf((h - 12.0f) / 6.0f, -1.0f), 1.0f);
+    fs_sun_apply(t * 1.2217f, 1.0f - 0.6f * t * t);  // (off: the game's own, written back)
+    {   static int n; extern void fs_sun_scan(void);  // (research: LARECOMP_SUN_SCAN=1 - once, 200 frames into the world)
+        if (getenv("LARECOMP_SUN_SCAN") && ++n == 200) fs_sun_scan(); }
+}

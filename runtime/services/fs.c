@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -387,9 +388,100 @@ static void note_env(const char *path) {
     if (v && v != g_env_set) { g_env_set = v; LOG("[fs] light set: %.*s\n", (int)strcspn(e, "/"), e); }
 }
 
+// The outdoor sun (runtime/daynight.c daynight_sun): the light tables' direction (float3 at byte 40 of EnvShadowLight.gfblt - the
+// shadow map's light - and EnvDirLight0-2 - the shading's), where the game read them. fs_sun_tables hands them over.
+static uint8_t *g_sun_tab[4];
+static float g_sun_orig[4][3], g_sun_last[4][3];
+static uint8_t *g_sun_copy[4][4];  // (the game's own copies of each direction near its table, after the load: sun_find)
+static bool g_sun_found;
+// The game's copies, once after a load: 2 MB around each table searched for its float3 (the table itself left out). The game
+// reads the tables once and keeps its own (the shadow light: one copy ~30 KB away); the per-frame constant buffers are rewritten
+// from those.
+static void sun_find(void) {
+    static int tries;
+    int total = 0;
+    g_sun_found = true;
+    extern uint64_t kernel_heap_size(void);
+    const uint8_t *hlo = (const uint8_t *)(uintptr_t)0x7240000000ull, *hhi = hlo + kernel_heap_size();
+    for (int i = 0; i < 4; i++) {
+        memset(g_sun_copy[i], 0, sizeof g_sun_copy[i]);
+        if (!g_sun_tab[i]) continue;
+        const uint8_t *lo = g_sun_tab[i] - (2 << 20), *hi = g_sun_tab[i] + (2 << 20);
+        if (lo < hlo) lo = hlo;
+        if (hi > hhi) hi = hhi;
+        int n = 0;
+        for (const uint8_t *q = lo; q + 12 <= hi && n < 4; q += 4)
+            if (q != g_sun_tab[i] + 40 && (!memcmp(q, g_sun_last[i], 12) || !memcmp(q, g_sun_orig[i], 12))) g_sun_copy[i][n++] = (uint8_t *)q;
+        total += n;
+        if (n || tries == 119) LOG("[sun] table %d: %d copies near it\n", i, n);
+    }
+    if (!total && ++tries < 120) g_sun_found = false;  // (the game may make its copies a little after the read: again, up to ~4 s)
+}
+// Each frame (runtime/daynight.c daynight_sun_update): the directions turned by the hour - azimuth + daz (radians, about the
+// vertical), elevation x ek - into the tables and the game's copies of them. One whose value is neither its original nor what was
+// written last was reused by the game: left alone from then on.
+void fs_sun_apply(float daz, float ek) {
+    if (!g_sun_found) sun_find();
+    for (int i = 0; i < 4; i++) {
+        const float *o = g_sun_orig[i];
+        float hl = sqrtf(o[0] * o[0] + o[2] * o[2]), el = atan2f(-o[1], hl), az = atan2f(o[2], o[0]);
+        if (hl < 1e-4f) continue;  // (straight down: nothing to turn)
+        el *= ek, az += daz;
+        float v[3] = {cosf(el) * cosf(az), -sinf(el), cosf(el) * sinf(az)}, cur[3];
+        uint8_t *at[5] = {g_sun_tab[i] ? g_sun_tab[i] + 40 : NULL, g_sun_copy[i][0], g_sun_copy[i][1], g_sun_copy[i][2], g_sun_copy[i][3]};
+        { static int skip = -1; if (skip < 0) skip = getenv("LARECOMP_SUN_SKIP") ? atoi(getenv("LARECOMP_SUN_SKIP")) : 0;  // (research: bit i = leave table i alone)
+          if (skip & (1 << i)) continue; }
+        for (int c = 0; c < 5; c++) {
+            if (!at[c]) continue;
+            memcpy(cur, at[c], 12);
+            if (memcmp(cur, g_sun_orig[i], 12) && memcmp(cur, g_sun_last[i], 12) && memcmp(cur, v, 12)) {  // (v: a copy shared with another table, written already)
+                if (c) g_sun_copy[i][c - 1] = NULL; else g_sun_tab[i] = NULL;
+                static int nr;
+                if (nr++ < 8) LOG("[sun] table %d %s %d reused: left alone\n", i, c ? "copy" : "itself", c);
+                continue;
+            }
+            memcpy(at[c], v, 12);
+        }
+        memcpy(g_sun_last[i], v, 12);
+    }
+}
+// Research (LARECOMP_SUN_SCAN=1): where the game keeps its copies of the light directions - the heap searched once for each table's
+// float3, as written and negated (a light's "toward" vector); the hits logged.
+void fs_sun_scan(void) {
+    extern uint64_t kernel_heap_size(void);
+    const uint8_t *lo = (const uint8_t *)(uintptr_t)0x7240000000ull, *hi = lo + kernel_heap_size();
+    for (int i = 0; i < 4; i++) {
+        for (int neg = 0; neg < 2; neg++) {
+            float v[3];
+            for (int k = 0; k < 3; k++) v[k] = neg ? -g_sun_orig[i][k] : g_sun_orig[i][k];
+            int hits = 0;
+            for (const uint8_t *p = lo; p + 12 <= hi && hits < 12; p += 4)
+                if (!memcmp(p, v, 12)) { LOG("[sun] scan: table %d %s at %p (+%llx)\n", i, neg ? "negated" : "as is", (void *)p,
+                                              (unsigned long long)(p - lo)); hits++; }
+            LOG("[sun] scan: table %d %s: %d hit(s)\n", i, neg ? "negated" : "as is", hits);
+        }
+    }
+}
+int fs_sun_tables(uint8_t **out) { int n = 0; for (int i = 0; i < 4; i++) if (g_sun_tab[i]) out[n++] = g_sun_tab[i]; return n; }
+static void note_sun(const char *path, uint8_t *dst, uint64_t size) {
+    static const char *const names[4] = {"draw_env/default/EnvShadowLight.gfblt", "draw_env/default/EnvDirLight0.gfblt",
+                                         "draw_env/default/EnvDirLight1.gfblt", "draw_env/default/EnvDirLight2.gfblt"};
+    for (int i = 0; i < 4; i++)
+        if (strstr(path, names[i]) && size >= 52) {
+            g_sun_tab[i] = dst, g_sun_found = false;  // (a new load: its copies searched again)
+            memcpy(g_sun_orig[i], dst + 40, 12), memcpy(g_sun_last[i], dst + 40, 12);
+            static int n;
+            if (n++ < 8) { float v[3]; memcpy(v, dst + 40, 12); LOG("[sun] %s at %p: (%.3f, %.3f, %.3f)\n", names[i] + 17, (void *)dst, v[0], v[1], v[2]); }
+            const char *e = getenv("LARECOMP_SUN_TEST");  // (research: "x,y,z" written into the table as it loads)
+            float t[3];
+            if (e && sscanf(e, "%f,%f,%f", &t[0], &t[1], &t[2]) == 3) memcpy(dst + 40, t, 12);
+        }
+}
+
 static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
-    if (size < 4096) { const char *rp = romfs_file_at(off); if (rp) note_env(rp); }  // (the light tables are tiny files)
-    if (!ov_n) return pread(fd, dst, size, (off_t)off);
+    const char *rp = size < 4096 ? romfs_file_at(off) : NULL;
+    if (rp) note_env(rp);  // (the light tables are tiny files)
+    if (!ov_n) { ssize_t r = pread(fd, dst, size, (off_t)off); if (rp && r == (ssize_t)size) note_sun(rp, dst, size); return r; }
     uint64_t done = 0;
     while (done < size) {
         uint64_t o = off + done, n = size - done;

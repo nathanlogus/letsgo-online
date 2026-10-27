@@ -5515,6 +5515,7 @@ static void ssao_run(void) {
     }
     {   float t[3];  // (day / night: at the scene's end - dn_scene_end - after the late blended draws, as the refraction copy they read)
         dn_pending = daynight_tint(t) ? fr : 0;
+        if (!ip_replaying) daynight_sun_update();  // (the moving sun: the game's light tables, for the next frame)
     }
     vk_full_barrier(cb);
     ao.busy = false;

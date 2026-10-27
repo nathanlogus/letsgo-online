@@ -165,10 +165,10 @@ static bool tex_scalable(const NvnTexture *t) {
 // The sun's shadow map (a square depth render target, 1024+: Let's Go's is 2048²) made K times as large, so its shadows' edges are K
 // times finer: the passes into it take its scale for their viewport (exec.c begin_pass, renderer_texture_scale), the lookups are
 // in normalized coordinates. Not `scalable` (that follows the output resolution and frame generation's reduced images).
-// LARECOMP_SHADOW_SCALE=<1..4> (default 2; 1 = the game's).
+// LARECOMP_SHADOW_SCALE=<1..4> (default 1 = the game's; research: 2 lost every shadow).
 static int tex_shadow_k(const NvnTexture *t) {
     static int k = -1;
-    if (k < 0) { k = getenv("LARECOMP_SHADOW_SCALE") ? atoi(getenv("LARECOMP_SHADOW_SCALE")) : 2; if (k < 1) k = 1; if (k > 4) k = 4; }
+    if (k < 0) { k = getenv("LARECOMP_SHADOW_SCALE") ? atoi(getenv("LARECOMP_SHADOW_SCALE")) : 1; if (k < 1) k = 1; if (k > 4) k = 4; }
     if (k == 1 || t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width != t->height || t->width < 1024 || t->width > 4096 ||
         !renderer_format_is_depth(t->format))
         return 1;
