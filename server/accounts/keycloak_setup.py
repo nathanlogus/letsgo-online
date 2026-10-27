@@ -133,6 +133,7 @@ def main():
     parser.add_argument("--client-id", default="letsgo-native")
     parser.add_argument("--redirect-uri", default="http://127.0.0.1:7386/callback")
     parser.add_argument("--staff-mfa", action="store_true", help="The dashboard client: require a one-time code, reported as amr mfa")
+    parser.add_argument("--login-theme", help="This client's sign-in theme (e.g. letsgo: server/keycloak-theme); other clients keep the realm's")
     args = parser.parse_args()
     parsed = urlsplit(args.base_url)
     if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
@@ -142,6 +143,12 @@ def main():
         result = ensure_client(client, args.realm, args.client_id, args.redirect_uri)
         if args.staff_mfa:
             result["staff_mfa"] = ensure_staff_mfa(client, args.realm, args.client_id)
+        if args.login_theme is not None:
+            path = "/admin/realms/" + quote(args.realm, safe="")
+            app = client.get(path + "/clients/" + result["internal_id"]); app.raise_for_status(); app = app.json()
+            app.setdefault("attributes", {})["login_theme"] = args.login_theme
+            client.put(path + "/clients/" + result["internal_id"], json=app).raise_for_status()
+            result["login_theme"] = args.login_theme
         discovery = client.get(f"/realms/{quote(args.realm, safe='')}/.well-known/openid-configuration")
         discovery.raise_for_status()
         metadata = discovery.json()

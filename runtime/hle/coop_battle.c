@@ -331,10 +331,12 @@ static uint64_t journal_turn_state(Cpu *cpu,uint64_t controller){
                 if(rawp && dir && *dir)snprintf(rp,sizeof rp,"%s/turn-raw.txt",dir);else if(rawp && strlen(rawp)>1)snprintf(rp,sizeof rp,"%s",rawp);
                 FILE *r=rp[0]?fopen(rp,"a"):NULL;
                 uint8_t set=*(uint8_t *)(uintptr_t)(mon+0x212);if(set>24)set=24;
-                for(unsigned o=0x78;o<0x2e0;o+=8){uint64_t v=*(uint64_t *)(uintptr_t)(mon+o);
+                for(unsigned o=0x78;o<0x2e0;o+=8){uint64_t v=*(uint64_t *)(uintptr_t)(mon+o),all=v;
                     for(unsigned i=0;i<8;i++)if(raw_unused(o+i,set))v&=~(0xffull<<8*i);
                     if(!guest(v,1))hash_field(&raw,v,8);
-                    if(r)fprintf(r,"%u %u %03x %016llx%s\n",ally_round,trainer,o,(unsigned long long)(guest(v,1)?0:v),guest(v,1)?" ptr":"");}
+                    // the skipped bytes are dumped too (" unhashed <value>"), so each run can check the skip list
+                    if(r)fprintf(r,"%u %u %03x %016llx%s",ally_round,trainer,o,(unsigned long long)(guest(v,1)?0:v),guest(v,1)?" ptr":"");
+                    if(r)fprintf(r,v!=all && !guest(v,1)?" unhashed %016llx\n":"\n",(unsigned long long)all);}
                 if(r)fclose(r);
             }
         }

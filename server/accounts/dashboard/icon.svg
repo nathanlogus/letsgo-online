@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Let's Go Recomp: a Poke Ball, drawn after the official Let's Go website's favicon (its proportions and colours)
+       so it stays sharp at every icon size. Poke Ball design (c) Nintendo, Creatures, GAME FREAK, The Pokemon Company.
+       tools/make_icons.py builds icon.ico, icon.icns and icon_1024.png from this file. -->
+  <defs>
+    <clipPath id="ball"><circle cx="512" cy="512" r="442"/></clipPath>
+  </defs>
+  <circle cx="512" cy="512" r="494" fill="#000"/>
+  <g clip-path="url(#ball)">
+    <rect x="0" y="0" width="1024" height="512" fill="#f01616"/>
+    <rect x="0" y="512" width="1024" height="512" fill="#fff"/>
+    <rect x="0" y="472" width="1024" height="80" fill="#000"/>
+  </g>
+  <circle cx="512" cy="512" r="183" fill="#000"/>
+  <circle cx="512" cy="512" r="124" fill="#fff"/>
+  <circle cx="512" cy="512" r="64" fill="#000"/>
+</svg>

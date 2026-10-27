@@ -1,0 +1,72 @@
+/* Let's Go sign-in (the dashboard's look: the official Let's Go website's meadow, Jura headings, teal frame, orange pill
+   button). Images from ../img (mounted artwork; plain gradients without it). Pokemon images (c) Nintendo, Creatures,
+   GAME FREAK, The Pokemon Company. */
+@import url("https://fonts.googleapis.com/css2?family=Jura:wght@600;700&family=Open+Sans:wght@400;600;700&display=swap");
+
+:root {
+  --lg-ink: #41444f; --lg-muted: #737787; --lg-teal: #2fd1c1; --lg-teal-ink: #0f9e91; --lg-yellow: #fdd23f; --lg-orange: #f6913a;
+  --lg-rainbow: linear-gradient(90deg, #b5e83c, #fdd23f 25%, #2fd1c1 50%, #4fb3f6 75%, #b28cff);
+  --pf-v5-global--FontFamily--text: "Open Sans", "Segoe UI", system-ui, sans-serif;
+  --pf-v5-global--FontFamily--heading: "Jura", "Segoe UI", system-ui, sans-serif;
+}
+
+body#keycloak-bg {
+  min-height: 100vh; font-family: "Open Sans", "Segoe UI", system-ui, sans-serif; color: var(--lg-ink);
+  background: url("../img/site-meadow.jpg") center 70% / cover no-repeat fixed, linear-gradient(180deg, #5aa9f0, #9ed6ff 45%, #9fe08a 70%, #5cb85c) fixed;
+}
+/* Pikachu and Eevee either side of the card */
+body#keycloak-bg::before, body#keycloak-bg::after {
+  content: ""; position: fixed; bottom: 0; width: min(30vw, 380px); height: min(56vh, 480px); z-index: 0; pointer-events: none;
+  background: center bottom / contain no-repeat; filter: drop-shadow(0 10px 18px #0005);
+}
+body#keycloak-bg::before { left: max(0px, calc(50% - 680px)); background-image: url("../img/site-pikachu.png"); }
+body#keycloak-bg::after { right: max(0px, calc(50% - 680px)); background-image: url("../img/site-eevee.png"); }
+@media (max-width: 900px) { body#keycloak-bg::before, body#keycloak-bg::after { display: none; } }
+
+.pf-v5-c-login { position: relative; z-index: 1; background: none; min-height: 100vh; }
+.pf-v5-c-login__container { padding-top: 3vh; }
+
+/* The header: the Let's Go Online logo in a round white badge (as on the dashboard) instead of the realm name */
+#kc-header { margin-bottom: 22px; }
+#kc-header-wrapper {
+  width: 168px; height: 168px; margin: 0 auto; padding: 0; font-size: 0; color: transparent; border-radius: 50%;
+  background: url("../img/logo.png") center / 144px auto no-repeat, #fff;
+  box-shadow: 0 10px 26px #00285a55, 0 0 0 6px #fff, 0 0 0 10px var(--lg-teal);
+}
+
+/* The card: white with the site's thick teal frame */
+.pf-v5-c-login__main {
+  background: #fffffff0; border: 4px solid var(--lg-teal); border-radius: 34px; box-shadow: 0 20px 50px #00285a55;
+  overflow: hidden; padding-top: 6px;
+}
+.pf-v5-c-login__main::before { content: ""; display: block; height: 6px; margin: -6px 0 6px; background: var(--lg-rainbow); }
+.pf-v5-c-login__main-header { padding-top: 22px; }
+#kc-page-title, .pf-v5-c-title { font-family: "Jura", "Segoe UI", system-ui, sans-serif; font-weight: 700; letter-spacing: .05em; color: var(--lg-ink); }
+.pf-v5-c-form__label-text, .pf-v5-c-form__label { font-weight: 600; color: var(--lg-muted); }
+.pf-v5-c-form-control {
+  --pf-v5-c-form-control--BorderRadius: 14px; --pf-v5-c-form-control--after--BorderBottomColor: transparent;
+  --pf-v5-c-form-control--before--BorderColor: #e3e6ee; --pf-v5-c-form-control--hover--after--BorderBottomColor: var(--lg-teal);
+  --pf-v5-c-form-control--focus--after--BorderBottomColor: var(--lg-teal);
+  border-radius: 14px;
+}
+.pf-v5-c-form-control:focus-within { box-shadow: 0 0 0 4px #2fd1c133; border-radius: 14px; }
+
+/* Buttons: the site's yellow-orange pill */
+.pf-v5-c-button.pf-m-primary {
+  --pf-v5-c-button--m-primary--BackgroundColor: transparent; --pf-v5-c-button--m-primary--hover--BackgroundColor: transparent;
+  background: linear-gradient(90deg, var(--lg-yellow), var(--lg-orange)); border-radius: 50px; border: 0;
+  font-family: "Jura", "Segoe UI", system-ui, sans-serif; font-weight: 700; font-size: 17px; letter-spacing: .08em;
+  padding: 12px 24px; box-shadow: 0 6px 18px #f6913a4d; text-shadow: 0 1px 2px #b5550f66;
+}
+.pf-v5-c-button.pf-m-primary:hover { filter: brightness(1.05) saturate(1.1); box-shadow: 0 8px 22px #f6913a66; }
+.pf-v5-c-button.pf-m-secondary, .pf-v5-c-button.pf-m-tertiary { border-radius: 50px; font-family: "Jura", sans-serif; font-weight: 700; }
+a, .pf-v5-c-button.pf-m-link { color: var(--lg-teal-ink); }
+.pf-v5-c-check__input { accent-color: var(--lg-teal); }
+.pf-v5-c-alert { border-radius: 16px; }
+.pf-v5-c-login__main-footer-band { background: #f3f6fb; border-top: 1px dashed #e3e6ee; }
+
+/* The copyright line under the card */
+.pf-v5-c-login__container::after {
+  content: "Pokémon images © Nintendo, Creatures, GAME FREAK, The Pokémon Company. Let's Go Recomp online services.";
+  display: block; margin: 18px auto 24px; text-align: center; font-size: 12px; color: #fff; text-shadow: 0 1px 4px #00285acc;
+}

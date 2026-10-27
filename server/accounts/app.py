@@ -622,12 +622,13 @@ def create_app(config=None, verifier=None):
     @app.get("/admin/", include_in_schema=False)
     def admin_page():
         return FileResponse(dashboard / "index.html", headers={"Content-Security-Policy":
-            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; "
+            "default-src 'none'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; "
+            "connect-src 'self'; img-src 'self' data:; "
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'", "Referrer-Policy": "no-referrer"})
 
     @app.get("/admin/{name}", include_in_schema=False)
     def admin_asset(name: str):
-        if name not in ("app.js", "style.css"):
+        if name not in ("app.js", "style.css", "icon.svg"):  # (icon.svg: a copy of docs/icon/icon.svg, the project's icon)
             fail(404, "not_found")
         return FileResponse(dashboard / name)
 
@@ -635,9 +636,9 @@ def create_app(config=None, verifier=None):
     def admin_art(name: str):
         # (the artwork folder is optional: without it the page keeps its plain colours)
         path = Path(config.dashboard_assets) / name if config.dashboard_assets else None
-        if not path or not re.fullmatch(r"[a-z0-9-]{1,32}\.png", name) or not path.is_file():
+        if not path or not re.fullmatch(r"[a-z0-9-]{1,32}\.(png|jpg)", name) or not path.is_file():
             fail(404, "not_found")
-        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
+        return FileResponse(path, media_type="image/png" if name.endswith(".png") else "image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
     @app.post("/v1/admin/accounts/{account_id}/status")
     def account_status(account_id: UUID, body: AccountAction, request: Request, authorization: str = Header(default="")):

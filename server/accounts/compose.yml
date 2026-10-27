@@ -99,6 +99,11 @@ services:
     depends_on:
       keycloak-db: { condition: service_healthy }
     ports: ["127.0.0.1:8080:8080"]
+    volumes:
+      # The Let's Go sign-in theme (server/keycloak-theme; for the Let's Go clients: keycloak_setup --login-theme letsgo)
+      # and its artwork, the dashboard's art folder (never committed).
+      - ../keycloak-theme/letsgo:/opt/keycloak/themes/letsgo:ro
+      - ${DASHBOARD_ART_DIR:-../../tests/config/dashboard-assets}:/opt/keycloak/themes/letsgo/login/resources/img:ro
     environment:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak

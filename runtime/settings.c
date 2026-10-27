@@ -60,7 +60,7 @@ Settings g_settings = {
     .sky_fx = true,
     .reflections = true,
     .light_shafts = true,
-    .rt_ao = true,
+    .rt_ao = false,  // (2.6 ms a frame at 1080p on top of SSAO: frame generation then halves its in-between images)
     .moving_sun = true,
     .wild_battle = true,
     .render_thread = true,
@@ -135,6 +135,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "reflections")) g_settings.reflections = atoi(val) != 0;
     else if (!strcmp(key, "light_shafts")) g_settings.light_shafts = atoi(val) != 0;
     else if (!strcmp(key, "rt_ao")) g_settings.rt_ao = atoi(val) != 0;
+    else if (!strcmp(key, "rt_sun")) g_settings.rt_sun = atoi(val) != 0;
     else if (!strcmp(key, "moving_sun")) g_settings.moving_sun = atoi(val) != 0;
     else if (!strcmp(key, "weather")) g_settings.weather = atoi(val) >= 0 && atoi(val) <= 6 ? atoi(val) : 0;
     else if (!strcmp(key, "resolution")) {
@@ -331,6 +332,7 @@ void settings_save(void) {
     fprintf(f, "reflections = %d\n", g_settings.reflections);
     fprintf(f, "light_shafts = %d\n", g_settings.light_shafts);
     fprintf(f, "rt_ao = %d\n", g_settings.rt_ao);
+    fprintf(f, "rt_sun = %d\n", g_settings.rt_sun);
     fprintf(f, "moving_sun = %d\n", g_settings.moving_sun);
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");

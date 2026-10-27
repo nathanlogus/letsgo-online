@@ -171,6 +171,19 @@ The page loads its artwork from `ACCOUNT_DASHBOARD_ASSETS` (Compose: `DASHBOARD_
 python server/accounts/dashboard/collect_assets.py tests/runs/ui-assets-export-<date> assets tests/config/dashboard-assets
 ```
 
+The collector also crops the game's Pokemon and item icons, and downloads artwork from the official Let's Go website (https://pokemonletsgo.pokemon.com/: meadow, sky, patterns, logos, Pikachu, Eevee). Pokemon images are (c) Nintendo, Creatures, GAME FREAK, The Pokemon Company; the dashboard and the sign-in page show that notice, and the folder holds a `NOTICE.txt`. The page's style follows that website (Jura headings, rainbow bands, teal frames, orange buttons); fonts come from Google Fonts.
+
+Migration `003_catalog.sql` holds the dashboard's catalog: the 207 giftable items with their Let's Go bag pocket, the 153 Let's Go Pokemon (with Alolan forms) and the 226 Let's Go moves, generated from PKHeX by `tests/tools/gift-items <save> catalog`. `GET /v1/admin/catalog` serves it to the pickers; a Pokemon campaign whose moves aren't in it is refused (`move_not_in_lets_go`).
+
+**Sign-in theme.** `server/keycloak-theme/letsgo` is a Keycloak login theme in the same style (on `keycloak.v2`), mounted into the Keycloak container with the same art folder. It applies to the Let's Go clients only; other clients of the realm keep its theme:
+
+```powershell
+tests/venvs/account-gift-api/Scripts/python.exe -m server.accounts.keycloak_setup --credentials-env tests/config/letsgo-accounts.env --client-id letsgo-admin --redirect-uri http://127.0.0.1:7385/admin/ --login-theme letsgo
+tests/venvs/account-gift-api/Scripts/python.exe -m server.accounts.keycloak_setup --credentials-env tests/config/letsgo-accounts.env --login-theme letsgo
+```
+
+Preview without a server: `python tests/tools/dashboard_mock.py`, then open `http://127.0.0.1:7399/admin/` (sample data, the real catalog and art).
+
 Operator CLI also provides `revoke-sessions <account-uuid>` and `prune-rate-buckets`. Run rate-bucket cleanup daily. Domain-separated digest secret rotation invalidates sessions, existing code lookup and request digests; preserve it with backups and plan a migration rather than changing it in place.
 
 ## Hosting and recovery

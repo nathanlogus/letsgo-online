@@ -621,7 +621,7 @@ static void window_as_game(SDL_Window *win) {
         if (vk_frame_begin(black)) vk_frame_end(NULL);
 }
 
-// The project's icon (the Master Ball: icon.png beside the exe, or docs/icon), for the sidebar
+// The project's icon (the Poke Ball: icon.png beside the exe, or docs/icon), for the sidebar
 extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);  // runtime/nvn/vulkan/imgui_glue.cpp
 static ImTextureID icon_texture(void) {
     char p[1100];

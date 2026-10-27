@@ -3660,6 +3660,11 @@ static bool rt_ao(void) {
     extern bool game_title(void);
     return rt_ao_strength() > 0 && g_settings.rt_ao && g_vk.rt && !game_title() && rt_available();
 }
+// Ray-traced sun shadows (contact_rt.frag, contact_run): the rt_sun setting, on a device that has it, out of the title screen
+static bool rt_sun(void) {
+    extern bool game_title(void);
+    return g_settings.rt_sun && g_vk.rt && !game_title() && rt_available();
+}
 
 // Night, the water's draw (its fragment shader: found with tests/scripts/bisect_tex.py on Viridian's pond; LARECOMP_WATER_FSHASH=<hex>,...
 // adds others): the moon's sheen inside that shader (ShaderKey.glowck 2). LARECOMP_DL_MOON=0 turns it off.
@@ -3829,7 +3834,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.glsl = fkey.glsl = 1;
     vkey.jitter = jitter_on() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (TAA, FSR 3)
     vkey.zoom = cam_zoom() != 1.0f && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0] ? (uint8_t)lroundf(cam_zoom() * 100.0f) : 0;  // (LARECOMP_ZOOM)
-    vkey.xfb = (rt_lights() || rt_ao()) && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (ray tracing: rt.c - the lights' shadows, the occlusion)
+    vkey.xfb = (rt_lights() || rt_ao() || rt_sun()) && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (ray tracing: rt.c - the lights' shadows, the occlusion)
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -4746,9 +4751,9 @@ static uint64_t rf_count(void) { return renderer_present_count(); }
 // fmt: the output's format; blend 1: the output multiplies what is there (SSAO onto the game's scene, colour only),
 // 2: replaces the colour, 3: is added to it (GI)
 static VkPipeline post_pipeline_ex(const char *fs, VkFormat fmt, int blend) {
-    // (about 30 passes: with 16 entries, FSR 3.1 + SSAO + GI made some of them again every frame)
-    static struct { const char *fs; VkFormat fmt; int blend; VkPipeline p; } cache[64];
-    for (int i = 0; i < 64; i++) if (cache[i].p && cache[i].fs == fs && cache[i].fmt == fmt && cache[i].blend == blend) return cache[i].p;
+    // (about 50 passes and formats: with 16 entries, FSR 3.1 + SSAO + GI made some of them again every frame)
+    static struct { const char *fs; VkFormat fmt; int blend; VkPipeline p; } cache[128];
+    for (int i = 0; i < 128; i++) if (cache[i].p && cache[i].fs == fs && cache[i].fmt == fmt && cache[i].blend == blend) return cache[i].p;
     if (!post_layout) {
         VkDescriptorSetLayoutBinding b[7];  // (6: the optical flow's in-between image, flow_image)
         for (uint32_t i = 0; i < 6; i++)
@@ -4801,7 +4806,7 @@ static VkPipeline post_pipeline_ex(const char *fs, VkFormat fmt, int blend) {
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
     VkPipeline p;
     VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
-    for (int i = 0; i < 64; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].fmt = fmt; cache[i].blend = blend; cache[i].p = p; break; }
+    for (int i = 0; i < 128; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].fmt = fmt; cache[i].blend = blend; cache[i].p = p; break; }
     return p;
 }
 static VkPipeline post_pipeline(const char *fs) { return post_pipeline_ex(fs, VK_FORMAT_R8G8B8A8_UNORM, 0); }
@@ -5153,11 +5158,18 @@ static void contact_run(VkCommandBuffer cb, VkImageView dv, uint32_t w, uint32_t
     // steps, 30 units - or the F12 Advanced page's)
     float pc[12] = {ao.proj[0], ao.proj[1], ao.proj[2], ao.proj[3], g_settings.contact_length, strength, mo,
                     (float)g_settings.contact_steps, lv[0], flip * lv[1], -lv[2], g_settings.contact_thickness};
-    VkPipeline p_c = post_pipeline("contact.frag"), p_blur = post_pipeline("ssao_blur.frag");
+    // (ray-traced with the rt_sun setting: the frame's acceleration structure - an in-between image traces N's - 150 cm)
+    bool traced = rt_sun() && (rt_built_frame == fr || ip_replaying) && rt_tlas();
+    if (traced) pc[4] = 150.0f;
+    else if (!g_settings.contact_on) return;
+    VkPipeline p_c = post_pipeline(traced ? "contact_rt.frag" : "contact.frag"), p_blur = post_pipeline("ssao_blur.frag");
     VkPipeline p_apply = post_pipeline_ex("ssao_apply.frag", ao.cfmt, 1);
     TexBackend *m0 = post_image(33, w, h), *m1 = post_image(34, w, h);
     gp_mark(cb, "ours: contact shadows%s", ip_replaying ? " (in-between)" : "");
+    post_tlas = traced ? rt_tlas() : VK_NULL_HANDLE;
+    vk_full_barrier(cb);
     post_pass_view(cb, p_c, &dv, 1, post_view(m0), w, h, pc, sizeof pc, false, false);
+    post_tlas = VK_NULL_HANDLE;
     float pb[8] = {ao.proj[0], ao.proj[1], ao.proj[2], ao.proj[3], 1, 0, mo, 0};
     VkImageView bx[4] = {post_view(m0), dv};
     post_pass_view(cb, p_blur, bx, 2, post_view(m1), w, h, pb, 32, false, false);
@@ -5261,6 +5273,17 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
                 if (!said && post_tlas) { said = true; LOG("[rt] lights pass: ray-traced shadows\n"); } }
             post_pass_view(cb, p_dl, ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
             post_tlas = VK_NULL_HANDLE;
+            if (dq[1] > 0) {  // cross streaks: at the light map's size (dl_streak.frag), then added (dl_streak_add.frag)
+                gp_mark(cb, "ours: light streaks");
+                TexBackend *sk = post_image_fmt(58, lw[0], lh[0], VK_FORMAT_R16G16B16A16_SFLOAT);
+                float ps[8] = {7.0f * (float)ao.ch / 720.0f / (float)ao.cw, 7.0f / 720.0f};
+                VkImageView si[4] = {post_view(lv[0])};
+                post_pass_view(cb, post_pipeline_ex("dl_streak.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), si, 1, post_view(sk), lw[0], lh[0], ps, 32, false, false);
+                vk_full_barrier(cb);
+                float pk2[8] = {night * dq[1], (float)ao.cw, (float)ao.ch, night};
+                VkImageView ki[4] = {post_view(cp), post_view(sk)};
+                post_pass_view(cb, post_pipeline_ex("dl_streak_add.frag", ao.cfmt, 3), ki, 2, ao.cview, ao.cw, ao.ch, pk2, 32, false, true);
+            }
             gp_mark(cb, "ours: fireflies");
             if (t0 > 0 && ao.vp_frame) {  // fireflies, placed in the world by this frame's camera (dl_ff.frag): they stay put as the camera moves
                 float pf[28];
@@ -5320,6 +5343,21 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
             vk_full_barrier(cb);
             VkImageView ci[4] = {dv, post_view(cm)};
             post_pass_view(cb, post_pipeline_ex("clouds.frag", ao.cfmt, 1), ci, 2, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+            // light shafts from above (beams.frag): the air lit through the clouds' gaps - warm and strongest at dawn and dusk, faint
+            // by day, none at night; with the light shafts setting. LARECOMP_BEAMS=<strength> (default 1; 0 off).
+            static float beams = -1;
+            if (beams < 0) beams = getenv("LARECOMP_BEAMS") ? (float)atof(getenv("LARECOMP_BEAMS")) : 1.0f;
+            float edge = 4.0f * night * (1.0f - night), bk = beams * (0.05f + 0.25f * edge) * (1.0f - night) * (dn[0] + dn[1] + dn[2]) / 3.0f;
+            gp_mark(cb, "ours: beams");
+            if (bk > 0.002f && g_settings.light_shafts) {
+                float pb[32];
+                memcpy(pb, pc, 16 * sizeof(float));
+                float rest2[16] = {(float)ao.cw, (float)ao.ch, mo, bk, (float)cx, (float)cy, (float)cz, 5000.0f,
+                                   slope[0], slope[1], pc[23], pc[27], 1.0f, 0.85f + 0.1f * (1 - edge), 0.65f + 0.3f * (1 - edge), 0};
+                memcpy(pb + 16, rest2, sizeof rest2);
+                vk_full_barrier(cb);
+                post_pass_view(cb, post_pipeline_ex("beams.frag", ao.cfmt, 3), ci, 2, ao.cview, ao.cw, ao.ch, pb, sizeof pb, false, true);
+            }
         }
         gp_mark(cb, "ours: atmosphere");
         static int atmo = -1;  // LARECOMP_ATMO=0: no sky colours, stars or haze by hour (atmo.frag, runtime/daynight.c daynight_atmo)
@@ -5545,10 +5583,10 @@ static void ssao_run(void) {
         }
         }
     }
-    if (g_settings.contact_on) contact_run(cb, dv, w, h, mo, fr);
-    // ray tracing (rt.c): the acceleration structures from this frame's captured triangles, once - for the occlusion here and the
-    // night lights' shadows (dn_run); then the ray-traced occlusion, multiplied onto the scene
-    rt_built_frame = (rt_lights() || rt_ao()) && rt_build(cb, fr, ao.proj) ? fr : 0;
+    // ray tracing (rt.c): the acceleration structures from this frame's captured triangles, once - for the sun shadows and the
+    // occlusion here and the night lights' shadows (dn_run); then the ray-traced occlusion, multiplied onto the scene
+    rt_built_frame = (rt_lights() || rt_ao() || rt_sun()) && rt_build(cb, fr, ao.proj) ? fr : 0;
+    if (g_settings.contact_on || rt_sun()) contact_run(cb, dv, w, h, mo, fr);
     if (rt_built_frame && rt_ao() && rt_tlas()) {
         gp_mark(cb, "ours: ray-traced occlusion%s", ip_replaying ? " (in-between)" : "");
         float pr[12] = {ao.proj[0], ao.proj[1], ao.proj[2], ao.proj[3], (float)ao.cw, (float)ao.ch, (float)(rf_count() % 64), mo,

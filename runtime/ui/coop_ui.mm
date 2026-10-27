@@ -1,11 +1,13 @@
 #include <SDL3/SDL.h>
 #include <stdio.h>
 #include <string.h>
+#include <atomic>
 #include "imgui.h"
 #include "settings_ui.h"
 #include "coop_ui.h"
 extern "C" {
 #include "../coop_net.h"
+#include "../coop_invite.h"
 #include "../coop_battle_link.h"
 #include "../coop_battle_names.h"
 uint64_t plat_now_ns(void);
@@ -89,6 +91,56 @@ void coop_battle_ui_draw(float scale) {
             if(ui_button("Back")){selected=-1;focus_move=true;}
         }
         ImGui::TextWrapped("No answer before time runs out: the NPC chooses only this turn.");
+    }
+    ImGui::End();
+}
+
+static std::atomic<bool> g_invite_open, g_invite_hovered;
+bool coop_invite_ui_captures(void) { return g_invite_open; }
+bool coop_invite_ui_hovered(void) { return g_invite_hovered; }
+
+void coop_invite_ui_draw(float scale, bool allowed) {
+    CoopTeamUp team={};coop_net_teamup(&team);CoopRemote peer={};
+    const char *name=coop_net_remote(&peer)?peer.name:"Your friend";
+    uint8_t local=coop_net_local_slot();uint64_t now=plat_now_ns();
+    static uint32_t answered,sent;static uint64_t toast_until,shown_at;static int result;
+    int mode=coop_invite_mode(&team,local,now,answered);
+    if(mode==2)sent=team.id;
+    else if(sent){int r=coop_invite_result(&team,local,sent);if(r>=0){sent=0;result=r;toast_until=r?now+4000000000ull:0;}}
+    bool incoming=mode==1 && allowed,waiting=mode==2 && allowed,toast=now<toast_until && allowed;
+    if(g_invite_open && !incoming){input_quarantine_pad();input_reset();}
+    if(!g_invite_open && incoming)shown_at=now;
+    g_invite_open=incoming;g_invite_hovered=false;
+    if(!incoming && !waiting && !toast)return;
+    ImGuiIO &io=ImGui::GetIO();
+    ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x*.5f,24*scale),ImGuiCond_Always,ImVec2(.5f,0));
+    ImGui::SetNextWindowSize(ImVec2((incoming?510:430)*scale,0),ImGuiCond_Always);
+    ImGuiWindowFlags flags=ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_AlwaysAutoResize;
+    if(!incoming)flags|=ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNav|(waiting?0:ImGuiWindowFlags_NoInputs);
+    static uint32_t focused;bool new_prompt=incoming && focused!=team.id;
+    if(new_prompt){ImGui::SetNavCursorVisible(true);ImGui::SetNextWindowFocus();focused=team.id;}
+    if(!incoming)focused=0;
+    ImGui::Begin("Tag-up invitation",nullptr,flags);
+    unsigned seconds=team.expires_ns>now?(unsigned)((team.expires_ns-now+999999999)/1000000000):0;
+    if(incoming){
+        // An A pressed for the game just as the pop-up appears must not answer it.
+        bool armed=now-shown_at>400000000ull;
+        bool back=ImGui::IsKeyPressed(ImGuiKey_Escape,false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight,false);
+        ImGui::TextWrapped("%s wants to tag up!",name);
+        ImGui::TextWrapped("Travel together; progress stays individual. %us",seconds);
+        if(team.reason==4)ImGui::TextWrapped("Move closer to %s, then accept again.",name);
+        if(new_prompt)ImGui::SetKeyboardFocusHere();
+        bool accept=ui_button("Accept");ImGui::SameLine();bool decline=ui_button("Decline") || back;
+        if(armed && (accept || decline) && coop_net_teamup_action(accept?1:2)){
+            answered=team.id;g_invite_open=false;input_quarantine_pad();input_reset();
+        }
+    } else if(waiting){
+        ImGui::Text("Waiting for %s... %us",name,seconds);ImGui::SameLine();
+        if(ui_button("Cancel"))coop_net_teamup_action(3);
+        g_invite_hovered=ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+    } else {
+        const char *messages[]={"","%s accepted. Tagged up!","%s declined the invitation.","%s did not answer in time.","%s disconnected."};
+        ImGui::Text(messages[result],name);
     }
     ImGui::End();
 }

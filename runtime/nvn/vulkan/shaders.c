@@ -494,7 +494,7 @@ static const char *builtin_src(const char *name, int *stage) {
     // in view space (x right, y as the image, z the distance: one handedness throughout), the normal from the nearer
     // neighbours (no smearing across silhouettes).
     if (!strcmp(name, "ssao.frag") || !strcmp(name, "ssao_blur.frag") || !strcmp(name, "ssao_temporal.frag") ||
-        !strcmp(name, "contact.frag")) {
+        !strcmp(name, "contact.frag") || !strcmp(name, "contact_rt.frag")) {
         *stage = STAGE_FRAGMENT;
         static const char *common =
             "#version 450\n"
@@ -607,14 +607,41 @@ static const char *builtin_src(const char *name, int *stage) {
             "  float fade = clamp(2.0 - c.z / 2000.0, 0.0, 1.0);\n"
             "  o = vec4(1.0 - pc.b.y * sh * fade, 0.0, 0.0, 1.0);\n"
             "}\n";
-        static char *src[4];
-        int k = !strcmp(name, "ssao_blur.frag") ? 1 : !strcmp(name, "ssao_temporal.frag") ? 2 : !strcmp(name, "contact.frag") ? 3 : 0;
+        // Ray-traced sun shadows (exec.c contact_run with the rt_sun setting): the same ray, traced through the scene's triangles
+        // (rt.c, view space as above, binding 6) - casters off the screen or behind something count, no thickness guess.
+        static const char *contact_rt =
+            "void main() {\n"
+            "  sz = textureSize(dep, 0);\n"
+            "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+            "  if (texelFetch(dep, p, 0).r >= 0.999999) { o = vec4(1.0); return; }\n"
+            "  vec3 c, n;\n"
+            "  surface(p, c, n);\n"
+            "  vec3 L = normalize(pc.c.xyz);\n"
+            "  if (dot(n, L) < 0.05) { o = vec4(1.0); return; }\n"
+            "  rayQueryEXT rq;\n"
+            "  rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, c + n * (2.0 + 0.003 * c.z), 0.0, L, pc.b.x);\n"
+            "  while (rayQueryProceedEXT(rq)) {}\n"
+            "  float sh = 0.0;\n"
+            "  if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT) {\n"
+            "    float t = rayQueryGetIntersectionTEXT(rq, true) / pc.b.x;\n"
+            "    sh = 1.0 - t * t;\n"
+            "  }\n"
+            "  float fade = clamp(2.0 - c.z / 2000.0, 0.0, 1.0);\n"
+            "  o = vec4(1.0 - pc.b.y * sh * fade, 0.0, 0.0, 1.0);\n"
+            "}\n";
+        static char *src[5];
+        int k = !strcmp(name, "ssao_blur.frag") ? 1 : !strcmp(name, "ssao_temporal.frag") ? 2 : !strcmp(name, "contact.frag") ? 3 :
+                !strcmp(name, "contact_rt.frag") ? 4 : 0;
         if (!src[k]) {
-            const char *body = k == 3 ? contact : k == 2 ? temporal : k ? blur : ao;
-            const char *pre = k == 0 || k == 3 ? vpos_src : "", *pre2 = k == 0 || k == 3 ? surf : "";
-            size_t n = strlen(common) + strlen(pre) + strlen(pre2) + strlen(body) + 1;
+            const char *body = k == 4 ? contact_rt : k == 3 ? contact : k == 2 ? temporal : k ? blur : ao;
+            const char *pre = k == 0 || k >= 3 ? vpos_src : "", *pre2 = k == 0 || k >= 3 ? surf : "";
+            // (the ray query: GLSL 460, its extension, the scene at binding 6 - in place of common's #version line)
+            const char *head = k == 4 ? "#version 460\n#extension GL_EXT_ray_query : require\n"
+                                        "layout(set = 0, binding = 6) uniform accelerationStructureEXT tlas;\n" : "#version 450\n";
+            const char *cm = common + strlen("#version 450\n");
+            size_t n = strlen(head) + strlen(cm) + strlen(pre) + strlen(pre2) + strlen(body) + 1;
             src[k] = malloc(n);
-            snprintf(src[k], n, "%s%s%s%s", common, pre, pre2, body);
+            snprintf(src[k], n, "%s%s%s%s%s", head, cm, pre, pre2, body);
         }
         return src[k];
     }
@@ -1720,20 +1747,7 @@ static const char *builtin_src(const char *name, int *stage) {
                // (pools, windows, lamps) kept - the lights stand out more
                "  float Lt = dot(e * m, vec3(0.2126, 0.7152, 0.0722));\n"
                "  m *= mix(1.0, mix(pc.f.x, 1.0, smoothstep(0.12, 0.7, Lt)), pc.a.w);\n"
-               // cross streaks (as its r.Bloom.Cross): 4 soft rays from each source, the light map's level 1 read along the row and the
-               // column (a lens effect: no depth test), added light (m += f / scene)
-               "  if (pc.f.y > 0.0) {\n"
-               "    vec2 uv0 = (vec2(p) + 0.5) / pc.c.zw, st = vec2(7.0 * pc.c.w / 720.0) / pc.c.zw;\n"
-               "    vec3 sk = vec3(0.0);\n"
-               // (level 0, only its strong texels: thin rays from lamps and window centres; level 1 smeared whole windows into boxes)
-               "    for (int i = 1; i <= 10; i++) {\n"
-               "      float w = exp(-float(i) * 0.3);\n"
-               "      vec2 ox = vec2(st.x * float(i), 0.0), oy = vec2(0.0, st.y * float(i));\n"
-               "      vec3 s4 = max(texture(l0, uv0 + ox).rgb - 0.6, 0.0) + max(texture(l0, uv0 - ox).rgb - 0.6, 0.0) + max(texture(l0, uv0 + oy).rgb - 0.6, 0.0) + max(texture(l0, uv0 - oy).rgb - 0.6, 0.0);\n"
-               "      sk += w * s4;\n"
-               "    }\n"
-               "    m += pc.a.w * pc.f.y * min(0.1 * sk * vec3(1.0, 0.85, 0.65) / max(e, vec3(0.06)), vec3(6.0));\n"
-               "  }\n"
+               // (the cross streaks: their own passes, dl_streak.frag at the light map's size and dl_streak_add.frag)
                "  vec2 ex = (vec2(p) + 0.5) / pc.c.zw * 2.0 - 1.0;\n"
                "  m *= mix(1.0, 1.0 - 0.2 * smoothstep(0.6, 1.3, sqrt(ex.x * ex.x * 0.8 + ex.y * ex.y)), pc.a.w);\n"
                // (the fireflies: their own pass, dl_ff.frag, in the world; the moon on water: inside the water's own shader, ShaderKey.glowck 2)
@@ -1830,6 +1844,45 @@ static const char *builtin_src(const char *name, int *stage) {
     // clouds: their shadows drifting over the ground. The pixel's surface point (as dl_ff) -> its point on the ground along the sun ->
     // two layers of warped fractal gradient noise scrolling with the wind; multiplied onto the scene. Depth (0); a = (width, height, seconds, depth mode),
     // b = (y flip, strength, -, -).
+    // dl_streak: cross streaks (as DQ HD-2D's r.Bloom.Cross) - 4 soft rays from each source, the light map's level 0 (only its
+    // strong texels: thin rays from lamps and window centres) read along the row and the column, a lens effect with no depth
+    // test. Made at the light map's size (in dl_apply, 40 reads on every full-size pixel: most of its 1.2 ms at 1080p); a = (the
+    // 7-pixel step in uv, x and y). dl_streak_add.frag puts it on.
+    if (!strcmp(name, "dl_streak.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D l0;\n"
+               "layout(push_constant) uniform P { vec4 a; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 uv0 = gl_FragCoord.xy / vec2(textureSize(l0, 0)), st = pc.a.xy;\n"
+               "  vec3 sk = vec3(0.0);\n"
+               "  for (int i = 1; i <= 10; i++) {\n"
+               "    float w = exp(-float(i) * 0.3);\n"
+               "    vec2 ox = vec2(st.x * float(i), 0.0), oy = vec2(0.0, st.y * float(i));\n"
+               "    vec3 s4 = max(texture(l0, uv0 + ox).rgb - 0.6, 0.0) + max(texture(l0, uv0 - ox).rgb - 0.6, 0.0) + max(texture(l0, uv0 + oy).rgb - 0.6, 0.0) + max(texture(l0, uv0 - oy).rgb - 0.6, 0.0);\n"
+               "    sk += w * s4;\n"
+               "  }\n"
+               "  o = vec4(sk, 1.0);\n"
+               "}\n";
+    }
+    // dl_streak_add: the streaks added to the scene (blend 3), as dl_apply had them (m += f / scene: the scene before the lights x f),
+    // with its vignette. The scene copy before the lights (0), the streaks (1); a = (night x strength, width, height, night).
+    if (!strcmp(name, "dl_streak_add.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D sk;\n"
+               "layout(push_constant) uniform P { vec4 a; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.a.yz, ex = uv * 2.0 - 1.0;\n"
+               "  vec3 e = texelFetch(t, ivec2(gl_FragCoord.xy), 0).rgb;\n"
+               "  vec3 f = pc.a.x * min(0.1 * texture(sk, uv).rgb * vec3(1.0, 0.85, 0.65) / max(e, vec3(0.06)), vec3(6.0));\n"
+               "  f *= mix(1.0, 1.0 - 0.2 * smoothstep(0.6, 1.3, sqrt(ex.x * ex.x * 0.8 + ex.y * ex.y)), pc.a.w);\n"
+               "  o = vec4(any(isnan(f)) || any(isinf(f)) ? vec3(0.0) : e * f, 1.0);\n"
+               "}\n";
+    }
     // ff_apply: the fireflies' light made at half size (dl_ff.frag, b.w = 2), bilinear, onto the scene as dl_ff's own multiplier
     // (exec.c dn_run: 2.3 ms at full size, 1080p). Scene copy (0), the light (1); a = (tint rgb, night).
     if (!strcmp(name, "ff_apply.frag")) {
@@ -1845,6 +1898,38 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec3 m = 1.0 + pc.a.w * min(add / max(e * pc.a.rgb, vec3(0.03)), vec3(16.0));\n"
                "  if (any(isnan(m)) || any(isinf(m))) m = vec3(1.0);\n"
                "  o = vec4(m, 1.0);\n"
+               "}\n";
+    }
+    // beams: light shafts seen from above (exec.c dn_run, after the clouds) - the air the sun reaches through the clouds' gaps,
+    // 12 steps along the view ray to its surface (50 m at most), each looked up in clouds_map along the sun; added. The screen-space
+    // shafts (shafts.frag) need the sun on the screen, which the top-down camera hardly ever has. Depth (0), the map (1);
+    // a = (width, height, depth mode, strength), b = (camera xyz, max distance cm), c = (sun slope x, z, map corner x, z), d = colour.
+    if (!strcmp(name, "beams.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D map;\n"
+               "layout(push_constant) uniform P { layout(row_major) mat4 ivp; vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  o = vec4(0.0);\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.a.xy;\n"
+               "  ivec2 dsz = textureSize(dep, 0);\n"
+               "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
+               "  vec4 wp = pc.ivp * vec4(uv * 2.0 - 1.0, pc.a.z > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "  if (abs(wp.w) < 1e-6) return;\n"
+               "  vec3 v = wp.xyz / wp.w - pc.b.xyz;\n"
+               "  float L = length(v), Lm = min(L, pc.b.w);\n"
+               "  if (L < 1.0) return;\n"
+               "  v /= L;\n"
+               "  float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"  // (a dither: TAA smooths the steps)
+               "  float lit = 0.0;\n"
+               "  for (int i = 0; i < 12; i++) {\n"
+               "    vec3 X = pc.b.xyz + v * Lm * (float(i) + j) / 12.0;\n"
+               "    vec2 m = (X.xz - X.y * pc.c.xy - pc.c.zw) / 19200.0;\n"
+               "    lit += 1.0 - texture(map, m).r;\n"
+               "  }\n"
+               "  o = vec4(pc.d.rgb * pc.a.w * (lit / 12.0) * (Lm / pc.b.w), 1.0);\n"
                "}\n";
     }
     // clouds_map: the cloud shadow over a 192 m square of the clouds' plane (768 x 768, 25 cm a texel; exec.c dn_run), which
@@ -2251,7 +2336,7 @@ static const char *builtin_src(const char *name, int *stage) {
 }
 
 VkShaderModule vk_builtin_shader(const char *name) {
-    static struct { char name[32]; VkShaderModule m; } cache[64];
+    static struct { char name[32]; VkShaderModule m; } cache[128];
     static int n;
     for (int i = 0; i < n; i++) if (!strcmp(cache[i].name, name)) return cache[i].m;
     int stage = 0;
@@ -2259,6 +2344,6 @@ VkShaderModule vk_builtin_shader(const char *name) {
     if (!src) FATAL("no built-in shader %s\n", name);
     VkShaderModule m = vk_compile_glsl(src, stage, name);
     if (!m) FATAL("built-in shader %s failed to compile\n", name);
-    if (n < 64) { snprintf(cache[n].name, sizeof cache[n].name, "%s", name); cache[n++].m = m; }
+    if (n < 128) { snprintf(cache[n].name, sizeof cache[n].name, "%s", name); cache[n++].m = m; }
     return m;
 }

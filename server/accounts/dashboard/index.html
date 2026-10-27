@@ -3,97 +3,181 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Let's Go Admin</title>
+<title>Mystery Gift Admin</title>
+<link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <script src="app.js" defer></script>
 </head>
 <body>
-<header>
-  <h1><img id="logo" src="art/logo.png" alt=""> Let's Go Admin</h1>
-  <nav id="tabs" hidden>
-    <button data-tab="campaigns" data-art="3" class="on"><span>Campaigns</span></button>
-    <button data-tab="accounts" data-art="0"><span>Accounts</span></button>
-    <button data-tab="relay" data-art="1"><span>Relay</span></button>
-    <button data-tab="audit" data-art="2"><span>Audit</span></button>
+<header class="topbar">
+  <nav class="tabs left" hidden>
+    <button data-tab="campaigns" class="on"><img class="art-only" src="art/present.png" alt=""><span>Campaigns</span></button>
+    <button data-tab="accounts"><img class="art-only" src="art/bag.png" alt=""><span>Players</span></button>
   </nav>
-  <span id="who"></span>
+  <a class="brand" href="/admin/" aria-label="Let's Go Online: Mystery Gift admin">
+    <img class="art-only" src="art/logo.png" alt="Let's Go Online">
+    <span class="brand-text">Mystery Gift</span>
+  </a>
+  <nav class="tabs right" hidden>
+    <button data-tab="relay"><img class="art-only" src="art/ball.png" alt=""><span>Co-op</span></button>
+    <button data-tab="audit"><img class="art-only" src="art/joyful.png" alt=""><span>Activity</span></button>
+  </nav>
+  <div id="who" class="who" hidden><span class="avatar" id="who-avatar"></span><span id="who-name"></span><button class="btn ghost small" id="signout" type="button">Sign out</button></div>
 </header>
-<main>
-  <p id="error" class="error" hidden></p>
-  <section id="signin" hidden>
-    <img id="present" src="art/present.png" alt="">
-    <h2>Sign in</h2>
-    <p>Sign in with your Johto account. Staff accounts with two-step sign-in can manage gifts; a session lasts 15 minutes.</p>
-    <button id="signin-button" type="button">Sign in with Keycloak</button>
-  </section>
 
-  <section id="campaigns" class="tab" hidden>
-    <h2>Campaigns</h2>
-    <div class="scroll"><table id="campaign-table"><thead><tr>
-      <th>Title</th><th>State</th><th>Window (UTC)</th><th>Gift</th><th>Delivery</th><th>Claimed</th><th></th>
-    </tr></thead><tbody></tbody></table></div>
-    <p id="code-shown" class="notice" hidden></p>
-    <div id="claims" hidden>
-      <h3 id="claims-title"></h3>
-      <div class="scroll"><table><thead><tr><th>Claim</th><th>Account</th><th>State</th><th>Card</th><th>Created</th><th>Received</th></tr></thead><tbody></tbody></table></div>
+<section id="signin" class="hero" hidden>
+  <img class="art-only mascot left" src="art/site-pikachu.png" alt="">
+  <img class="art-only mascot right" src="art/site-eevee.png" alt="">
+  <div class="hero-card">
+    <h1>Mystery Gift admin</h1>
+    <p>Create gifts, hand out codes and look after co-op sessions. Sign in with your Johto account; staff accounts only.</p>
+    <p id="signin-error" class="error" hidden></p>
+    <button id="signin-button" class="btn primary large" type="button">Sign in</button>
+  </div>
+</section>
+
+<div id="app" hidden>
+  <div class="banner">
+    <img class="art-only mascot left" id="banner-left" src="art/site-trainer-pikachu.png" alt="">
+    <img class="art-only mascot right" id="banner-right" src="art/site-trainer-eevee.png" alt="">
+    <div class="banner-inner">
+      <div><h1 id="banner-title"></h1><p id="banner-text"></p></div>
+      <div id="banner-action"></div>
     </div>
+  </div>
+  <main>
+    <section id="campaigns" class="tab" hidden>
+      <div class="stats" id="campaign-stats"></div>
+      <div class="toolbar">
+        <div class="segmented" id="campaign-filter">
+          <button data-filter="all" class="on">All</button><button data-filter="published">Live</button>
+          <button data-filter="draft">Drafts</button><button data-filter="paused">Paused</button>
+        </div>
+        <input type="search" id="campaign-search" placeholder="Search campaigns" aria-label="Search campaigns">
+      </div>
+      <div class="grid" id="campaign-grid"></div>
+    </section>
 
-    <h3>New campaign</h3>
-    <form id="new-campaign">
-      <label>Title <input name="title" required maxlength="120"></label>
-      <label>Starts (UTC) <input name="starts" type="datetime-local" required></label>
-      <label>Ends (UTC) <input name="ends" type="datetime-local" required></label>
-      <fieldset><legend>Games</legend>
-        <label><input type="checkbox" name="eevee" checked><img class="edition" src="art/eevee.png" alt=""> Eevee</label>
-        <label><input type="checkbox" name="pikachu" checked><img class="edition" src="art/pikachu.png" alt=""> Pikachu</label>
+    <section id="accounts" class="tab" hidden>
+      <form id="account-search" class="toolbar"><input type="search" name="query" placeholder="Search by name or account id" maxlength="64" aria-label="Search players"><button class="btn">Search</button></form>
+      <div class="frame list" id="account-list"></div>
+    </section>
+
+    <section id="relay" class="tab" hidden>
+      <div class="stats" id="relay-stats"></div>
+      <div class="toolbar"></div>
+      <div class="grid" id="relay-grid"></div>
+    </section>
+
+    <section id="audit" class="tab" hidden>
+      <ol class="timeline frame" id="audit-list"></ol>
+    </section>
+  </main>
+</div>
+
+<footer>
+  <div class="tails art-only"><img src="art/site-tail-pikachu.png" alt=""><img src="art/site-tail-eevee.png" alt=""></div>
+  Let's Go Recomp online services. Pokémon and Pokémon character names are trademarks of Nintendo.
+  <span class="art-only">Pokémon images © Nintendo, Creatures, GAME FREAK, The Pokémon Company; used here for a private admin page.</span>
+</footer>
+
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" aria-label="New campaign" hidden>
+  <div class="drawer-head"><h2>New campaign</h2><button class="btn ghost small" id="drawer-close" type="button">Close</button></div>
+  <div class="drawer-body">
+    <div id="preview" class="preview"></div>
+    <form id="new-campaign" autocomplete="off">
+      <fieldset class="section"><legend>Basics</legend>
+        <label>Title <input name="title" required maxlength="120" placeholder="Welcome gift"></label>
+        <div class="row">
+          <label>Starts (UTC) <input name="starts" type="datetime-local" required></label>
+          <label>Ends (UTC) <input name="ends" type="datetime-local" required></label>
+        </div>
+        <div class="field"><span>Games</span>
+          <div class="chips">
+            <label class="chip-toggle"><input type="checkbox" name="pikachu" checked><img class="art-only silhouette pikachu" src="art/pikachu.png" alt=""> Pikachu</label>
+            <label class="chip-toggle"><input type="checkbox" name="eevee" checked><img class="art-only silhouette eevee" src="art/eevee.png" alt=""> Eevee</label>
+          </div>
+        </div>
       </fieldset>
-      <label>Delivery <select name="delivery">
-        <option value="both">In-game Mystery Gift card (bag at next save for older clients)</option>
-        <option value="native">In-game Mystery Gift card only</option>
-        <option value="bag">Bag at the next save only</option>
-      </select></label>
-      <label><input type="checkbox" name="requires_code"> Needs a code</label>
-      <label>Stock (empty: unlimited) <input name="stock" type="number" min="1"></label>
-      <label>Gift <select name="kind">
-        <option value="item_bundle">Items</option>
-        <option value="pokemon">Pokémon (in-game card only)</option>
-      </select></label>
-      <div id="items-fields">
-        <label>Items, one per line: <code>item id</code> <code>count</code> (at most 6 for a card)
-          <textarea name="items" rows="4" placeholder="17 3&#10;4 10"></textarea></label>
+
+      <fieldset class="section"><legend>Gift</legend>
+        <div class="segmented" id="kind"><button type="button" data-kind="item_bundle" class="on">Items</button><button type="button" data-kind="pokemon">Pokémon</button></div>
+        <div id="items-fields">
+          <div class="picker">
+            <input type="search" id="item-search" placeholder="Add an item: search by name or bag pocket" aria-label="Search items">
+            <div class="picker-list" id="item-results" hidden></div>
+          </div>
+          <div id="item-rows" class="item-rows"></div>
+          <p class="hint" id="item-hint"></p>
+        </div>
+        <div id="pokemon-fields" hidden>
+          <div class="picker">
+            <input type="search" id="species-search" placeholder="Pokémon: search by name or number" aria-label="Search Pokémon">
+            <div class="picker-list" id="species-results" hidden></div>
+          </div>
+          <div id="species-pick"></div>
+          <div class="row">
+            <label>Level <input name="level" type="number" min="1" max="100" value="5"></label>
+            <label>Poké Ball <select name="ball" id="ball"></select></label>
+          </div>
+          <label class="switch"><input type="checkbox" name="form"><span>Alolan form</span></label>
+          <div class="field"><span>Shiny</span><div class="segmented" id="shiny"><button type="button" data-v="never" class="on">Never</button><button type="button" data-v="random">Random</button><button type="button" data-v="always">Always</button></div></div>
+          <div class="row">
+            <label>Nature <select name="nature" id="nature"></select></label>
+            <label>Gender <select name="gender"><option value="random">Random</option><option value="male">Male</option><option value="female">Female</option></select></label>
+          </div>
+          <div class="field"><span>IVs (empty: random)</span><div class="ivs" id="ivs"></div></div>
+          <div class="field"><span>Moves (1 to 4)</span><div class="moves" id="moves"></div></div>
+          <datalist id="move-names"></datalist>
+        </div>
+      </fieldset>
+
+      <fieldset class="section"><legend>Delivery</legend>
+        <label>How players receive it <select name="delivery">
+          <option value="both">In-game Mystery Gift (bag at next save for older launchers)</option>
+          <option value="native">In-game Mystery Gift only</option>
+          <option value="bag">Bag at the next save only</option>
+        </select></label>
+        <label class="switch"><input type="checkbox" name="requires_code"><span>Players need a code</span></label>
+        <label>Stock <input name="stock" type="number" min="1" placeholder="Unlimited"></label>
+      </fieldset>
+      <div class="drawer-actions">
+        <button type="submit" class="btn" data-publish="0">Save as draft</button>
+        <button type="submit" class="btn primary" data-publish="1">Create and publish</button>
       </div>
-      <div id="pokemon-fields" hidden>
-        <label>Species (1-151, 808, 809) <input name="species" type="number" min="1" max="809"></label>
-        <label>Alolan form <input name="form" type="checkbox"></label>
-        <label>Level <input name="level" type="number" min="1" max="100" value="5"></label>
-        <label>Shiny <select name="shiny"><option>never</option><option>random</option><option>always</option></select></label>
-        <label>Nature (0-24, -1 random) <input name="nature" type="number" min="-1" max="24" value="-1"></label>
-        <label>Gender <select name="gender"><option>random</option><option>male</option><option>female</option></select></label>
-        <label>IVs HP Atk Def Spe SpA SpD (-1 random) <input name="ivs" value="-1 -1 -1 -1 -1 -1"></label>
-        <label>Moves (1-4 move ids) <input name="moves" placeholder="1 33"></label>
-        <label>Ball (4: Poké Ball) <input name="ball" type="number" min="1" max="26" value="4"></label>
-      </div>
-      <button type="submit">Create (as a draft)</button>
     </form>
-  </section>
+  </div>
+</aside>
 
-  <section id="accounts" class="tab" hidden>
-    <h2>Accounts</h2>
-    <form id="account-search"><input name="query" placeholder="Name or account id" maxlength="64"> <button>Search</button></form>
-    <div class="scroll"><table><thead><tr><th>Name</th><th>Id</th><th>Role</th><th>Status</th><th>Profiles</th><th>Claims</th><th>Created</th><th></th></tr></thead><tbody></tbody></table></div>
-  </section>
+<dialog id="code-dialog" class="modal">
+  <h2>New code</h2>
+  <p id="code-for"></p>
+  <div class="code-box"><code id="code-value"></code><button class="btn primary small" id="code-copy" type="button">Copy</button></div>
+  <p class="hint">This is the only time the code is shown; the server keeps only a digest.</p>
+  <form method="dialog"><button class="btn">Done</button></form>
+</dialog>
 
-  <section id="relay" class="tab" hidden>
-    <h2>Relay sessions</h2>
-    <p id="relay-summary"></p>
-    <div class="scroll"><table><thead><tr><th>Session</th><th>Players</th><th>Age</th><th>Locked</th><th>Team-up</th><th>Battle</th><th></th></tr></thead><tbody></tbody></table></div>
-    <button id="relay-refresh">Refresh</button>
-  </section>
+<dialog id="uses-dialog" class="modal">
+  <h2>New code</h2>
+  <form method="dialog" id="uses-form">
+    <label>How many players can use it <input name="uses" type="number" min="1" value="1" required></label>
+    <div class="drawer-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">Create code</button></div>
+  </form>
+</dialog>
 
-  <section id="audit" class="tab" hidden>
-    <h2>Audit log</h2>
-    <div class="scroll"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Request</th></tr></thead><tbody></tbody></table></div>
-  </section>
-</main>
+<dialog id="claims-dialog" class="modal wide">
+  <h2 id="claims-title"></h2>
+  <div class="scroll"><table><thead><tr><th>Claim</th><th>Account</th><th>Status</th><th>Card</th><th>Claimed</th><th>Received</th></tr></thead><tbody id="claims-rows"></tbody></table></div>
+  <form method="dialog"><button class="btn">Close</button></form>
+</dialog>
+
+<dialog id="confirm-dialog" class="modal">
+  <h2 id="confirm-title"></h2>
+  <p id="confirm-text"></p>
+  <form method="dialog"><div class="drawer-actions"><button class="btn" value="cancel">Cancel</button><button class="btn danger" value="ok" id="confirm-ok"></button></div></form>
+</dialog>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
 </body>
 </html>

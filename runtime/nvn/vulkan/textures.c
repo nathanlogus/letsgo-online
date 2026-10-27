@@ -169,9 +169,10 @@ static bool tex_scalable(const NvnTexture *t) {
 static int tex_shadow_k(const NvnTexture *t) {
     static int k = -1;
     if (k < 0) { k = getenv("LARECOMP_SHADOW_SCALE") ? atoi(getenv("LARECOMP_SHADOW_SCALE")) : 1; if (k < 1) k = 1; if (k > 4) k = 4; }
-    if (k == 1 || t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width != t->height || t->width < 1024 || t->width > 4096 ||
-        !renderer_format_is_depth(t->format))
+    if (k == 1 || t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width != t->height || t->width < 1024 || t->width > 4096)
         return 1;
+    static int nlog;  // TEMP: which targets take it
+    if (nlog++ < 16) LOG("[shadow] %ux%u format %#x x%d\n", t->width, t->height, t->format, k);
     return k;
 }
 
