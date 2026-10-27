@@ -5268,8 +5268,16 @@ static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
                 float rest[12] = {(float)ao.cw, (float)ao.ch, t0, mo, 0.0f /* (row 0 = NDC y -1, as mv.frag) */, night, getenv("LARECOMP_FF_DEBUG") ? 1.0f : 0.0f, 0, dn[0], dn[1], dn[2], 0};
                 memcpy(pf + 16, rest, sizeof rest);
                 vk_full_barrier(cb);
+                // (at half size, then put on: soft glows - at full size 2.3 ms at 1080p)
+                uint32_t fw = (ao.cw + 1) / 2, fh = (ao.ch + 1) / 2;
+                TexBackend *fl = post_image_fmt(57, fw, fh, VK_FORMAT_R16G16B16A16_SFLOAT);
+                pf[23] = 2.0f;  // (b.w: half size)
                 VkImageView fi[4] = {post_view(cp), dv};
-                post_pass_view(cb, post_pipeline_ex("dl_ff.frag", ao.cfmt, 1), fi, 2, ao.cview, ao.cw, ao.ch, pf, sizeof pf, false, true);
+                post_pass_view(cb, post_pipeline_ex("dl_ff.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), fi, 2, post_view(fl), fw, fh, pf, sizeof pf, false, false);
+                vk_full_barrier(cb);
+                float pa4[8] = {dn[0], dn[1], dn[2], night};
+                VkImageView ai2[4] = {post_view(cp), post_view(fl)};
+                post_pass_view(cb, post_pipeline_ex("ff_apply.frag", ao.cfmt, 1), ai2, 2, ao.cview, ao.cw, ao.ch, pa4, 32, false, true);
             }
         } else {
             float pt[8] = {dn[0], dn[1], dn[2]};

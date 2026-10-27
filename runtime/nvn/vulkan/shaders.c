@@ -1754,7 +1754,8 @@ static const char *builtin_src(const char *name, int *stage) {
                "layout(location = 0) out vec4 o;\n"
                "vec2 scr(vec4 cl) { vec2 n = cl.xy / cl.w; return vec2(n.x * 0.5 + 0.5, pc.b.x > 0.5 ? 0.5 - n.y * 0.5 : n.y * 0.5 + 0.5) * pc.a.xy; }\n"
                // the surface point under a pixel (false: the sky)
-               "mat4 g_iv;\n"  // (the inverse once per pixel, in main: at() runs up to 5 times)
+               "mat4 g_iv;\n"
+               "vec2 g_fc;\n"  // (this pixel in the full-size image - at half size, b.w = 2: its 2 x 2 block)  // (the inverse once per pixel, in main: at() runs up to 5 times)
                "bool at(vec2 fc, out vec3 P) {\n"
                "  vec2 uv = fc / pc.a.xy;\n"
                "  ivec2 dsz = textureSize(dep, 0);\n"
@@ -1774,7 +1775,7 @@ static const char *builtin_src(const char *name, int *stage) {
                "  vec4 cl = pc.vp * vec4(F, 1.0);\n"
                "  if (cl.w < 50.0 || cl.w > zp + 40.0) return vec3(0.0);\n"  // (behind the camera, or behind the surface here)
                "  vec2 S = scr(cl);\n"
-               "  float r = clamp(1800.0 * s / cl.w, 1.0, 5.0 * s), dd = length(gl_FragCoord.xy - S) / r;\n"
+               "  float r = clamp(1800.0 * s / cl.w, 1.0, 5.0 * s), dd = length(g_fc - S) / r;\n"
                "  if (dd > 5.0) return vec3(0.0);\n"
                "  float blink = pow(max(0.0, sin(T * (0.9 + h.z * 1.5) + h.x * 40.0)), 3.0);\n"
                "  if (pc.b.z > 0.0) blink = 1.0, dd /= 3.0;\n"  // (LARECOMP_FF_DEBUG: every fly lit, 3x)
@@ -1783,41 +1784,43 @@ static const char *builtin_src(const char *name, int *stage) {
                "  return vec3(0.9, 1.0, 0.35) * 3.0 * blink * green * (exp(-dd * dd) + 0.12 * exp(-dd * dd * 0.12));\n"
                "}\n"
                "void main() {\n"
-               "  o = vec4(1.0);\n"
+               "  o = pc.b.w > 0.5 ? vec4(0.0) : vec4(1.0);\n"
+               "  g_fc = pc.b.w > 0.5 ? gl_FragCoord.xy * pc.b.w : gl_FragCoord.xy;\n"
                "  vec3 P;\n"
                "  g_iv = inverse(pc.vp);\n"
-               "  if (!at(gl_FragCoord.xy, P)) return;\n"
+               "  if (!at(g_fc, P)) return;\n"
                "  float zp = (pc.vp * vec4(P, 1.0)).w, s = pc.a.y / 720.0, T = pc.a.z;\n"
                "  vec3 add = vec3(0.0), base[9];\n"
-               // (the 2 x 2 x 2 cells nearest the point - a fly stays in its cell, so the others' are over 75 cm away: far more than its
-               //  glow on the screen; the 27 around it were 2.3 ms at 1080p). base: each block's low corner.
-               "  base[0] = floor(P / 150.0 - 0.5);\n"
-               "  for (int j = 0; j < 8; j++) add += fly(base[0] + vec3(j & 1, (j >> 1) & 1, j >> 2), zp, s, T);\n"
+               // (all 27 cells around the point: the top-down camera sees a fly hovering a metre up over ground well behind it - the 8
+               //  nearest cut flies into half-moons)
+               "  base[0] = floor(P / 150.0);\n"
+               "  for (int j = 0; j < 27; j++) add += fly(base[0] + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1), zp, s, T);\n"
                // at a depth edge, the cells around the neighbours' surfaces too (12 and 24 px away: a fly's glow reaches 5 radii, up to
                // 25 px): a fly hovering at a roof or a tree's edge was cut off where the pixels beyond it see the far ground; cells
                // already counted are skipped
                "  int nb = 1;\n"
                "  for (int k = 0; k < 8; k++) {\n"
                "    vec3 Q;\n"
-               "    vec2 fq = gl_FragCoord.xy + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k & 3] * float(1 + (k >> 2)) * s;\n"
+               "    vec2 fq = g_fc + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k & 3] * float(1 + (k >> 2)) * s;\n"
                // (only at a depth edge - the neighbour 10 % nearer or farther; 1 - depth goes as 1 / distance: 1.4 -> 0.4 ms)
                "    ivec2 dz = textureSize(dep, 0);\n"
-               "    float d0 = texelFetch(dep, clamp(ivec2(gl_FragCoord.xy / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
+               "    float d0 = texelFetch(dep, clamp(ivec2(g_fc / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
                "    float d1 = texelFetch(dep, clamp(ivec2(fq / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
                "    if (abs(d1 - d0) < 0.1 * (1.0 - d0)) continue;\n"
                "    if (!at(fq, Q)) continue;\n"
-               "    vec3 bq = floor(Q / 150.0 - 0.5);\n"
+               "    vec3 bq = floor(Q / 150.0);\n"
                "    bool seen = false;\n"
                "    for (int i = 0; i < nb; i++) seen = seen || all(lessThanEqual(abs(bq - base[i]), vec3(0.5)));\n"
                "    if (seen) continue;\n"
-               "    for (int j = 0; j < 8; j++) {\n"
-               "      vec3 c = bq + vec3(j & 1, (j >> 1) & 1, j >> 2);\n"
+               "    for (int j = 0; j < 27; j++) {\n"
+               "      vec3 c = bq + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1);\n"
                "      bool dup = false;\n"
-               "      for (int i = 0; i < nb; i++) dup = dup || all(greaterThanEqual(c - base[i], vec3(-0.5))) && all(lessThanEqual(c - base[i], vec3(1.5)));\n"
+               "      for (int i = 0; i < nb; i++) dup = dup || all(lessThanEqual(abs(c - base[i]), vec3(1.5)));\n"
                "      if (!dup) add += fly(c, zp, s, T);\n"
                "    }\n"
                "    base[nb++] = bq;\n"
                "  }\n"
+               "  if (pc.b.w > 0.5) { o = vec4(add, 1.0); return; }\n"  // (half size: the light alone - ff_apply.frag puts it on)
                "  vec3 e = texelFetch(t, ivec2(gl_FragCoord.xy), 0).rgb;\n"
                "  vec3 m = 1.0 + pc.b.y * min(add / max(e * pc.c.rgb, vec3(0.03)), vec3(16.0));\n"
                "  if (any(isnan(m)) || any(isinf(m))) m = vec3(1.0);\n"
@@ -1827,6 +1830,23 @@ static const char *builtin_src(const char *name, int *stage) {
     // clouds: their shadows drifting over the ground. The pixel's surface point (as dl_ff) -> its point on the ground along the sun ->
     // two layers of warped fractal gradient noise scrolling with the wind; multiplied onto the scene. Depth (0); a = (width, height, seconds, depth mode),
     // b = (y flip, strength, -, -).
+    // ff_apply: the fireflies' light made at half size (dl_ff.frag, b.w = 2), bilinear, onto the scene as dl_ff's own multiplier
+    // (exec.c dn_run: 2.3 ms at full size, 1080p). Scene copy (0), the light (1); a = (tint rgb, night).
+    if (!strcmp(name, "ff_apply.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D ff;\n"
+               "layout(push_constant) uniform P { vec4 a; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "void main() {\n"
+               "  vec3 add = texture(ff, gl_FragCoord.xy / vec2(textureSize(t, 0))).rgb;\n"
+               "  vec3 e = texelFetch(t, ivec2(gl_FragCoord.xy), 0).rgb;\n"
+               "  vec3 m = 1.0 + pc.a.w * min(add / max(e * pc.a.rgb, vec3(0.03)), vec3(16.0));\n"
+               "  if (any(isnan(m)) || any(isinf(m))) m = vec3(1.0);\n"
+               "  o = vec4(m, 1.0);\n"
+               "}\n";
+    }
     // clouds_map: the cloud shadow over a 192 m square of the clouds' plane (768 x 768, 25 cm a texel; exec.c dn_run), which
     // clouds.frag samples per pixel - the noise per screen pixel was 0.48 ms at 1080p, twice with frame generation. a = (the
     // square's corner x, z in cm, seconds, coverage).

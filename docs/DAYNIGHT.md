@@ -424,3 +424,12 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   in daynight_hour / daynight_night, asked per draw and texture. Read once now, the hour's values reused, and by day no check
   runs: 37 ns a draw at noon, ~1.1 us at night; walking at 60 fps day and night (`tests/scripts/run-walk.sh`;
   results/walk_fix_noon_night.png). Earlier "walks" pressed the D-pad, which does not move the player: use STICK_UP etc.
+- Fireflies: the depth-edge search now reaches 12 and 24 px (a fly's glow is up to 25 px; at 12 its outer glow was cut at roof
+  edges), and the pass runs at half size (`dl_ff.frag` b.w = 2, the light alone) put on by `ff_apply.frag`: 2.3 -> ~1.05 ms at
+  1080p. Tried and dropped: the 8 nearest cells instead of 27 (the top-down camera sees a fly a metre up over ground well behind
+  it - half-moon flies), and hashing "has a fly" first (no gain: a pixel group pays when any pixel finds one). The 8-cell try was
+  swept into another session's commit (70ca149) and is undone here.
+- Checked, not issues: the world's first frames skip draws (pop-in) only while the screen is still black from the fade (frame
+  1347 is whole); the summary screen's Pokémon stays untinted - a lit studio backdrop, not the world. A night freeze (the renderer
+  stopped, the game ran on) happened once in 8 night walks and not again: `tests/scripts/hang_catch.sh` reruns and dumps every
+  thread's stack with gdb if it comes back.
