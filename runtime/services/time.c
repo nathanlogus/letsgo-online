@@ -104,6 +104,7 @@ static void timezone_service(Service *s, IpcReq *req, IpcResp *resp) {
         resp_size(resp, 4);
         break;
     }
+    case 4: break;  // LoadTimeZoneRule: the rule buffer stays empty (the To* commands use the host's zone)
     default: LOG("[time] ITimeZoneService cmd %u (ok)\n", req->cmd); resp_size(resp, 0x10);
     }
 }

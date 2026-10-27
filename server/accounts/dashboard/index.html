@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Let's Go Admin</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1><img id="logo" src="art/logo.png" alt=""> Let's Go Admin</h1>
+  <nav id="tabs" hidden>
+    <button data-tab="campaigns" data-art="3" class="on"><span>Campaigns</span></button>
+    <button data-tab="accounts" data-art="0"><span>Accounts</span></button>
+    <button data-tab="relay" data-art="1"><span>Relay</span></button>
+    <button data-tab="audit" data-art="2"><span>Audit</span></button>
+  </nav>
+  <span id="who"></span>
+</header>
+<main>
+  <p id="error" class="error" hidden></p>
+  <section id="signin" hidden>
+    <img id="present" src="art/present.png" alt="">
+    <h2>Sign in</h2>
+    <p>Sign in with your Johto account. Staff accounts with two-step sign-in can manage gifts; a session lasts 15 minutes.</p>
+    <button id="signin-button" type="button">Sign in with Keycloak</button>
+  </section>
+
+  <section id="campaigns" class="tab" hidden>
+    <h2>Campaigns</h2>
+    <div class="scroll"><table id="campaign-table"><thead><tr>
+      <th>Title</th><th>State</th><th>Window (UTC)</th><th>Gift</th><th>Delivery</th><th>Claimed</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <p id="code-shown" class="notice" hidden></p>
+    <div id="claims" hidden>
+      <h3 id="claims-title"></h3>
+      <div class="scroll"><table><thead><tr><th>Claim</th><th>Account</th><th>State</th><th>Card</th><th>Created</th><th>Received</th></tr></thead><tbody></tbody></table></div>
+    </div>
+
+    <h3>New campaign</h3>
+    <form id="new-campaign">
+      <label>Title <input name="title" required maxlength="120"></label>
+      <label>Starts (UTC) <input name="starts" type="datetime-local" required></label>
+      <label>Ends (UTC) <input name="ends" type="datetime-local" required></label>
+      <fieldset><legend>Games</legend>
+        <label><input type="checkbox" name="eevee" checked><img class="edition" src="art/eevee.png" alt=""> Eevee</label>
+        <label><input type="checkbox" name="pikachu" checked><img class="edition" src="art/pikachu.png" alt=""> Pikachu</label>
+      </fieldset>
+      <label>Delivery <select name="delivery">
+        <option value="both">In-game Mystery Gift card (bag at next save for older clients)</option>
+        <option value="native">In-game Mystery Gift card only</option>
+        <option value="bag">Bag at the next save only</option>
+      </select></label>
+      <label><input type="checkbox" name="requires_code"> Needs a code</label>
+      <label>Stock (empty: unlimited) <input name="stock" type="number" min="1"></label>
+      <label>Gift <select name="kind">
+        <option value="item_bundle">Items</option>
+        <option value="pokemon">Pokémon (in-game card only)</option>
+      </select></label>
+      <div id="items-fields">
+        <label>Items, one per line: <code>item id</code> <code>count</code> (at most 6 for a card)
+          <textarea name="items" rows="4" placeholder="17 3&#10;4 10"></textarea></label>
+      </div>
+      <div id="pokemon-fields" hidden>
+        <label>Species (1-151, 808, 809) <input name="species" type="number" min="1" max="809"></label>
+        <label>Alolan form <input name="form" type="checkbox"></label>
+        <label>Level <input name="level" type="number" min="1" max="100" value="5"></label>
+        <label>Shiny <select name="shiny"><option>never</option><option>random</option><option>always</option></select></label>
+        <label>Nature (0-24, -1 random) <input name="nature" type="number" min="-1" max="24" value="-1"></label>
+        <label>Gender <select name="gender"><option>random</option><option>male</option><option>female</option></select></label>
+        <label>IVs HP Atk Def Spe SpA SpD (-1 random) <input name="ivs" value="-1 -1 -1 -1 -1 -1"></label>
+        <label>Moves (1-4 move ids) <input name="moves" placeholder="1 33"></label>
+        <label>Ball (4: Poké Ball) <input name="ball" type="number" min="1" max="26" value="4"></label>
+      </div>
+      <button type="submit">Create (as a draft)</button>
+    </form>
+  </section>
+
+  <section id="accounts" class="tab" hidden>
+    <h2>Accounts</h2>
+    <form id="account-search"><input name="query" placeholder="Name or account id" maxlength="64"> <button>Search</button></form>
+    <div class="scroll"><table><thead><tr><th>Name</th><th>Id</th><th>Role</th><th>Status</th><th>Profiles</th><th>Claims</th><th>Created</th><th></th></tr></thead><tbody></tbody></table></div>
+  </section>
+
+  <section id="relay" class="tab" hidden>
+    <h2>Relay sessions</h2>
+    <p id="relay-summary"></p>
+    <div class="scroll"><table><thead><tr><th>Session</th><th>Players</th><th>Age</th><th>Locked</th><th>Team-up</th><th>Battle</th><th></th></tr></thead><tbody></tbody></table></div>
+    <button id="relay-refresh">Refresh</button>
+  </section>
+
+  <section id="audit" class="tab" hidden>
+    <h2>Audit log</h2>
+    <div class="scroll"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Target</th><th>Request</th></tr></thead><tbody></tbody></table></div>
+  </section>
+</main>
+</body>
+</html>

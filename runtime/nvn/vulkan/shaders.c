@@ -1788,29 +1788,32 @@ static const char *builtin_src(const char *name, int *stage) {
                "  g_iv = inverse(pc.vp);\n"
                "  if (!at(gl_FragCoord.xy, P)) return;\n"
                "  float zp = (pc.vp * vec4(P, 1.0)).w, s = pc.a.y / 720.0, T = pc.a.z;\n"
-               "  vec3 add = vec3(0.0), base[5];\n"
-               "  base[0] = floor(P / 150.0);\n"
-               "  for (int j = 0; j < 27; j++) add += fly(base[0] + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1), zp, s, T);\n"
-               // at a depth edge, the cells around the neighbours' surfaces too (12 px away, about a fly's glow): a fly hovering at a roof
-               // or a tree's edge was cut off where the pixels beyond it see the far ground; cells already counted are skipped
+               "  vec3 add = vec3(0.0), base[9];\n"
+               // (the 2 x 2 x 2 cells nearest the point - a fly stays in its cell, so the others' are over 75 cm away: far more than its
+               //  glow on the screen; the 27 around it were 2.3 ms at 1080p). base: each block's low corner.
+               "  base[0] = floor(P / 150.0 - 0.5);\n"
+               "  for (int j = 0; j < 8; j++) add += fly(base[0] + vec3(j & 1, (j >> 1) & 1, j >> 2), zp, s, T);\n"
+               // at a depth edge, the cells around the neighbours' surfaces too (12 and 24 px away: a fly's glow reaches 5 radii, up to
+               // 25 px): a fly hovering at a roof or a tree's edge was cut off where the pixels beyond it see the far ground; cells
+               // already counted are skipped
                "  int nb = 1;\n"
-               "  for (int k = 0; k < 4; k++) {\n"
+               "  for (int k = 0; k < 8; k++) {\n"
                "    vec3 Q;\n"
-               "    vec2 fq = gl_FragCoord.xy + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k] * s;\n"
+               "    vec2 fq = gl_FragCoord.xy + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k & 3] * float(1 + (k >> 2)) * s;\n"
                // (only at a depth edge - the neighbour 10 % nearer or farther; 1 - depth goes as 1 / distance: 1.4 -> 0.4 ms)
                "    ivec2 dz = textureSize(dep, 0);\n"
                "    float d0 = texelFetch(dep, clamp(ivec2(gl_FragCoord.xy / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
                "    float d1 = texelFetch(dep, clamp(ivec2(fq / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
                "    if (abs(d1 - d0) < 0.1 * (1.0 - d0)) continue;\n"
                "    if (!at(fq, Q)) continue;\n"
-               "    vec3 bq = floor(Q / 150.0);\n"
+               "    vec3 bq = floor(Q / 150.0 - 0.5);\n"
                "    bool seen = false;\n"
                "    for (int i = 0; i < nb; i++) seen = seen || all(lessThanEqual(abs(bq - base[i]), vec3(0.5)));\n"
                "    if (seen) continue;\n"
-               "    for (int j = 0; j < 27; j++) {\n"
-               "      vec3 c = bq + vec3(j % 3 - 1, (j / 3) % 3 - 1, j / 9 - 1);\n"
+               "    for (int j = 0; j < 8; j++) {\n"
+               "      vec3 c = bq + vec3(j & 1, (j >> 1) & 1, j >> 2);\n"
                "      bool dup = false;\n"
-               "      for (int i = 0; i < nb; i++) dup = dup || all(lessThanEqual(abs(c - base[i]), vec3(1.5)));\n"
+               "      for (int i = 0; i < nb; i++) dup = dup || all(greaterThanEqual(c - base[i], vec3(-0.5))) && all(lessThanEqual(c - base[i], vec3(1.5)));\n"
                "      if (!dup) add += fly(c, zp, s, T);\n"
                "    }\n"
                "    base[nb++] = bq;\n"

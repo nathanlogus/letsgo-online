@@ -12,6 +12,8 @@
 #include "../hle.h"
 #include "../ipc.h"
 
+bool bcat_online(void);  // (bcat.c)
+
 // An event the game can wait on, signalled already: nothing will ever happen, so a wait on it ends at once.
 static uint32_t signalled_event(void) {
     uint32_t w, r;
@@ -26,10 +28,11 @@ static uint32_t signalled_event(void) {
 static void nifm_request(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
-    case 0: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetRequestState: free (done, not accepted)
+    // (Mystery Gift cards to serve: the request is accepted, so "Get via internet" reaches bcat:u, bcat.c)
+    case 0: OUT(uint32_t, 0) = bcat_online() ? 3 : 1; resp_size(resp, 4); break;  // GetRequestState: 1 free (done, not accepted), 3 accepted
     case 1: {  // GetResult: no internet connection (2110-0300); LARECOMP_NIFM_ERROR=<result> for experiments
         const char *e = getenv("LARECOMP_NIFM_ERROR");
-        resp->result = e && *e ? (uint32_t)strtoul(e, NULL, 0) : MAKE_RESULT(110, 300);
+        resp->result = e && *e ? (uint32_t)strtoul(e, NULL, 0) : bcat_online() ? 0 : MAKE_RESULT(110, 300);
         break;
     }
     case 2:  // GetSystemEventReadableHandles: two events
@@ -47,6 +50,7 @@ static void nifm_general(Service *s, IpcReq *req, IpcResp *resp) {
     case 1: memset(resp->data, 0, 4); resp_size(resp, 4); break;                               // GetClientId
     case 4: ipc_return_object(resp, service_new("IRequest", nifm_request, NULL)); break;      // CreateRequest
     case 18: memset(resp->data, 0, 4); resp_size(resp, 4); break;                              // GetInternetConnectionStatus
+    case 21: OUT(uint8_t, 0) = bcat_online(); resp_size(resp, 4); break;  // IsAnyInternetRequestAccepted
     default: LOG("[nifm] IGeneralService cmd %u (ok)\n", req->cmd);
     }
 }

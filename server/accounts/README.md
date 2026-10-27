@@ -139,11 +139,43 @@ Campaign body example:
 }
 ```
 
-Omit `stock` for unlimited entitlements. Item definitions are bounded typed data: 1–32 unique positive 16-bit item IDs and quantities 1–999. The service does not yet verify a game-version item allowlist; a future supported game adapter must validate actual IDs, capacities and save compatibility before applying anything. `lgpe-items-v1` is a proposed contract label, not a working native delivery adapter. Pokemon gifts and arbitrary scripts are rejected by the current schema. There is no reward-edit endpoint; correcting a draft requires a new draft. Publishing/pausing preserves the payload and claim history.
+Omit `stock` for unlimited entitlements. Item definitions are bounded typed data: 1–32 unique items from the 207 giftable Let's Go items (`GIFTABLE` in `models.py`, the game side's list: no TMs or key items), quantities 1–999. There is no reward-edit endpoint; correcting a draft requires a new draft. Publishing/pausing preserves the payload and claim history.
+
+Delivery adapters:
+
+| Adapter | Delivery |
+| --- | --- |
+| `lgpe-wb7-v1` | A native Mystery Gift card: the player receives it in the game's own Mystery Gift > Get via internet (or types a code in Get with code/password). Each claim gets a `card_id` (1024–1999, per profile = per save; `POST /v1/claims/{id}/card` moves it when the save already used that id). At most 6 items, or one Pokemon. |
+| `lgpe-items-v1` | The older route: the items go into the bag at the player's next save. Items only. |
+
+A campaign may list both; the launcher uses the card when it can. A Pokemon reward (`"kind": "pokemon"`) requires exactly `["lgpe-wb7-v1"]`:
+
+```json
+{"schema_version": 1, "kind": "pokemon", "pokemon": {"species": 151, "form": 0, "level": 5, "shiny": "never",
+ "nature": -1, "gender": "random", "ivs": [31, 31, 31, -1, -1, -1], "moves": [1], "ball": 4}}
+```
+
+Species 1–151, 808, 809; form 1 only for the Alolan species; `nature`/IV `-1` is random; 1–4 moves (the card's moves are the Pokemon's moves). The receiving player is the original trainer.
+
+## Admin dashboard
+
+`/admin/` on the API (behind the same HTTPS proxy) manages campaigns (create items or Pokemon gifts, publish/pause, generate codes, see claims), accounts (search, disable), the co-op relay's sessions (see and close; a session is named by a hash, never its invitation code) and the audit log. Staff sign in with Keycloak (authorization code + PKCE through `/v1/auth/admin/*`), with its own public client; the admin API still requires the staff role and a recent MFA sign-in. Create the client once (refuses to change an existing one):
+
+```powershell
+tests/venvs/account-gift-api/Scripts/python.exe -m server.accounts.keycloak_setup --credentials-env <keycloak admin env> --client-id letsgo-admin --redirect-uri https://<ACCOUNT_PUBLIC_URL host>/admin/
+```
+
+The page loads its artwork from `ACCOUNT_DASHBOARD_ASSETS` (Compose: `DASHBOARD_ART_DIR`, mounted read-only), collected from a UI export of your own game files and the repository's `assets/`; it is never committed or built into the image, and the page works without it:
+
+```powershell
+python server/accounts/dashboard/collect_assets.py tests/runs/ui-assets-export-<date> assets tests/config/dashboard-assets
+```
 
 Operator CLI also provides `revoke-sessions <account-uuid>` and `prune-rate-buckets`. Run rate-bucket cleanup daily. Domain-separated digest secret rotation invalidates sessions, existing code lookup and request digests; preserve it with backups and plan a migration rather than changing it in place.
 
 ## Hosting and recovery
+
+`compose.yml` runs the API, its PostgreSQL and the co-op relay (`server/relay.Dockerfile`; game port `RELAY_BIND:RELAY_PORT`, default 127.0.0.1:7381; its admin port stays on the Compose network for the dashboard, behind `RELAY_ADMIN_TOKEN`). With `--profile identity` it also runs Keycloak, moved from ssrecomp's Johto Online compose: it reuses that compose's database volume (`server_keycloak-db-data`, external), so the `johto` realm, its users and clients move unchanged. To move: stop and remove the old `keycloak` and `keycloak-db` containers (never the volume), set `KEYCLOAK_DB_PASSWORD` to the password that database already has, then `docker compose ... --profile identity up -d`. Keycloak keeps port 8080 and its issuer URL, so Johto Online keeps working against it.
 
 Local HTTP mode is for loopback development only. Production requires HTTPS issuer/JWKS URLs and HTTPS requests. Put the loopback API behind a TLS reverse proxy, configure `ACCOUNT_PROXY_IPS` to that proxy’s exact source IP/network and keep port 7385 private. Never use `*` for trusted proxies. The Compose command enables forwarded headers only for the configured sources; direct Python uses none unless explicitly enabled. Health endpoints permit private HTTP health checks. Configure proxy request-header/body timeouts and do not log authorization headers, query credentials or bodies. The native relay remains unchanged and receives no new account credentials.
 

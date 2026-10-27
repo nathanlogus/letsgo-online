@@ -400,4 +400,4 @@ In short:
   the local slot's bag only, so a guest item would come from no one's bag.
 - **Progression** (section 4) is unchanged. The guest's Pokémon fight as copies: fainting, HP, PP and items used in
   the team-up never reach the guest's save. Verified with `savediff` in `tests/runs/teamup-switch2/*`.
-- **Protocol 7** (client and relay); protocol-6 builds are refused when connecting.
+- **Protocol 8** (client and relay; 8 changed the turn digest, see COOP-BATTLE-PROTOTYPE.md); older builds are refused when connecting.

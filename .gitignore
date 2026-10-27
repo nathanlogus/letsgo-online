@@ -12,16 +12,10 @@ generated/
 generated-*/
 Lets Go Eevee/
 assets/*
+!assets/textures/
 !assets/emotes/
 assets/emotes/*
-!assets/emotes/kindly-mark.png
-!assets/emotes/pumped-up-mark.png
-!assets/emotes/upbeat-mark.png
-!assets/emotes/joyful-mark.png
-!assets/emotes/flustered-mark.png
-!assets/emotes/teary-mark.png
-!assets/emotes/angry-mark.png
-!assets/emotes/sleepy-time-mark.png
+!assets/emotes/*-mark.png
 
 # Build
 build/

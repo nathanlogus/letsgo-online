@@ -3,6 +3,7 @@
 // layouts and BNTX textures) is decoded, upscaled 2x by waifu2x-ncnn-vulkan (nihui, MIT; downloaded then, ~35 MB) and
 // compressed again into cache/ui2x.pak. While the game runs, a texture whose content matches one of them by its key
 // is drawn from the 2x one (runtime/nvn/vulkan/textures.c); the game still draws it with the same coordinates.
+// The same path draws our own textures (assets/textures/textures.txt, the title logo) whatever the setting.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -40,9 +41,9 @@ typedef struct {
     uint8_t *data;  // block rows (free())
     uint64_t size;
 } Ui2xTex;
-// The 2x version of a texture of src_w x src_h with that key, when there is one and they are turned on (g_settings.ui2x).
+// Ours (assets/textures), else the 2x version of a texture of src_w x src_h with that key when they are turned on (g_settings.ui2x).
 bool ui2x_find(uint64_t key, uint32_t src_w, uint32_t src_h, Ui2xTex *out);
-bool ui2x_enabled(void);  // turned on and cache/ui2x.pak there (cheap: checked once)
+bool ui2x_enabled(void);  // ours there, or turned on and cache/ui2x.pak there (cheap: checked once)
 
 // Decode one native UI texture from the player's own game files. Caller frees RGBA.
 bool ui_game_texture_rgba(const char *archive, const char *name, uint8_t **rgba, uint32_t *w, uint32_t *h);

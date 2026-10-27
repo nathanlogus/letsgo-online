@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 #include "hle.h"
+#include "paths.h"
 #include "platform.h"
 #include "settings.h"
 
@@ -77,6 +78,30 @@ uint64_t ui2x_key(const uint8_t *p, uint64_t n) {
     return (uint64_t)~crc << 32 | (b << 16 | a);
 }
 
+// RGBA -> block rows of fmt (UI2X_BC*), malloc'd.
+static uint8_t *encode(const uint8_t *px, uint32_t w, uint32_t h, int fmt, uint64_t *size) {
+    uint32_t bpb = fmt == UI2X_BC1 || fmt == UI2X_BC4 ? 8 : 16, wb = (w + 3) / 4, hb = (h + 3) / 4;
+    *size = (uint64_t)wb * hb * bpb;
+    uint8_t *out = malloc(*size);
+    if (!out) return NULL;
+    for (uint32_t by = 0; by < hb; by++)
+        for (uint32_t bx = 0; bx < wb; bx++) {
+            uint8_t blk[64], r[16], rg[32];
+            for (int k = 0; k < 16; k++) {  // (edges: the last row / column repeated)
+                uint32_t x = bx * 4 + k % 4, y = by * 4 + k / 4;
+                if (x >= w) x = w - 1;
+                if (y >= h) y = h - 1;
+                memcpy(blk + k * 4, px + ((size_t)y * w + x) * 4, 4);
+                r[k] = blk[k * 4], rg[k * 2] = blk[k * 4], rg[k * 2 + 1] = blk[k * 4 + 1];
+            }
+            uint8_t *d = out + ((uint64_t)by * wb + bx) * bpb;
+            if (fmt == UI2X_BC4) stb_compress_bc4_block(d, r);
+            else if (fmt == UI2X_BC5) stb_compress_bc5_block(d, rg);
+            else stb_compress_dxt_block(d, blk, fmt == UI2X_BC3, STB_DXT_HIGHQUAL);
+        }
+    return out;
+}
+
 // ================================================================== the pack, while the game runs
 typedef struct { uint64_t key; uint32_t src_w, src_h, fmt, w, h, pad; uint64_t off, size; } PakEntry;  // (56 bytes on disk)
 static pthread_mutex_t g_pak_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -122,9 +147,71 @@ int ui2x_count(void) {
     return n;
 }
 
-bool ui2x_enabled(void) { return g_settings.ui2x && ui2x_count() > 0; }
+// ================================================================== our own textures, shipped with the app
+// assets/textures/textures.txt: "<key> <original w> <original h> <png>" (the title logo: tools/logo_textures.py). Drawn
+// in place of the game's texture with that key whatever the 2x setting; each PNG compressed (BC3) once, when first seen.
+typedef struct { uint64_t key; uint32_t src_w, src_h; char png[64]; Ui2xTex tex; } Repl;
+static Repl g_repl[64];
+static int g_nrepl = -1;
+
+static void repl_load(void) {  // (g_pak_lock held)
+    if (g_nrepl >= 0) return;
+    g_nrepl = 0;
+    char path[1200];
+    if (!rt_resource("assets/textures/textures.txt", "assets/textures/textures.txt", path, sizeof path)) return;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[256];
+    while (g_nrepl < (int)(sizeof g_repl / sizeof *g_repl) && fgets(line, sizeof line, f)) {
+        Repl *r = &g_repl[g_nrepl];
+        unsigned long long key;
+        if (sscanf(line, "%llx %u %u %63s", &key, &r->src_w, &r->src_h, r->png) == 4) r->key = key, g_nrepl++;
+    }
+    fclose(f);
+    LOG("[ui2x] %d textures replaced (assets/textures)\n", g_nrepl);
+}
+
+static bool repl_find(uint64_t key, uint32_t src_w, uint32_t src_h, Ui2xTex *out) {  // (g_pak_lock held)
+    repl_load();
+    for (int i = 0; i < g_nrepl; i++) {
+        Repl *r = &g_repl[i];
+        if (r->key != key || r->src_w != src_w || r->src_h != src_h) continue;
+        if (!r->tex.data) {
+            for (int j = 0; j < g_nrepl; j++)  // (the same PNG under another key: already compressed)
+                if (g_repl[j].tex.data && !strcmp(g_repl[j].png, r->png)) { r->tex = g_repl[j].tex; break; }
+        }
+        if (!r->tex.data) {
+            char rel[128], path[1200];
+            snprintf(rel, sizeof rel, "assets/textures/%s", r->png);
+            int w, h, c;
+            uint8_t *px = rt_resource(rel, rel, path, sizeof path) ? stbi_load(path, &w, &h, &c, 4) : NULL;
+            if (!px) { LOG("[ui2x] %s: can't read it\n", rel); return false; }
+            r->tex = (Ui2xTex){(uint32_t)w, (uint32_t)h, UI2X_BC3, NULL, 0};
+            r->tex.data = encode(px, (uint32_t)w, (uint32_t)h, UI2X_BC3, &r->tex.size);
+            stbi_image_free(px);
+            if (!r->tex.data) return false;
+        }
+        *out = r->tex;
+        out->data = malloc(r->tex.size);  // (the caller frees it)
+        if (!out->data) return false;
+        memcpy(out->data, r->tex.data, r->tex.size);
+        return true;
+    }
+    return false;
+}
+
+bool ui2x_enabled(void) {
+    pthread_mutex_lock(&g_pak_lock);
+    repl_load();
+    bool any = g_nrepl > 0;
+    pthread_mutex_unlock(&g_pak_lock);
+    return any || (g_settings.ui2x && ui2x_count() > 0);
+}
 
 bool ui2x_find(uint64_t key, uint32_t src_w, uint32_t src_h, Ui2xTex *out) {
+    pthread_mutex_lock(&g_pak_lock);
+    if (repl_find(key, src_w, src_h, out)) { pthread_mutex_unlock(&g_pak_lock); return true; }
+    pthread_mutex_unlock(&g_pak_lock);
     if (!g_settings.ui2x) return false;
     bool ok = false;
     pthread_mutex_lock(&g_pak_lock);
@@ -593,26 +680,10 @@ static bool pack(void) {
         if (err < 0 || err > BACK_DOWN_MAX) { g_rejected++; stbi_image_free(px); continue; }
         if (err > g_err_max) g_err_max = err;
         int fmt = it->ch == 1 ? UI2X_BC4 : it->ch == 2 ? UI2X_BC5 : opaque ? UI2X_BC1 : UI2X_BC3;
-        uint32_t bpb = fmt == UI2X_BC1 || fmt == UI2X_BC4 ? 8 : 16, wb = ((uint32_t)w + 3) / 4, hb = ((uint32_t)h + 3) / 4;
-        uint64_t size = (uint64_t)wb * hb * bpb;
-        uint8_t *out = malloc(size);
-        if (!out) { stbi_image_free(px); continue; }
-        for (uint32_t by = 0; by < hb; by++)
-            for (uint32_t bx = 0; bx < wb; bx++) {
-                uint8_t blk[64], r[16], rg[32];
-                for (int k = 0; k < 16; k++) {  // (edges: the last row / column repeated)
-                    uint32_t x = bx * 4 + k % 4, y = by * 4 + k / 4;
-                    if (x >= (uint32_t)w) x = (uint32_t)w - 1;
-                    if (y >= (uint32_t)h) y = (uint32_t)h - 1;
-                    memcpy(blk + k * 4, px + ((size_t)y * w + x) * 4, 4);
-                    r[k] = blk[k * 4], rg[k * 2] = blk[k * 4], rg[k * 2 + 1] = blk[k * 4 + 1];
-                }
-                uint8_t *d = out + ((uint64_t)by * wb + bx) * bpb;
-                if (fmt == UI2X_BC4) stb_compress_bc4_block(d, r);
-                else if (fmt == UI2X_BC5) stb_compress_bc5_block(d, rg);
-                else stb_compress_dxt_block(d, blk, fmt == UI2X_BC3, STB_DXT_HIGHQUAL);
-            }
+        uint64_t size;
+        uint8_t *out = encode(px, (uint32_t)w, (uint32_t)h, fmt, &size);
         stbi_image_free(px);
+        if (!out) continue;
         fwrite(out, 1, size, f);
         free(out);
         e[n++] = (PakEntry){it->key, it->w, it->h, (uint32_t)fmt, (uint32_t)w, (uint32_t)h, 0, off, size};

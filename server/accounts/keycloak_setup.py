@@ -73,6 +73,58 @@ def ensure_client(client, realm, native_id, redirect_uri):
     return {"client_id": native_id, "internal_id": actual["id"], "created": created, "redirect_uri": redirect_uri}
 
 
+def ensure_staff_mfa(client, realm, client_id):
+    """The dashboard client's own sign-in: password then a required one-time code (TOTP; Keycloak asks to set one up the
+    first time), reported as amr "mfa" in its tokens (the admin API's check). A copy of the realm's browser flow, bound to
+    this client only: other clients and the realm's own flows are left as they are."""
+    path = "/admin/realms/" + quote(realm, safe="")
+    alias = client_id + " browser"
+    flows = client.get(path + "/authentication/flows"); flows.raise_for_status()
+    if not any(f["alias"] == alias for f in flows.json()):
+        client.post(path + "/authentication/flows/browser/copy", json={"newName": alias}).raise_for_status()
+        flows = client.get(path + "/authentication/flows"); flows.raise_for_status()
+    flow = next(f for f in flows.json() if f["alias"] == alias)
+    executions = lambda: client.get(path + "/authentication/flows/" + quote(alias, safe="") + "/executions").json()
+    def require(execution, requirement):
+        if execution["requirement"] != requirement:
+            client.put(path + "/authentication/flows/" + quote(alias, safe="") + "/executions",
+                       json={"id": execution["id"], "requirement": requirement}).raise_for_status()
+    steps = executions()
+    forms = next(e for e in steps if e.get("authenticationFlow") and e["level"] == 0 and "forms" in e["displayName"].lower())
+    for e in steps:
+        if e.get("providerId") == "auth-cookie":
+            require(e, "DISABLED")  # (an earlier sign-in's cookie would skip the code)
+        if e.get("authenticationFlow") and e["level"] == 1 and "conditional" in e["displayName"].lower():
+            require(e, "DISABLED")  # (the realm's optional second factor: replaced by the required one below)
+    otp = [e for e in steps if e.get("providerId") == "auth-otp-form" and e["level"] == 1 and not e.get("authenticationFlow")
+           and e.get("authenticationConfig")]
+    if not otp:
+        client.post(path + "/authentication/flows/" + quote(forms["displayName"], safe="") + "/executions/execution",
+                    json={"provider": "auth-otp-form"}).raise_for_status()
+        added = [e for e in executions() if e.get("providerId") == "auth-otp-form" and e["level"] == 1 and not e.get("authenticationConfig")]
+        client.post(path + "/authentication/executions/" + added[-1]["id"] + "/config",
+                    json={"alias": client_id + "-otp-mfa", "config": {"default.reference.value": "mfa"}}).raise_for_status()
+        otp = [e for e in executions() if e["id"] == added[-1]["id"]]
+    require(otp[0], "REQUIRED")
+    for _ in range(8):  # (after the password form: the code needs the user it belongs to)
+        level1 = [e for e in executions() if e["level"] == 1 and e.get("parentFlow", forms.get("flowId")) == forms.get("flowId")]
+        mine = next(e for e in level1 if e["id"] == otp[0]["id"])
+        password = next(e for e in level1 if e.get("providerId") == "auth-username-password-form")
+        if mine["index"] > password["index"]:
+            break
+        client.post(path + "/authentication/executions/" + mine["id"] + "/lower-priority").raise_for_status()
+    found = client.get(path + "/clients", params={"clientId": client_id}); found.raise_for_status()
+    app = found.json()[0]
+    if app.get("authenticationFlowBindingOverrides", {}).get("browser") != flow["id"]:
+        app["authenticationFlowBindingOverrides"] = {**app.get("authenticationFlowBindingOverrides", {}), "browser": flow["id"]}
+        client.put(path + "/clients/" + app["id"], json=app).raise_for_status()
+    if not any(m.get("protocolMapper") == "oidc-amr-mapper" for m in app.get("protocolMappers", [])):
+        client.post(path + "/clients/" + app["id"] + "/protocol-mappers/models", json={
+            "name": "amr", "protocol": "openid-connect", "protocolMapper": "oidc-amr-mapper",
+            "config": {"access.token.claim": "true", "id.token.claim": "true", "introspection.token.claim": "true"}}).raise_for_status()
+    return {"flow": alias, "steps": [(e["displayName"], e["requirement"]) for e in executions()]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--credentials-env", type=Path)
@@ -80,6 +132,7 @@ def main():
     parser.add_argument("--realm", default="johto")
     parser.add_argument("--client-id", default="letsgo-native")
     parser.add_argument("--redirect-uri", default="http://127.0.0.1:7386/callback")
+    parser.add_argument("--staff-mfa", action="store_true", help="The dashboard client: require a one-time code, reported as amr mfa")
     args = parser.parse_args()
     parsed = urlsplit(args.base_url)
     if parsed.scheme != "https" and parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
@@ -87,6 +140,8 @@ def main():
     values = load_env(args.credentials_env) if args.credentials_env else os.environ
     with admin_client(args.base_url, values) as client:
         result = ensure_client(client, args.realm, args.client_id, args.redirect_uri)
+        if args.staff_mfa:
+            result["staff_mfa"] = ensure_staff_mfa(client, args.realm, args.client_id)
         discovery = client.get(f"/realms/{quote(args.realm, safe='')}/.well-known/openid-configuration")
         discovery.raise_for_status()
         metadata = discovery.json()

@@ -112,7 +112,9 @@ For supported unmodified clients, delivery must use a recoverable local transact
 
 Recovery distinguishes prepared-only, committed-without-ack and inconsistent state. Prepared-only can resume from a verified generation; committed-without-ack only resends acknowledgement. Inconsistent state is quarantined with a useful recovery message, rather than guessing from an item count or granting again.
 
-**Implementation gate:** the native save is now replaced atomically (`runtime/services/fs.c`, A04a in the [roadmap](ACCOUNTS-MYSTERY-GIFTS-ROADMAP.md#a04a-atomic-native-save-27-october-2026)): the game's `SetSize(0)` + whole 1 MB Write goes to a flushed copy that replaces `savedata.bin`, tested on copied saves at each crash/write-failure boundary. Item insertion and the generation-bound receipt (A04b) remain before normal-save delivery. Keep all initial delivery experiments on isolated copied saves.
+**Implementation gate:** passed on copied saves (A04 in the [roadmap](ACCOUNTS-MYSTERY-GIFTS-ROADMAP.md#a04b-save-checkpoint-and-receipt-27-october-2026)): the native save is replaced atomically, the gift is applied as the game builds its save image, and a receipt bound to the old/new save hashes plus startup recovery prevents a second application across every tested crash point. Keep delivery experiments on isolated copied saves.
+
+**Native Mystery Gift route (adapter `lgpe-wb7-v1`, the preferred one):** a claim becomes a one-time card (WB7) that the game's own Mystery Gift serves under "Get via internet"; the game applies it, records the card id in the save's received flags and saves. That flag is the receipt: the claim commits with the save that carries it, and the launcher acknowledges it with that save's hash. Items (at most 6) and Pokemon. Codes can also be typed in the game's "Get with code/password". The bag route above (`lgpe-items-v1`) stays for item campaigns without the native adapter. Details, formats and verification: the [roadmap](ACCOUNTS-MYSTERY-GIFTS-ROADMAP.md) (native Mystery Gift), operations: `server/accounts/README.md`.
 
 ## Deployment and implementation sequence
 

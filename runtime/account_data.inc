@@ -82,7 +82,7 @@ static void profile_publish(const ProfileContext *ctx, const char *id, const cha
     pthread_mutex_lock(&g_lock);
     if (ctx->generation==g_context_generation && !strcmp(ctx->identity,g_identity) && g_view.state==ACCOUNT_SIGNED_IN) {
         g_profile.busy=false; g_profile.bound=bound;
-        if(bound) g_claim_reload=true;
+        if(bound) g_claim_reload=true, g_delivery_reload=true;
         if (id) snprintf(g_profile.id,sizeof g_profile.id,"%s",id);
         if (label) snprintf(g_profile.label,sizeof g_profile.label,"%s",label);
         snprintf(g_profile.detail,sizeof g_profile.detail,"%s",detail);
@@ -229,7 +229,10 @@ static bool inbox_parse(const char *data,AccountInboxSnapshot *out) {
            strcmp(r->status,out->kind==0 ? "available" : out->kind==1 ? "pending" : "received") ||
            !json_get(row,"profile_label",r->profile_label,sizeof r->profile_label,false) ||
            !json_get(row,"item_count",number,sizeof number,true)) return false;
-        long quantity=atol(number); if(quantity<1 || quantity>31968) return false; r->item_count=(int)quantity;
+        long quantity=atol(number); if(quantity<0 || quantity>31968) return false; r->item_count=(int)quantity;
+        r->species=(int)json_long(row,"species",0); r->level=(int)json_long(row,"level",0);
+        if(r->species<0 || r->species>809 || r->level<0 || r->level>100 || (!quantity && !r->species)) return false;
+        r->native=strstr(row,"\"native\":true") || strstr(row,"\"native\": true");
         // Only a presentation hint; no code or reward mutation is exposed by this read-only page.
         r->requires_code=strstr(row,"\"requires_code\":true") || strstr(row,"\"requires_code\": true");
         out->count++;

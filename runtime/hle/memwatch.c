@@ -50,18 +50,18 @@ static LONG CALLBACK veh(EXCEPTION_POINTERS *ep) {
         if (seen++ < 8) LOG("[watch] f%llu access %llx (%s) on a watched page\n", (unsigned long long)renderer_game_frame(), (unsigned long long)a,
                              r->ExceptionInformation[0] ? "write" : "read");
         if (max == -2) max = getenv("LARECOMP_WATCH_MAX") ? atol(getenv("LARECOMP_WATCH_MAX")) : -1;
+        DWORD old;
+        VirtualProtect((void *)(uintptr_t)page, 4096, PAGE_READWRITE, &old);  // (first: the log below reads the word)
         for (int i = 0; i < g_n && (max < 0 || logged < max); i++) {
             // (a store of up to 16 bytes starting before the word: SIMD vectors; a read, up to 64: a block copy)
             if (a + (r->ExceptionInformation[0] ? 16 : 64) > g_addr[i] && a < g_addr[i] + 4) {
                 logged++;
-                LOG("[watch] f%llu write to %llx (was %08x)\n", (unsigned long long)renderer_game_frame(), (unsigned long long)g_addr[i],
-                    *(volatile uint32_t *)(uintptr_t)g_addr[i]);
+                LOG("[watch] f%llu %s %llx (was %08x)\n", (unsigned long long)renderer_game_frame(), r->ExceptionInformation[0] ? "write to" : "read of",
+                    (unsigned long long)g_addr[i], *(volatile uint32_t *)(uintptr_t)g_addr[i]);
                 plat_print_backtrace();
                 break;
             }
         }
-        DWORD old;
-        VirtualProtect((void *)(uintptr_t)page, 4096, PAGE_READWRITE, &old);
         t_rearm = page;
         ep->ContextRecord->EFlags |= 0x100;  // single step
         return EXCEPTION_CONTINUE_EXECUTION;
@@ -220,6 +220,9 @@ static DWORD WINAPI watch_at_thread(LPVOID arg) {
     }
     return 0;
 }
+
+// A word to watch from now on, armed by other code once the data is in place (runtime/services/bcat.c, LARECOMP_BCAT_WATCH)
+void memwatch_watch(uint64_t addr) { watch(addr); }
 
 // LARECOMP_WATCH_LIKE=<present>:<addr>: at that present, every word of the heaps holding the value at addr now (another
 // copy of a position: which one the game computes, and where) is watched (up to MAXW)

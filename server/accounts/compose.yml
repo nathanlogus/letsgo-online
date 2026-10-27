@@ -1,3 +1,7 @@
+# Let's Go's online services: accounts + Mystery Gift API (with the admin dashboard at /admin/), its PostgreSQL, the
+# co-op relay and (profile "identity") Keycloak. Run from the repository root:
+#   docker compose --env-file tests/config/letsgo-accounts.env -f server/accounts/compose.yml up -d --build
+#   ... --profile identity up -d    also Keycloak (moved here from ssrecomp's Johto Online compose; see README.md)
 name: letsgo-accounts
 services:
   database:
@@ -36,6 +40,16 @@ services:
       ACCOUNT_OIDC_INTERNAL_URL: ${ACCOUNT_OIDC_INTERNAL_URL:-}
       ACCOUNT_NATIVE_CLIENT_ID: ${ACCOUNT_NATIVE_CLIENT_ID:-letsgo-native}
       ACCOUNT_NATIVE_REDIRECT_URI: ${ACCOUNT_NATIVE_REDIRECT_URI:-http://127.0.0.1:7386/callback}
+      ACCOUNT_PUBLIC_URL: ${ACCOUNT_PUBLIC_URL:-}                  # the dashboard's redirect is <this>/admin/
+      ACCOUNT_ADMIN_CLIENT_ID: ${ACCOUNT_ADMIN_CLIENT_ID:-letsgo-admin}
+      ACCOUNT_ADMIN_REQUIRE_MFA: ${ACCOUNT_ADMIN_REQUIRE_MFA:-1}  # 0: the staff role alone (keycloak_setup --staff-mfa restores it)
+      ACCOUNT_RELAY_ADMIN_URL: http://relay:7382
+      ACCOUNT_RELAY_ADMIN_TOKEN: ${RELAY_ADMIN_TOKEN:?Set RELAY_ADMIN_TOKEN (32+ random characters)}
+      ACCOUNT_DASHBOARD_ASSETS: /dashboard-art
+    volumes:
+      # The dashboard's game artwork (dashboard/collect_assets.py; default: the folder it writes in tests/config): never
+      # in git or the image. The page works without it.
+      - ${DASHBOARD_ART_DIR:-../../tests/config/dashboard-assets}:/dashboard-art:ro
     read_only: true
     tmpfs:
       - /tmp:size=16m
@@ -46,5 +60,60 @@ services:
       interval: 15s
       timeout: 3s
       retries: 3
+
+  relay:
+    build:
+      context: ..
+      dockerfile: relay.Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${RELAY_BIND:-127.0.0.1}:${RELAY_PORT:-7381}:7381"  # RELAY_BIND=0.0.0.0 for a public relay
+    environment:
+      COOP_RELAY_MAX_ROOMS: ${RELAY_MAX_ROOMS:-100}
+      COOP_RELAY_ADMIN_TOKEN: ${RELAY_ADMIN_TOKEN:?Set RELAY_ADMIN_TOKEN (32+ random characters)}
+    # (its admin/health port 7382 stays on this Compose network: only the API reaches it)
+    stop_grace_period: 10s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  keycloak-db:
+    image: postgres:17
+    profiles: ["identity"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD (the existing database keeps its own)}
+    volumes:
+      - keycloak-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak -d keycloak"]
+      interval: 10s
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start"]
+    profiles: ["identity"]
+    restart: unless-stopped
+    depends_on:
+      keycloak-db: { condition: service_healthy }
+    ports: ["127.0.0.1:8080:8080"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD}
+      KC_HOSTNAME: ${KEYCLOAK_URL:-http://localhost:8080}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD}
+
 volumes:
   account-data:
+  keycloak-db-data:
+    # Johto Online's Keycloak database (ssrecomp's compose): reused, so the johto realm, its users and clients move as
+    # they are. Remove only the old containers, never this volume.
+    external: true
+    name: server_keycloak-db-data

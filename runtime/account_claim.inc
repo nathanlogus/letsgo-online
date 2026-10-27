@@ -1,5 +1,6 @@
 // Versioned per-profile retry journal, protected for the current Windows user.
 // This allocates server entitlements only. It never writes native game rewards or acknowledgements.
+#define NATIVE_ADAPTER "lgpe-wb7-v1"  // a native Mystery Gift card (runtime/account_delivery.inc)
 typedef struct {
     uint32_t version;
     char account[37], profile[37], campaign[37], code[65], key[37], digest[65], adapter[32];
@@ -28,7 +29,7 @@ static bool pending_valid(const PendingClaim *p,const ProfileContext *ctx,const 
        !memchr(p->digest,0,sizeof p->digest) || !memchr(p->adapter,0,sizeof p->adapter)) return false;
     char normalized[65];
     return !strcmp(p->account,ctx->identity) && !strcmp(p->profile,profile) && uuid_valid(p->profile) && uuid_valid(p->key) &&
-        digest_valid(p->digest) && !strcmp(p->adapter,"lgpe-items-v1") &&
+        digest_valid(p->digest) && (!strcmp(p->adapter,"lgpe-items-v1") || !strcmp(p->adapter,NATIVE_ADAPTER)) &&
         ((p->campaign[0] && !p->code[0] && uuid_valid(p->campaign)) ||
          (!p->campaign[0] && p->code[0] && code_normalize(p->code,normalized) && !strcmp(normalized,p->code)));
 }
@@ -99,7 +100,7 @@ void account_gift_preview(const char *campaign_id,const char *code) {
     if(g_started && g_view.state==ACCOUNT_SIGNED_IN && g_profile.bound && !g_profile.busy && !claim_busy_locked() &&
        g_inbox.state!=INBOX_LOADING && g_command==CMD_NONE && !atomic_load(&g_cancel)) {
         snprintf(intent.account,sizeof intent.account,"%s",g_identity);snprintf(intent.profile,sizeof intent.profile,"%s",g_profile.id);
-        snprintf(intent.adapter,sizeof intent.adapter,"lgpe-items-v1");
+        snprintf(intent.adapter,sizeof intent.adapter,NATIVE_ADAPTER);  // (claim_preview falls back to lgpe-items-v1)
         g_intent=intent;g_intent_context=g_context_generation;memset(&g_claim,0,sizeof g_claim);g_claim.state=CLAIM_PREVIEWING;
         g_command=CMD_PREVIEW;
     }
@@ -127,18 +128,27 @@ static void claim_preview(void) {
     if(!pending_path(&ctx,path)) { claim_publish(&ctx,CLAIM_ERROR,false,"Could not locate the claim retry journal.");goto done; }
     if(GetFileAttributesW(path)!=INVALID_FILE_ATTRIBUTES) { claim_publish(&ctx,CLAIM_ERROR,true,"Resume or clear the previous local retry before starting another claim.");goto done; }
     bool ok=authorized_json("POST","/v1/gift-preview",body,result,sizeof result,&status);
+    // A campaign without native cards: the save-time route (lgpe-items-v1), previewed again with that adapter
+    if(ok && status==200 && !strstr(result,"\""NATIVE_ADAPTER"\"") && strstr(result,"\"lgpe-items-v1\"")) {
+        snprintf(intent.adapter,sizeof intent.adapter,"lgpe-items-v1");
+        pthread_mutex_lock(&g_lock);if(g_intent_context==generation) snprintf(g_intent.adapter,sizeof g_intent.adapter,"lgpe-items-v1");pthread_mutex_unlock(&g_lock);
+        ok=claim_body(&intent,body) && authorized_json("POST","/v1/gift-preview",body,result,sizeof result,&status);
+    }
     if(!ok || status!=200 || !json_get(result,"title",title,sizeof title,false) ||
        !json_get(result,"profile_label",label,sizeof label,false) || !json_get(result,"profile_id",profile,sizeof profile,false) || strcmp(profile,intent.profile) ||
        !json_get(result,"reward_digest",digest,sizeof digest,false) || !digest_valid(digest) || !json_get(result,"item_count",number,sizeof number,true) ||
        !json_boolean(result,"eligible",&eligible) || !json_get(result,"reason",reason,sizeof reason,false)) {
         claim_publish(&ctx,CLAIM_ERROR,false,status==404 ? "Gift not found, or the code is not valid." : "Could not preview the gift. Please retry.");goto done;
     }
-    long count=atol(number);if(count<1 || count>31968) {claim_publish(&ctx,CLAIM_ERROR,false,"The gift preview was invalid.");goto done;}
+    long count=atol(number),species=json_long(result,"species",0),level=json_long(result,"level",0);
+    if(count<0 || count>31968 || species<0 || species>809 || level<0 || level>100 || (!count && !species)) {claim_publish(&ctx,CLAIM_ERROR,false,"The gift preview was invalid.");goto done;}
     pthread_mutex_lock(&g_lock);
     if(ctx.generation==g_context_generation && g_intent_context==generation && g_view.state==ACCOUNT_SIGNED_IN) {
         snprintf(g_intent.digest,sizeof g_intent.digest,"%s",digest);g_claim.state=CLAIM_PREVIEW;g_claim.eligible=eligible;g_claim.item_count=(int)count;
+        g_claim.species=(int)species;g_claim.level=(int)level;g_claim.native=!strcmp(intent.adapter,NATIVE_ADAPTER);
         snprintf(g_claim.title,sizeof g_claim.title,"%s",title);snprintf(g_claim.profile_label,sizeof g_claim.profile_label,"%s",label);
-        const char *message=eligible ? "Confirm to reserve this gift for the shown profile. Delivery will be added later." :
+        const char *message=eligible ? (g_claim.native ? "Confirm to reserve this gift for the shown profile. Then, in the game: Mystery Gift > Get via internet." :
+                                                         "Confirm to reserve this gift for the shown profile. It arrives in the game at your next save.") :
             !strcmp(reason,"already_claimed") ? "This account already claimed this gift. Check your gift history." :
             !strcmp(reason,"code_required") ? "Enter a gift code to preview this campaign." :
             !strcmp(reason,"incompatible_profile_or_adapter") ? "This gift does not support the selected profile." :
@@ -185,10 +195,13 @@ static void claim_submit(bool resume) {
        json_get(result,"profile_id",destination,sizeof destination,false) && !strcmp(destination,p.profile) &&
        json_get(result,"reward_digest",digest,sizeof digest,false) && !strcmp(digest,p.digest)) {
         bool removed=DeleteFileW(path)!=FALSE;
-        claim_publish(&ctx,CLAIM_COMPLETE,!removed,"Gift claimed for this profile. It is pending delivery; this build cannot apply rewards yet.");
+        claim_publish(&ctx,CLAIM_COMPLETE,!removed,!strcmp(p.adapter,NATIVE_ADAPTER) ?
+            "Gift claimed for this profile. In the game, open Mystery Gift > Get via internet to receive it." :
+            "Gift claimed for this profile. It arrives in the game the next time you save.");
         pthread_mutex_lock(&g_lock);
         if(ctx.generation==g_context_generation && g_view.state==ACCOUNT_SIGNED_IN) {
             snprintf(g_claim.id,sizeof g_claim.id,"%s",id);g_claim.eligible=false;SecureZeroMemory(&g_intent,sizeof g_intent);
+            g_delivery_reload=true;
             g_inbox_generation++;memset(&g_inbox,0,sizeof g_inbox);g_inbox.kind=-1;g_inbox.state=INBOX_IDLE;
         }
         pthread_mutex_unlock(&g_lock);

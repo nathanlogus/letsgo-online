@@ -23,15 +23,13 @@ static constexpr float pi = 3.14159265358979323846f;
 // IDs 1 / 2 retain the existing Hello / Cheer wire meanings. Protocol 4 has
 // always reserved IDs 0..15, so old clients can still join the same room.
 static const char *labels[] = {"Hello", "Cheer", "Happy", "Love", "Surprised", "Sad", "Angry", "Sleepy"};
-static const char *files[] = {"kindly-mark.png", "pumped-up-mark.png", "upbeat-mark.png", "joyful-mark.png",
-    "flustered-mark.png", "teary-mark.png", "angry-mark.png", "sleepy-time-mark.png"};
-static ImTextureID icons[8];
+static ImTextureID icons[COOP_EMOTE_COUNT];
 static bool loaded;
 static void load_icons(void) {
     if (loaded) return;
     loaded = true;
-    for (int i=0; i<8; i++) {
-        char rel[160], path[1200]; snprintf(rel,sizeof rel,"assets/emotes/%s",files[i]);
+    for (int i=0; i<COOP_EMOTE_COUNT; i++) {
+        char rel[160], path[1200]; snprintf(rel,sizeof rel,"assets/emotes/%s-mark.png",coop_emote_name(i+1));
         if (!rt_resource(rel,rel,path,sizeof path)) continue;
         SDL_Surface *src=SDL_LoadPNG(path);
         SDL_Surface *rgba=src ? SDL_ConvertSurface(src,SDL_PIXELFORMAT_RGBA32) : nullptr;
@@ -48,7 +46,7 @@ static void load_icons(void) {
         if(src) SDL_DestroySurface(src);
     }
     int count=0;for(auto id:icons)if(id)count++;
-    fprintf(stderr,"[emote-wheel] loaded %d/8 mark icons\n",count);
+    fprintf(stderr,"[emote-wheel] loaded %d/%d mark icons\n",count,COOP_EMOTE_COUNT);
 }
 static void close_wheel(void) { opened=false; input_reset(); input_quarantine_pad(); }
 static void send_selected(void) {
@@ -111,7 +109,7 @@ bool emote_wheel_event(const SDL_Event *e) {
     return e->type==SDL_EVENT_KEY_UP || e->type==SDL_EVENT_TEXT_INPUT;
 }
 static void icon(ImDrawList *dl,int i,ImVec2 p,float size,float angle,ImU32 tint=IM_COL32_WHITE) {
-    if(!icons[i]) { ImVec2 t=ImGui::CalcTextSize(labels[i]);dl->AddText(ImVec2(p.x-t.x/2,p.y-t.y/2),IM_COL32(61,67,87,255),labels[i]);return; }
+    if(!icons[i]) { char l[32];coop_emote_label(i+1,l,sizeof l);ImVec2 t=ImGui::CalcTextSize(l);dl->AddText(ImVec2(p.x-t.x/2,p.y-t.y/2),IM_COL32(61,67,87,255),l);return; }
     float c=cosf(angle)*size/2,s=sinf(angle)*size/2;
     dl->AddImageQuad(icons[i],ImVec2(p.x-c+s,p.y-s-c),ImVec2(p.x+c+s,p.y+s-c),
         ImVec2(p.x+c-s,p.y+s+c),ImVec2(p.x-c-s,p.y-s+c),ImVec2(0,0),ImVec2(1,0),ImVec2(1,1),ImVec2(0,1),tint);
@@ -152,15 +150,21 @@ void emote_wheel_draw(float scale) {
     if(ImGui::IsMouseClicked(0) && choice>=0)send_selected();
     if(ImGui::IsMouseClicked(1))close_wheel();
 }
+void emote_icon_draw(uint8_t emote,float x,float y,float size) {
+    if(!coop_emote_name(emote))return;
+    load_icons();
+    icon(ImGui::GetForegroundDrawList(),emote-1,ImVec2(x,y),size,0);
+}
 void emote_bubble_draw(uint8_t emote,uint64_t at,float x,float bottom,float scale) {
     uint64_t now=plat_now_ns();
-    if(emote<1 || emote>8 || !at || now<at || now-at>3000000000ull)return;
+    if(!coop_emote_name(emote) || !at || now<at || now-at>3000000000ull)return;
     load_icons();
-    float age=(float)(now-at)/1e9f,fade=fminf(1.f,(3-age)/.3f);
-    float pop=age<.22f ? .65f+.35f*sinf(fminf(age/.22f,1.f)*pi/2) : 1;
-    float size=80*scale*pop,shake=sinf(age*30)*.13f*expf(-age*1.6f);
-    float drift=sinf(age*25)*3*scale*expf(-age*1.5f);
-    ImVec2 p(x+drift,bottom-size/2-11*scale),a(p.x-size/2,p.y-size/2),b(p.x+size/2,p.y+size/2);
+    // Wall-clock timing: pop in with a small overshoot, float gently, then shrink and fade over the last 0.3 s.
+    float age=(float)(now-at)/1e9f,in=fminf(age/.35f,1.f),k=in-1,out=fmaxf(0.f,(age-2.7f)/.3f),fade=1-out;
+    float pop=1+2.70158f*k*k*k+1.70158f*k*k;
+    float size=80*scale*pop*(1-.35f*out),shake=sinf(age*30)*.13f*expf(-age*1.6f);
+    float drift=sinf(age*25)*3*scale*expf(-age*1.5f),bob=sinf(age*5)*3.5f*scale*in-out*10*scale;
+    ImVec2 p(x+drift,bottom-size/2-11*scale+bob),a(p.x-size/2,p.y-size/2),b(p.x+size/2,p.y+size/2);
     a.x=fmaxf(6*scale,fminf(a.x,ImGui::GetIO().DisplaySize.x-size-6*scale));b.x=a.x+size;p.x=(a.x+b.x)/2;
     if(a.y<6*scale){float d=6*scale-a.y;a.y+=d;b.y+=d;p.y+=d;}
     ImDrawList *dl=ImGui::GetForegroundDrawList();

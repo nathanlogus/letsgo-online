@@ -662,8 +662,13 @@ static uint32_t errno_result(void) {
 
 uint64_t g_savedata_guest;  // in-memory save image, for co-op QA diffs
 
+bool gift_before_replace(const char *save, const void *image, size_t size);  // (runtime/hle/gift.c: the gift receipt)
+void gift_after_replace(const char *save, bool ok);
+void gift_recover(const char *save);
+
 // A whole-file write of a save (see save_settle). LARECOMP_SAVE_FAULT (QA): fail = report a write error and change
-// nothing; crash-copy / crash-replaced = end the process before / after the replace.
+// nothing; crash-copy / crash-receipt / crash-replaced = end the process before the gift receipt / after it, before
+// the replace / after the replace, before the gift is recorded as committed.
 static bool save_replace(HostFile *f, const void *data, size_t size) {
     const char *fault = getenv("LARECOMP_SAVE_FAULT");
     int64_t due = f->size_due;
@@ -675,10 +680,13 @@ static bool save_replace(HostFile *f, const void *data, size_t size) {
     bool ok = fd >= 0 && pwrite(fd, data, size, 0) == (ssize_t)size && !fsync(fd);
     if (fd >= 0) close(fd);
     if (ok && fault && !strcmp(fault, "crash-copy")) { LOG("[save] QA fault: end before replace\n"); _exit(3); }
+    ok = ok && gift_before_replace(f->path, data, size);
+    if (ok && fault && !strcmp(fault, "crash-receipt")) { LOG("[save] QA fault: end after the receipt\n"); _exit(3); }
     close(f->fd);  // (Windows can't replace an open file)
     ok = ok && plat_replace_file(tmp, f->path);
+    if (ok && fault && !strcmp(fault, "crash-replaced")) { LOG("[save] QA fault: end after replace\n"); _exit(3); }
+    gift_after_replace(f->path, ok);
     if (!ok) { LOG("[save] write failed (errno %d): the save is unchanged\n", errno); unlink(tmp); }
-    else if (fault && !strcmp(fault, "crash-replaced")) { LOG("[save] QA fault: end after replace\n"); _exit(3); }
     f->fd = open(f->path, O_RDWR);
     if (f->fd < 0) { LOG("[save] cannot reopen %s (errno %d)\n", f->path, errno); return false; }
     if (ok && due > (int64_t)size) ok = !ftruncate(f->fd, due);  // (a SetSize past the data: zeros)
@@ -832,6 +840,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         f->fd = fd;
         strlcpy(f->path, p, sizeof f->path);
         f->save = strstr(p, "savedata") != NULL, f->size_due = -1;
+        if (f->save) gift_recover(p);
         Service *fsvc = service_new("IFile", file, f);
         fsvc->on_close = file_close;
         ipc_return_object(resp, fsvc);

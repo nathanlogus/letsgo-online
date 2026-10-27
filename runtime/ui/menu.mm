@@ -37,6 +37,7 @@ bool renderer_world_to_screen(float x, float y, float z, float *sx, float *sy, b
 bool fps60_world_active(void);  // runtime/hle/fps60.c
 bool fps60_social_overworld(void);
 bool coop_menu_visible(void);  // runtime/hle/coop_menu.c
+bool coop_menu_emote_page(int *page, int *pages, uint8_t ids[3]);
 #include "../coop_net.h"
 #include "../ui2x.h"
 #include "../platform.h"
@@ -863,6 +864,23 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             if (coop_net_local_head(&hx,&hy,&hz,name)) bottom=make_coop_plate(name,px,py,scale,coop_net_local_slot()).a.y-8*scale;
             emote_bubble_draw(emote,at,px,bottom,scale);
         }
+    }
+    int emote_page, emote_pages; uint8_t emote_ids[3];
+    if (coop_menu_emote_page(&emote_page, &emote_pages, emote_ids)) {
+        // Communicate's three-choice layout has no spare text pane: the page and its marks sit in a strip below it.
+        ImDrawList *dl = ImGui::GetForegroundDrawList();
+        char page[32]; snprintf(page, sizeof page, "Page %d/%d", emote_page, emote_pages);
+        ImU32 grey = IM_COL32(70, 76, 66, 255);
+        float icon = 52 * scale, gap = 12 * scale, pad = 18 * scale, h = icon + 14 * scale;
+        float w = pad * 2 + prompt(dl, 0, 0, "L", grey, "", false) + 3 * icon + 2 * gap + gap +
+                  prompt(dl, 0, 0, "R", grey, page, false);
+        ImVec2 a(io.DisplaySize.x * 0.5f - w * 0.5f, io.DisplaySize.y - h - 24 * scale), b(a.x + w, a.y + h);
+        float x = a.x + pad, y = (a.y + b.y) * 0.5f;
+        dl->AddRectFilled(a, b, IM_COL32(255, 255, 251, 240), h * 0.5f);
+        dl->AddRect(a, b, IM_COL32(210, 217, 211, 255), h * 0.5f, 0, 1.5f * scale);
+        x += prompt(dl, x, y, "L", grey, "", true);
+        for (int i = 0; i < 3; i++, x += icon + gap) emote_icon_draw(emote_ids[i], x + icon * 0.5f, y, icon);
+        prompt(dl, x, y, "R", grey, page, true);
     }
     if (finger) {  // the controller's finger on the touch screen (right stick moves it, ZR touches)
         ImDrawList *dl = ImGui::GetForegroundDrawList();

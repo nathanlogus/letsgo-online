@@ -453,7 +453,7 @@ static void process_message(const uint8_t *p, size_t n) {
     }
     if (p[0] == 'E' && n == 3) {
         pthread_mutex_lock(&g_lock);
-        if (g_remote.present && p[1] == g_remote.slot && p[2] <= 15) {
+        if (g_remote.present && p[1] == g_remote.slot && coop_emote_name(p[2])) {
             g_remote.emote = p[2];
             g_remote.emote_received_ns = plat_now_ns();
         }
@@ -503,7 +503,7 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
     uint8_t hello[128];
     size_t n = 0;
     hello[n++] = resume ? 'R' : create ? 'C' : 'J';
-    hello[n++] = 7;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches
+    hello[n++] = 8;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches; 8: turn digest skips unset battle Pokemon bytes
     put_u64(hello + n, g_program_id); n += 8;
     put_u64(hello + n, build_id); n += 8;
     if (!create) {
@@ -861,7 +861,7 @@ bool coop_net_remote_near(float radius_cm) {
 }
 
 void coop_net_emote(uint8_t emote) {
-    if (!emote || emote > 15) return;
+    if (!coop_emote_name(emote)) return;
     pthread_mutex_lock(&g_lock);
     uint64_t now = plat_now_ns();
     if (g_local_emote_at && now >= g_local_emote_at && now - g_local_emote_at < 400000000ull) {

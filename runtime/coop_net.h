@@ -86,5 +86,23 @@ bool coop_net_remote(CoopRemote *out);
 bool coop_net_remote_near(float radius_cm);
 bool coop_net_social_near(float radius_cm); // friends overlay may send an emote while open
 void coop_net_emote(uint8_t emote);
+// Emote wire IDs are 1-based positions in this list of assets/emotes/<name>-mark.png. Append new marks at the end
+// so IDs stay stable (1..8 are the original wheel). The relay forwards 1..63; clients ignore IDs they do not list.
+static inline const char *coop_emote_name(unsigned id) {
+    static const char *const names[] = {
+        "kindly", "pumped-up", "upbeat", "joyful", "flustered", "teary", "angry", "sleepy-time",
+        "absent-minded", "blizzard", "calmness", "charismatic", "cloudy", "crafty", "curry", "dawn", "destiny",
+        "dry", "dusk", "excited", "ferocious", "fishing", "humble", "intellectual", "intense", "jittery",
+        "lunchtime", "misty", "peeved", "prideful", "rainy", "rare", "rowdy", "sandstorm", "scowling", "slump",
+        "snowy", "thorny", "uncommon", "unsure", "vigor", "zero-energy", "zoned-out"};
+    return id >= 1 && id <= sizeof names / sizeof *names ? names[id - 1] : 0;
+}
+#define COOP_EMOTE_COUNT 43
+// "pumped-up" -> "Pumped up"; empty for an unknown ID.
+static inline void coop_emote_label(unsigned id, char *out, unsigned size) {
+    const char *s = coop_emote_name(id); unsigned n = 0;
+    while (s && s[n] && n + 1 < size) { out[n] = s[n] == '-' ? ' ' : n ? s[n] : (char)(s[n] - 32); n++; }
+    if (size) out[n] = 0;
+}
 // Last local emote and a fresh world anchor, also available while playing solo.
 bool coop_net_local_emote(uint8_t *emote, uint64_t *at, float *x, float *y, float *z);

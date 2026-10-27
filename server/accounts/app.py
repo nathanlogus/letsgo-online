@@ -11,7 +11,9 @@ from uuid import UUID, uuid4
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from pathlib import Path
+import httpx
 from psycopg import OperationalError
 from psycopg.errors import LockNotAvailable
 from psycopg.types.json import Jsonb
@@ -21,8 +23,8 @@ from starlette.concurrency import run_in_threadpool
 from .auth import IdentityVerifier, authenticate, create_session, digest, fail, issue_pair, now
 from .config import Config
 from .db import Database
-from .models import (AccountAction, AckInput, CampaignAction, CampaignInput, ClaimInput,
-                     CodeInput, NativeCompleteInput, ProfileInput, RefreshInput, TokenInput)
+from .models import (AccountAction, AckInput, CampaignAction, CampaignInput, CardInput, ClaimInput,
+                     CodeInput, NATIVE_ADAPTER, NativeCompleteInput, ProfileInput, RefreshInput, TokenInput)
 
 
 def canonical(value):
@@ -47,7 +49,18 @@ def audit(conn, actor, action, target, request_id):
 
 def claim_view(row):
     return jsonable_encoder({k: row[k] for k in ("id", "campaign_id", "profile_id", "adapter", "reward",
-                             "reward_digest", "state", "created_at", "acknowledged_at")})
+                             "reward_digest", "state", "created_at", "acknowledged_at", "card_id")})
+
+
+def item_count(reward):
+    return sum(i["quantity"] for i in reward["items"]) if reward["kind"] == "item_bundle" else 0
+
+
+def contents(reward, native):
+    """What the launcher shows: item count, or the Pokemon's species and level; native = a Mystery Gift card."""
+    pokemon = reward.get("pokemon") or {}
+    return {"item_count": item_count(reward), "species": pokemon.get("species", 0), "level": pokemon.get("level", 0),
+            "native": native}
 
 
 class BoundedRequests:
@@ -132,7 +145,7 @@ def create_app(config=None, verifier=None):
                     response = await call_next(request)
             except (OperationalError, PoolTimeout):
                 response = JSONResponse({"error": {"code": "database_unavailable"}}, status_code=503)
-        response.headers["Cache-Control"] = "no-store"
+        response.headers.setdefault("Cache-Control", "no-store")  # (the dashboard artwork may be cached)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Request-ID"] = request.state.request_id
         if config.environment == "production":
@@ -160,7 +173,7 @@ def create_app(config=None, verifier=None):
             if admin:
                 if account["role"] != "admin":
                     fail(403, "admin_required")
-                if not account["mfa_at"] or (now()-account["mfa_at"]).total_seconds() > config.admin_mfa_seconds:
+                if config.admin_require_mfa and (not account["mfa_at"] or (now()-account["mfa_at"]).total_seconds() > config.admin_mfa_seconds):
                     fail(403, "recent_mfa_required")
             yield conn, account
 
@@ -194,6 +207,19 @@ def create_app(config=None, verifier=None):
     @app.post("/v1/auth/native/complete")
     def native_complete(body: NativeCompleteInput, request: Request):
         return login_session(identity.complete_native(body.code, body.code_verifier, body.nonce), request)
+
+    # The dashboard (/admin/): the same code + PKCE exchange with its own public client and redirect. The admin API
+    # still requires the admin role and a recent MFA sign-in (amr "mfa", auth_time).
+    @app.get("/v1/auth/admin/config")
+    def admin_config():
+        metadata = identity.provider()
+        return {"issuer": config.oidc_issuer, "authorization_endpoint": metadata["authorization_endpoint"],
+                "client_id": config.admin_client_id, "redirect_uri": config.admin_redirect_uri}
+
+    @app.post("/v1/auth/admin/complete")
+    def admin_complete(body: NativeCompleteInput, request: Request):
+        return login_session(identity.complete_native(body.code, body.code_verifier, body.nonce,
+                                                      config.admin_client_id, config.admin_redirect_uri), request)
 
     def login_session(claims, request):
         display = str(claims.get("preferred_username", "Trainer"))
@@ -299,23 +325,22 @@ def create_app(config=None, verifier=None):
                 if not profile:
                     fail(404, "profile_not_found")
             if kind == "available":
-                rows = conn.execute("""SELECT c.id,c.title,c.reward,c.requires_code FROM campaigns c
+                rows = conn.execute("""SELECT c.id,c.title,c.reward,c.requires_code,c.adapters ? %s AS native FROM campaigns c
                     WHERE c.state='published' AND c.starts_at<=now() AND c.ends_at>now()
                     AND (c.stock IS NULL OR c.allocated<c.stock)
                     AND (%s::text IS NULL OR c.editions ? %s::text)
                     AND NOT EXISTS(SELECT 1 FROM claims cl WHERE cl.campaign_id=c.id AND cl.account_id=%s)
                     ORDER BY c.created_at,c.id LIMIT %s OFFSET %s""",
-                    (profile["edition"] if profile else None, profile["edition"] if profile else None,
+                    (NATIVE_ADAPTER, profile["edition"] if profile else None, profile["edition"] if profile else None,
                      account["id"], limit+1, offset)).fetchall()
             else:
-                rows = conn.execute("""SELECT cl.id,c.title,cl.reward,p.label AS profile_label FROM claims cl
+                rows = conn.execute("""SELECT cl.id,c.title,cl.reward,p.label AS profile_label,cl.adapter=%s AS native FROM claims cl
                     JOIN campaigns c ON c.id=cl.campaign_id JOIN profiles p ON p.id=cl.profile_id
                     WHERE cl.account_id=%s AND cl.state=%s AND (%s::uuid IS NULL OR cl.profile_id=%s::uuid)
                     ORDER BY cl.created_at,cl.id LIMIT %s OFFSET %s""",
-                    (account["id"], "allocated" if kind == "pending" else "client_reported_delivered",
+                    (NATIVE_ADAPTER, account["id"], "allocated" if kind == "pending" else "client_reported_delivered",
                      profile_id, profile_id, limit+1, offset)).fetchall()
-            return {"items": [{"id": r["id"], "title": r["title"], "status": kind,
-                               "item_count": sum(i["quantity"] for i in r["reward"]["items"]),
+            return {"items": [{"id": r["id"], "title": r["title"], "status": kind, **contents(r["reward"], r["native"]),
                                "requires_code": r.get("requires_code", False), "profile_label": r.get("profile_label", "")}
                               for r in rows[:limit]], "has_more": len(rows)>limit, "offset": offset}
 
@@ -374,11 +399,19 @@ def create_app(config=None, verifier=None):
                 if code["uses"] >= code["max_uses"]:
                     fail(409, "code_exhausted")
                 conn.execute("UPDATE gift_codes SET uses=uses+1 WHERE id=%s", (code["id"],))
+            card_id = None
+            if body.adapter == NATIVE_ADAPTER:
+                # The profile's next card id (one save's received flags: never reused); the row lock orders claims.
+                card = conn.execute("""UPDATE profiles SET next_card_id=next_card_id+1 WHERE id=%s AND next_card_id<2000
+                    RETURNING next_card_id-1 AS card_id""", (body.profile_id,)).fetchone()
+                if not card:
+                    fail(409, "profile_card_ids_exhausted")
+                card_id = card["card_id"]
             conn.execute("UPDATE campaigns SET allocated=allocated+1 WHERE id=%s", (campaign_id,))
-            row = conn.execute("""INSERT INTO claims(id,account_id,campaign_id,profile_id,code_id,adapter,reward,reward_digest)
-                VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+            row = conn.execute("""INSERT INTO claims(id,account_id,campaign_id,profile_id,code_id,adapter,reward,reward_digest,card_id)
+                VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                 (uuid4(), account["id"], campaign_id, body.profile_id, code["id"] if code else None,
-                 body.adapter, Jsonb(campaign["reward"]), campaign["reward_digest"])).fetchone()
+                 body.adapter, Jsonb(campaign["reward"]), campaign["reward_digest"], card_id)).fetchone()
             result = claim_view(row)
             conn.execute("INSERT INTO request_keys VALUES(%s,'claim',%s,%s,%s)",
                          (account["id"], idempotency_key, req_digest, Jsonb(result)))
@@ -417,7 +450,7 @@ def create_app(config=None, verifier=None):
                 reason = "code_exhausted"
             return {"campaign_id": c["id"], "profile_id": profile["id"], "profile_label": profile["label"],
                     "title": c["title"], "reward_digest": c["reward_digest"], "reward": c["reward"],
-                    "item_count": sum(i["quantity"] for i in c["reward"]["items"]), "eligible": not reason,
+                    **contents(c["reward"], NATIVE_ADAPTER in c["adapters"]), "adapters": c["adapters"], "eligible": not reason,
                     "reason": reason, "existing_claim_id": existing["id"] if existing else None}
 
     @app.get("/v1/claims")
@@ -452,10 +485,42 @@ def create_app(config=None, verifier=None):
                 audit(conn, account["id"], "gift.client_acknowledged", claim_id, request.state.request_id)
             return claim_view(row)
 
+    @app.post("/v1/claims/{claim_id}/card")
+    def reassign_card(claim_id: UUID, body: CardInput, request: Request, authorization: str = Header(default="")):
+        """The save already has this card id's received flag (an official distribution, or a save from elsewhere): the
+        claim gets the profile's next id. Only while card_id is still the reported one, so a retry can't burn ids."""
+        with principal(authorization) as (conn, account):
+            row = conn.execute("SELECT * FROM claims WHERE id=%s AND account_id=%s FOR UPDATE", (claim_id, account["id"])).fetchone()
+            if not row:
+                fail(404, "claim_not_found")
+            if row["profile_id"] != body.profile_id or row["adapter"] != NATIVE_ADAPTER or row["state"] != "allocated":
+                fail(409, "card_not_reassignable")
+            if row["card_id"] == body.card_id:
+                card = conn.execute("""UPDATE profiles SET next_card_id=next_card_id+1 WHERE id=%s AND next_card_id<2000
+                    RETURNING next_card_id-1 AS card_id""", (row["profile_id"],)).fetchone()
+                if not card:
+                    fail(409, "profile_card_ids_exhausted")
+                row = conn.execute("UPDATE claims SET card_id=%s WHERE id=%s RETURNING *", (card["card_id"], claim_id)).fetchone()
+                audit(conn, account["id"], "gift.card_reassigned", claim_id, request.state.request_id)
+            return claim_view(row)
+
+    @app.get("/v1/admin/catalog")
+    def admin_catalog(authorization: str = Header(default="")):
+        """The dashboard's pickers: giftable items (with their bag pocket), Let's Go Pokemon and moves (migration 003)."""
+        with principal(authorization, admin=True) as (conn, account):
+            return {"items": conn.execute("SELECT id,name,pocket FROM catalog_items ORDER BY pocket,name").fetchall(),
+                    "species": conn.execute("SELECT id,name,alolan FROM catalog_species ORDER BY id").fetchall(),
+                    "moves": conn.execute("SELECT id,name FROM catalog_moves ORDER BY name").fetchall()}
+
     @app.post("/v1/admin/campaigns", status_code=201)
     def create_campaign(body: CampaignInput, request: Request, authorization: str = Header(default="")):
         reward = body.reward.model_dump(mode="json")
         with principal(authorization, admin=True) as (conn, account):
+            if body.reward.kind == "pokemon":
+                moves = body.reward.pokemon.moves
+                known = conn.execute("SELECT count(*) AS n FROM catalog_moves WHERE id=ANY(%s)", (moves,)).fetchone()["n"]
+                if known != len(moves):
+                    fail(422, "move_not_in_lets_go")
             row = conn.execute("""INSERT INTO campaigns(id,title,starts_at,ends_at,requires_code,editions,adapters,reward,reward_digest,stock)
                 VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                 (uuid4(), body.title, body.starts_at, body.ends_at, body.requires_code, Jsonb(body.editions),
@@ -503,6 +568,76 @@ def create_app(config=None, verifier=None):
         with principal(authorization, admin=True) as (conn, account):
             return [dict(claim_view(r), account_id=str(r["account_id"])) for r in conn.execute(
                 "SELECT * FROM claims WHERE campaign_id=%s ORDER BY created_at,id LIMIT %s OFFSET %s", (campaign_id, limit, offset))]
+
+    @app.get("/v1/admin/accounts")
+    def admin_accounts(authorization: str = Header(default=""), query: str = "", limit: int = 50, offset: int = 0):
+        if not 1 <= limit <= 100 or not 0 <= offset <= 100000 or len(query) > 64:
+            fail(422, "invalid_pagination")
+        with principal(authorization, admin=True) as (conn, account):
+            return conn.execute("""SELECT a.id,a.display_name,a.role,a.status,a.created_at,
+                (SELECT count(*) FROM profiles p WHERE p.account_id=a.id) AS profiles,
+                (SELECT count(*) FROM claims c WHERE c.account_id=a.id) AS claims
+                FROM accounts a WHERE %s='' OR a.display_name ILIKE %s OR a.id::text=%s
+                ORDER BY a.created_at DESC,a.id LIMIT %s OFFSET %s""",
+                (query, "%" + query.replace("%", r"\%").replace("_", r"\_") + "%", query, limit, offset)).fetchall()
+
+    @app.get("/v1/admin/audit")
+    def admin_audit(authorization: str = Header(default=""), limit: int = 50, offset: int = 0):
+        if not 1 <= limit <= 100 or not 0 <= offset <= 100000:
+            fail(422, "invalid_pagination")
+        with principal(authorization, admin=True) as (conn, account):
+            return conn.execute("""SELECT e.*,a.display_name AS actor_name FROM audit_events e LEFT JOIN accounts a ON a.id=e.actor_id
+                ORDER BY e.created_at DESC LIMIT %s OFFSET %s""", (limit, offset)).fetchall()
+
+    def relay_call(method, path):
+        if not config.relay_admin_url:
+            fail(404, "relay_not_configured")
+        try:
+            r = httpx.request(method, config.relay_admin_url.rstrip("/") + path, timeout=3, trust_env=False,
+                              headers={"Authorization": "Bearer " + config.relay_admin_token})
+        except httpx.HTTPError:
+            fail(503, "relay_unavailable")
+        if r.status_code == 404:
+            fail(404, "relay_room_not_found")
+        if r.status_code != 200:
+            fail(502, "relay_error")
+        return r.json()
+
+    @app.get("/v1/admin/relay")
+    def admin_relay(authorization: str = Header(default="")):
+        with principal(authorization, admin=True):
+            pass  # (the relay call doesn't hold the database connection)
+        return relay_call("GET", "/rooms")
+
+    @app.post("/v1/admin/relay/rooms/{room}/close")
+    def admin_relay_close(room: str, request: Request, authorization: str = Header(default="")):
+        if not re.fullmatch(r"[0-9a-f]{12}", room):
+            fail(422, "invalid_room")
+        with principal(authorization, admin=True) as (conn, account):
+            audit(conn, account["id"], "relay.room_closed", None, request.state.request_id)
+        return relay_call("POST", f"/rooms/{room}/close")
+
+    dashboard = Path(__file__).parent / "dashboard"
+
+    @app.get("/admin/", include_in_schema=False)
+    def admin_page():
+        return FileResponse(dashboard / "index.html", headers={"Content-Security-Policy":
+            "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'", "Referrer-Policy": "no-referrer"})
+
+    @app.get("/admin/{name}", include_in_schema=False)
+    def admin_asset(name: str):
+        if name not in ("app.js", "style.css"):
+            fail(404, "not_found")
+        return FileResponse(dashboard / name)
+
+    @app.get("/admin/art/{name}", include_in_schema=False)
+    def admin_art(name: str):
+        # (the artwork folder is optional: without it the page keeps its plain colours)
+        path = Path(config.dashboard_assets) / name if config.dashboard_assets else None
+        if not path or not re.fullmatch(r"[a-z0-9-]{1,32}\.png", name) or not path.is_file():
+            fail(404, "not_found")
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "max-age=86400"})
 
     @app.post("/v1/admin/accounts/{account_id}/status")
     def account_status(account_id: UUID, body: AccountAction, request: Request, authorization: str = Header(default="")):

@@ -105,18 +105,20 @@ class IdentityVerifier:
         except (ValueError, UnicodeError):
             fail(502, "invalid_identity_response")
 
-    def complete_native(self, code, verifier, nonce):
+    def complete_native(self, code, verifier, nonce, client_id=None, redirect_uri=None):
+        """Authorization code + PKCE for the launcher's client, or (client_id, redirect_uri) the dashboard's."""
+        client_id, redirect_uri = client_id or self.config.native_client_id, redirect_uri or self.config.native_redirect_uri
         provider = self.provider()
         tokens = self.provider_request("POST", self.internal_url(provider["token_endpoint"]), data={
-            "grant_type": "authorization_code", "client_id": self.config.native_client_id,
-            "redirect_uri": self.config.native_redirect_uri, "code": code, "code_verifier": verifier})
+            "grant_type": "authorization_code", "client_id": client_id,
+            "redirect_uri": redirect_uri, "code": code, "code_verifier": verifier})
         access, identity = tokens.get("access_token"), tokens.get("id_token")
         if not isinstance(access, str) or not isinstance(identity, str) or max(len(access), len(identity)) > 32768:
             fail(401, "invalid_identity_response")
         claims = self.verify(access)
-        oidc = self.verify_jwt(identity, self.config.native_client_id)
+        oidc = self.verify_jwt(identity, client_id)
         if (not isinstance(oidc.get("nonce"), str) or not hmac.compare_digest(oidc["nonce"], nonce) or
-            oidc["sub"] != claims["sub"] or ("azp" in oidc and oidc["azp"] != self.config.native_client_id)):
+            oidc["sub"] != claims["sub"] or ("azp" in oidc and oidc["azp"] != client_id)):
             fail(401, "identity_nonce_or_subject_mismatch")
         if "at_hash" in oidc:
             try:

@@ -11,11 +11,16 @@ Environment:
   COOP_RELAY_HOST       bind address (default 127.0.0.1)
   COOP_RELAY_PORT       TCP game port (default 7381)
   COOP_RELAY_HEALTH     localhost HTTP health port (default 7382; 0 disables)
+  COOP_RELAY_HEALTH_HOST  its bind address (default 127.0.0.1; the Compose network in a container)
+  COOP_RELAY_ADMIN_TOKEN  enables GET /rooms and POST /rooms/<id>/close on the health port for the account
+                        service's dashboard (Authorization: Bearer <token>); unset: those answer 404
   COOP_RELAY_MAX_ROOMS  maximum rooms in memory (default 100)
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -25,7 +30,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-PROTO = 7  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; mixed versions are refused and play solo
+PROTO = 8  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; 8: the turn digest (B11) skips battle Pokemon bytes the game never sets; mixed versions are refused and play solo
 RECONNECT_GRACE = 30
 TEAM_INVITE_SECONDS = 45  # Leave time to navigate Communicate and return to the overworld.
 MAX_FRAME = 256
@@ -45,6 +50,10 @@ async def read_frame(reader: asyncio.StreamReader) -> bytes:
     if n < 1 or n > MAX_FRAME:
         raise ConnectionError("bad frame size")
     return await reader.readexactly(n)
+
+
+def room_id(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()[:12]
 
 
 def clean_name(data: bytes) -> str:
@@ -272,6 +281,24 @@ class Relay:
             "uptime": int(time.monotonic() - self.started),
         }
 
+    def rooms_view(self) -> list[dict[str, object]]:
+        """The dashboard's view: a room is named by a hash of its code (the code is the invitation), never the code."""
+        instant = time.monotonic()
+        return [{
+            "id": room_id(room.code),
+            "players": [{"name": p.name, "slot": p.slot, "connected": p.connected, "host": p.identity == room.owner,
+                         "seconds": int(instant - p.joined_at)} for p in room.peers],
+            "locked": room.locked, "team": room.team_state, "battle": room.battle_phase,
+            "seconds": int(instant - min((p.joined_at for p in room.peers), default=instant)),
+        } for room in self.rooms.values()]
+
+    def close_by_id(self, rid: str) -> bool:
+        for room in list(self.rooms.values()):
+            if room_id(room.code) == rid:
+                self.close_room(room, "The server closed this session; continue playing solo")
+                return True
+        return False
+
     async def reject(self, writer: asyncio.StreamWriter, why: str) -> None:
         data = why.encode("utf-8")[:96]
         writer.write(frame(b"X", bytes([len(data)]) + data))
@@ -422,7 +449,7 @@ class Relay:
                     for other in room.peers:
                         if other is not peer:
                             other.send(b"T", bytes([slot]) + body)
-                elif op == b"E" and len(body) == 1 and body[0] <= 15:
+                elif op == b"E" and len(body) == 1 and 1 <= body[0] <= 63:  # emote IDs; clients ignore ones they do not list
                     for other in room.peers:
                         if other is not peer:
                             other.send(b"E", bytes([slot]) + body)
@@ -482,14 +509,39 @@ class Relay:
                 pass
 
 
-async def health_server(relay: Relay, port: int) -> asyncio.AbstractServer:
+def health_answer(relay: Relay, line: bytes, headers: dict[bytes, bytes], token: str) -> tuple[int, object]:
+    if line.startswith(b"GET /health "):
+        return 200, relay.health()
+    parts = line.split(b" ")
+    if not token or len(parts) < 2 or not parts[1].startswith(b"/rooms"):
+        return 404, {"error": "not found"}
+    given = headers.get(b"authorization", b"")
+    if not hmac.compare_digest(given, b"Bearer " + token.encode()):
+        return 401, {"error": "unauthorized"}
+    if parts[0] == b"GET" and parts[1] == b"/rooms":
+        return 200, {"rooms": relay.rooms_view(), "summary": relay.health()}
+    path = parts[1].decode("ascii", "replace").split("/")
+    if parts[0] == b"POST" and len(path) == 4 and path[3] == "close" and len(path[2]) == 12:
+        return (200, {"closed": path[2]}) if relay.close_by_id(path[2]) else (404, {"error": "no such room"})
+    return 404, {"error": "not found"}
+
+
+async def health_server(relay: Relay, port: int, host: str = "127.0.0.1", token: str = "") -> asyncio.AbstractServer:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             line = await asyncio.wait_for(reader.readline(), timeout=3)
-            ok = line.startswith(b"GET /health ")
-            body = json.dumps(relay.health() if ok else {"error": "not found"}).encode()
+            headers: dict[bytes, bytes] = {}
+            for _ in range(32):
+                h = await asyncio.wait_for(reader.readline(), timeout=3)
+                if h in (b"\r\n", b"\n", b""):
+                    break
+                k, _, v = h.partition(b":")
+                headers[k.strip().lower()] = v.strip()
+            status, answer = health_answer(relay, line, headers, token)
+            body = json.dumps(answer).encode()
+            reason = {200: b"200 OK", 401: b"401 Unauthorized", 404: b"404 Not Found"}[status]
             writer.write(
-                b"HTTP/1.1 " + (b"200 OK" if ok else b"404 Not Found") + b"\r\n"
+                b"HTTP/1.1 " + reason + b"\r\n"
                 + b"Content-Type: application/json\r\n"
                 + b"Content-Length: " + str(len(body)).encode() + b"\r\n"
                 + b"Connection: close\r\n\r\n" + body
@@ -500,7 +552,7 @@ async def health_server(relay: Relay, port: int) -> asyncio.AbstractServer:
         finally:
             writer.close()
 
-    return await asyncio.start_server(handle, "127.0.0.1", port)
+    return await asyncio.start_server(handle, host, port, limit=4096)
 
 
 async def main() -> None:
@@ -509,7 +561,8 @@ async def main() -> None:
     port = int(os.getenv("COOP_RELAY_PORT", "7381"))
     health_port = int(os.getenv("COOP_RELAY_HEALTH", "7382"))
     game = await asyncio.start_server(relay.handle, host, port, limit=MAX_FRAME + 2)
-    health = await health_server(relay, health_port) if health_port else None
+    health = await health_server(relay, health_port, os.getenv("COOP_RELAY_HEALTH_HOST", "127.0.0.1"),
+                                 os.getenv("COOP_RELAY_ADMIN_TOKEN", "")) if health_port else None
     print(f"co-op relay on {host}:{port}; health on {health_port or 'off'}", flush=True)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

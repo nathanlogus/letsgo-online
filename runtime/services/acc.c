@@ -31,11 +31,43 @@ static void profile(Service *s, IpcReq *req, IpcResp *resp) {
     }
 }
 
+// Network service account ID token: the Mystery Gift code screen asks for one and sends it in its serial.auth request,
+// which the runtime answers itself (runtime/hle/serial.c): a placeholder token, the async request already done.
+static const char id_token[] = "letsgo-recomp";
+
+static void async_context(Service *s, IpcReq *req, IpcResp *resp) {
+    (void)s;
+    switch (req->cmd) {
+    case 0: {  // GetSystemEvent: signalled (done)
+        uint32_t w, r;
+        KEvent *ev = kernel_create_event_pair(&w, &r);
+        pthread_mutex_lock(&g_klock);
+        kernel_signal(ev);
+        pthread_mutex_unlock(&g_klock);
+        resp->copy_handles[resp->ncopy++] = r;
+        break;
+    }
+    case 1: break;                                            // Cancel
+    case 2: OUT(uint8_t, 0) = 1; resp_size(resp, 4); break;  // HasDone
+    case 3: break;                                            // GetResult: success
+    default: LOG("[acc] IAsyncContext cmd %u (ok)\n", req->cmd);
+    }
+}
+
 static void manager(Service *s, IpcReq *req, IpcResp *resp) {
     (void)s;
     switch (req->cmd) {
     case 0: break;  // CheckAvailability
     case 1: OUT(uint64_t, 0) = 0x1234567890abcdefull; resp_size(resp, 8); break;  // GetAccountId
+    case 2: ipc_return_object(resp, service_new("IAsyncContext", async_context, NULL)); break;  // EnsureIdTokenCacheAsync
+    case 3: {  // LoadIdTokenCache -> size, B token
+        IpcBuf *b = out_buf(req, 0);
+        uint32_t n = b && b->size >= sizeof id_token ? sizeof id_token - 1 : 0;
+        if (n) memcpy((void *)(uintptr_t)b->addr, id_token, n + 1);
+        OUT(uint32_t, 0) = n;
+        resp_size(resp, 4);
+        break;
+    }
     default: LOG("[acc] IManagerForApplication cmd %u (ok)\n", req->cmd); resp_size(resp, 0x10);
     }
 }

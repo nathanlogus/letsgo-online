@@ -91,7 +91,8 @@ static void claim_section(const AccountProfileSnapshot &profile) {
     else if(c.state==CLAIM_SENDING) ImGui::TextUnformatted(T("Saving or recovering your claim...","Salvando ou recuperando resgate..."));
     else if(c.state!=CLAIM_IDLE || c.pending || c.detail[0]) {
         if(c.title[0]) ImGui::TextUnformatted(c.title);
-        if(c.item_count) ImGui::Text("%d %s",c.item_count,T("items","itens"));
+        if(c.species) ImGui::Text("%s %d, %s %d",T("Pokemon No.","Pokemon No."),c.species,T("Lv.","Nv."),c.level);
+        else if(c.item_count) ImGui::Text("%d %s",c.item_count,T("items","itens"));
         if(c.profile_label[0]) ImGui::Text("%s: %s",T("For","Para"),c.profile_label);
         ImGui::TextWrapped("%s",c.detail);
         if(c.state==CLAIM_PREVIEW && c.eligible && !c.pending) {
@@ -126,7 +127,8 @@ static void inbox_section(void) {
     if (p.bound) ImGui::Text("%s: %s",T("Profile","Perfil"),p.label);
     else ImGui::TextWrapped("%s",T("Showing your account's gifts. Link a local profile on the Account page to filter to that save.",
                                   "Vincule um perfil local na pagina Conta para filtrar os presentes deste save."));
-    ImGui::TextWrapped("%s",T("Gift delivery is not available in this build.","A entrega de presentes ainda nao esta disponivel nesta versao."));
+    char note[256];account_gift_note(note,sizeof note);
+    if(note[0]) ImGui::TextWrapped("%s",note);
     claim_section(p);
     AccountClaimSnapshot claim;account_claim_snapshot(&claim);bool claiming=claim.state==CLAIM_PREVIEWING || claim.state==CLAIM_SENDING;
     ui_group_gap();
@@ -137,7 +139,8 @@ static void inbox_section(void) {
         for(int i=0;i<box.count;i++) {
             const AccountInboxRow &r=box.rows[i];
             ui_heading(r.title);
-            ImGui::Text("%d %s",r.item_count,T("items","itens"));
+            if(r.species) ImGui::Text("%s %d, %s %d",T("Pokemon No.","Pokemon No."),r.species,T("Lv.","Nv."),r.level);
+            else ImGui::Text("%d %s",r.item_count,T("items","itens"));
             if (kind==0 && r.requires_code) ImGui::TextUnformatted(T("A gift code is required.","Requer um codigo de presente."));
             if(kind==0) {
                 ImGui::PushID(r.id);ImGui::BeginDisabled(!p.bound || claiming || claim.pending);
@@ -145,8 +148,9 @@ static void inbox_section(void) {
                 ImGui::EndDisabled();ImGui::PopID();
             }
             if (r.profile_label[0]) ImGui::Text("%s: %s",T("For","Para"),r.profile_label);
-            if (kind==1) ImGui::TextUnformatted(T("Waiting for delivery.","Aguardando entrega."));
-            if (kind==2) ImGui::TextUnformatted(T("Delivery reported by the client.","Entrega informada pelo cliente."));
+            if (kind==1) ImGui::TextWrapped("%s",r.native ? T("In the game: Mystery Gift > Get via internet.","No jogo: Presente Misterioso > Receber pela internet.")
+                                                          : T("Arrives in the game at your next save.","Chega ao jogo no proximo salvamento."));
+            if (kind==2) ImGui::TextUnformatted(T("Received in the game.","Recebido no jogo."));
         }
     }
     ui_group_gap();
@@ -925,7 +929,7 @@ extern "C" void launcher_lg_run(const char *root) {
         if (g_account_qa_quit) { account_shutdown(); exit(0); }
         if (shot) { account_shutdown(); exit(0); }
     }
-    account_shutdown();
+    account_enter_game();
     g_settings.res_height = res_lines[res];
     g_settings.fullscreen = full;
     settings_apply_levels();  // (the upscaler follows the anti-aliasing)

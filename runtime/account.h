@@ -30,8 +30,8 @@ typedef struct {
 } AccountProfileSnapshot;
 typedef struct {
     char id[37], title[512], status[16], profile_label[256];
-    int item_count;
-    bool requires_code;
+    int item_count, species, level;  // species: a Pokemon gift (0: items)
+    bool requires_code, native;      // native: a Mystery Gift card (received in the game's Mystery Gift)
 } AccountInboxRow;
 typedef enum { INBOX_SIGNED_OUT, INBOX_IDLE, INBOX_LOADING, INBOX_READY, INBOX_ERROR } AccountInboxState;
 typedef struct {
@@ -51,10 +51,18 @@ void account_inbox_snapshot(AccountInboxSnapshot *out);
 typedef enum { CLAIM_IDLE, CLAIM_PREVIEWING, CLAIM_PREVIEW, CLAIM_SENDING, CLAIM_COMPLETE, CLAIM_ERROR } AccountClaimState;
 typedef struct {
     AccountClaimState state;
-    bool eligible, pending;
-    int item_count;
+    bool eligible, pending, native;
+    int item_count, species, level;
     char title[512], profile_label[256], detail[256], id[37];
 } AccountClaimSnapshot;
+// The game's state of the gifts (runtime/hle/gift.c <save>.gift-status), "" when nothing needs the player.
+void account_gift_note(char *out, size_t cap);
+void account_enter_game(void);  // the launcher hands over to the game (the worker stays for in-game codes when signed in)
+// An in-game Mystery Gift code (runtime/hle/serial.c): claims it for the linked profile as a native card. Blocks up to
+// 30 s; never call it from the launcher's UI thread.
+enum { ACCOUNT_REDEEM_OK, ACCOUNT_REDEEM_INVALID, ACCOUNT_REDEEM_USED, ACCOUNT_REDEEM_UNAVAILABLE, ACCOUNT_REDEEM_SIGNED_OUT,
+       ACCOUNT_REDEEM_FAILED };
+int account_redeem_code(const char *code, unsigned *card_id);
 void account_claim_snapshot(AccountClaimSnapshot *out);
 void account_gift_preview(const char *campaign_id, const char *code);
 void account_claim_confirm(void);

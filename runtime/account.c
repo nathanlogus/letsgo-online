@@ -75,6 +75,7 @@ static void claim_submit(bool resume);
 static void claim_restore(void);
 static void claim_forget(void);
 static bool g_claim_reload;
+static bool g_delivery_reload;  // (account_delivery.inc: ack committed gifts, hand the next one to the game)
 
 static bool utf16(const char *s, WCHAR *out, size_t n) {
     return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, out, (int)n) > 0;
@@ -325,8 +326,13 @@ static void restore(void) {
     SecureZeroMemory(token, sizeof token); SecureZeroMemory(body, sizeof body); SecureZeroMemory(result, sizeof result);
 }
 
+static long json_long(const char *json, const char *key, long fallback) {
+    char v[24]; return json_get(json, key, v, sizeof v, true) ? strtol(v, NULL, 10) : fallback;
+}
+
 #include "account_data.inc"
 #include "account_claim.inc"
+#include "account_delivery.inc"
 
 static void reply(SOCKET client, int status, const char *message) {
     char response[2048];
@@ -477,6 +483,13 @@ static void *worker(void *unused) {
             if(load_claim) g_claim_reload=false;
             pthread_mutex_unlock(&g_lock);
             if(load_claim) claim_restore();
+            pthread_mutex_lock(&g_lock);
+            bool load_delivery=g_delivery_reload && g_view.state==ACCOUNT_SIGNED_IN && g_profile.bound;
+            if(load_delivery) g_delivery_reload=false;
+            pthread_mutex_unlock(&g_lock);
+            if(load_delivery) delivery_sync();
+            pthread_mutex_lock(&g_lock); bool redeem=g_redeem.state==1; pthread_mutex_unlock(&g_lock);
+            if(redeem) redeem_run();
         }
         if (!command && g_session.access[0] && GetTickCount64()+60000 >= g_session.expires) {
             // Back off failed automatic refreshes rather than retrying every frame.
@@ -525,6 +538,16 @@ void account_sign_in(bool remember) { g_remember = remember; queue(CMD_LOGIN); }
 void account_retry(void) { queue(CMD_RESTORE); }
 void account_cancel(void) { queue(CMD_CANCEL); }
 void account_sign_out(void) { queue(CMD_LOGOUT); }
+// Leaving the start screen for the game: a signed-in, linked profile keeps the worker (the game's own Mystery Gift code
+// screen redeems through it, runtime/hle/serial.c); it then ends with the process. Otherwise it stops now.
+void account_enter_game(void) {
+    pthread_mutex_lock(&g_lock);
+    bool keep = g_started && g_view.state == ACCOUNT_SIGNED_IN && g_profile.bound;
+    pthread_mutex_unlock(&g_lock);
+    if (!keep) { account_shutdown(); return; }
+    static bool registered;
+    if (!registered) registered = true, atexit(account_shutdown);
+}
 void account_shutdown(void) {
     if (!g_started) return;
     atomic_store(&g_stop, true); atomic_store(&g_cancel, true);
@@ -545,4 +568,7 @@ void account_gift_preview(const char *id,const char *code) { (void)id;(void)code
 void account_claim_confirm(void) {}
 void account_claim_resume(void) {}
 void account_claim_forget(void) {}
+void account_gift_note(char *out, size_t cap) { if (cap) out[0] = 0; }
+void account_enter_game(void) {}
+int account_redeem_code(const char *code, unsigned *card_id) { (void)code; (void)card_id; return ACCOUNT_REDEEM_SIGNED_OUT; }
 #endif

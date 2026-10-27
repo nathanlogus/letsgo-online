@@ -12,6 +12,7 @@ void rt_register_fnhook(uint64_t addr,int (*fn)(Cpu *,uint64_t));
 void rt_call_original(Cpu *c,uint64_t addr);
 int menu_keyboard_run_labeled(const char *,const char *,int,char *,int);
 void menu_copy_text(const char *);
+uint64_t input_buttons_now(void);
 #define NETWORK_FACTORY 0x7000888970ull
 #define CHOICE_FACTORY  0x7000888cb0ull
 #define CHOICE_OPEN     0x7000890aa0ull
@@ -29,6 +30,8 @@ static int g_page, g_stack[16], g_depth, g_saved;
 static bool g_show_code, g_inspect_self;
 static char g_notice[160], g_last[3][256];
 static uint8_t g_emote;
+static int g_emote_page;  // Social actions: three emotes a page, L / R turn pages
+#define EMOTE_PAGES ((COOP_EMOTE_COUNT+2)/3)
 static uint64_t g_emote_until;
 static uint8_t g_team_queued=255;
 static uint32_t g_team_queued_id;
@@ -81,7 +84,7 @@ static void labels(char out[3][256]) {
         snprintf(out[1],256,peer ? "P%u: %.24s" : "Waiting for a friend",peer ? p.slot+1 : 2,peer ? p.name : "");
         a=b=NULL;d="Room controls";break;
     case REMOTE:a="Inspect trainer";b="Team up";d="Social actions";break;
-    case SOCIAL:a="Say hello";b="Cheer";d="Back";break;
+    case SOCIAL:for(int i=0;i<3;i++)coop_emote_label(g_emote_page*3+i+1,out[i],256);a=b=d=NULL;break;
     case TEAM:
         a=g_team_queued<=1 ? "Return to the overworld" : team.state==2 ? "Tagged up for travel" :
             team.state==1 ? team.from_slot==s.local_slot ? "Waiting for your friend" : "Accept invitation" : "Invite to tag up";
@@ -157,9 +160,9 @@ static void choose(unsigned item) {
         if(item==1){g_inspect_self=false;page(INSPECT);}
         else page(item==2 ? TEAM : SOCIAL);break;
     case SOCIAL:
-        if(item==3){back();break;}
+        if(!coop_emote_name(g_emote_page*3+item))break;
         if(!peer)notice("Your friend has left");
-        else {g_emote=item==1 ? 1 : 2;g_emote_until=plat_now_ns()+60000000000ull;notice("Emote ready for the overworld");}break;
+        else {g_emote=g_emote_page*3+item;g_emote_until=plat_now_ns()+60000000000ull;notice("Emote ready for the overworld");}break;
     case TEAM:
         if(item==3){back();break;}
         if(item==2 && g_team_queued<=1){g_team_queued=255;break;}
@@ -203,13 +206,31 @@ static int open_hook(Cpu *c,uint64_t addr) {
     g_app=app;atomic_store(&g_visible,true);g_show_code=false;g_page=ROOT;g_depth=0;g_notice[0]=0;memset(g_last,0,sizeof g_last);
     refresh(c,app);*c=keep;LOG("[coop-menu] native Friends opened at %llx\n",(unsigned long long)app);return 1;
 }
+// True around a page turn: the native list also confirms its cursor item on L / R, which must not pick an emote.
+static bool turn_emote_page(void) {
+    static uint64_t held,until;uint64_t now=input_buttons_now(),press=now&~held;held=now;
+    int step=(int)(press>>7&1)-(int)(press>>6&1);  // R / L (C / Z on a keyboard)
+    if(g_page==SOCIAL && (now&0xc0))until=plat_now_ns()+300000000ull;
+    if(g_page==SOCIAL && step) {
+        g_emote_page=(g_emote_page+step+EMOTE_PAGES)%EMOTE_PAGES;
+        LOG("[coop-menu] emote page %d/%d\n",g_emote_page+1,EMOTE_PAGES);
+    }
+    return plat_now_ns()<until;
+}
+bool coop_menu_emote_page(int *page,int *pages,uint8_t ids[3]) {
+    if(!atomic_load(&g_visible) || g_page!=SOCIAL)return false;
+    *page=g_emote_page+1;*pages=EMOTE_PAGES;
+    for(int i=0;i<3;i++)ids[i]=coop_emote_name(g_emote_page*3+i+1) ? g_emote_page*3+i+1 : 0;
+    return true;
+}
 static int update_hook(Cpu *c,uint64_t addr) {
     uint64_t app=c->x[0];if(app!=g_app || !guest(app,0x280))return 0;
+    bool paging=turn_emote_page();
     Cpu keep=*c;int selected=*(const int32_t *)(uintptr_t)(app+0x24c);
     if(selected==0 && !g_depth){g_app=0;atomic_store(&g_visible,false);return 0;}
     if(selected>=0 && selected<=3) {
         *(int32_t *)(uintptr_t)(app+0x24c)=-1;
-        if(!selected)back();else choose((unsigned)selected);
+        if(!selected)back();else if(!paging)choose((unsigned)selected);
         c->x[0]=app;c->x[1]=0;rt_call_original(c,UI_INPUT);rt_call_original(c,UI_REARM);
     }
     refresh(c,app);*c=keep;rt_call_original(c,addr);return 1;

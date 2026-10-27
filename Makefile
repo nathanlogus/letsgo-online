@@ -153,7 +153,7 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 	LC_ALL=C tr -d '\r' < $< | LC_ALL=C tr '\200-\377' '?' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
-$(B)/rt/account.o: third_party/jsmn/jsmn.h runtime/account_data.inc runtime/account_claim.inc
+$(B)/rt/account.o: third_party/jsmn/jsmn.h runtime/account_data.inc runtime/account_claim.inc runtime/account_delivery.inc runtime/wb7.h
 
 $(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
 	@mkdir -p $(dir $@)
@@ -230,7 +230,8 @@ dist:
 	    "$(DIST)/gamelib-src/"
 	cp docs/icon/icon_1024.png "$(DIST)/icon.png"  # (window icon)
 	mkdir -p "$(DIST)/assets/emotes"
-	cp $(addprefix assets/emotes/,$(addsuffix -mark.png,kindly pumped-up upbeat joyful flustered teary angry sleepy-time)) "$(DIST)/assets/emotes/"
+	cp assets/emotes/*-mark.png "$(DIST)/assets/emotes/"
+	cp -R assets/textures "$(DIST)/assets/"  # (our title logo: runtime/ui2x.c)
 	cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$(DIST)/"  # (in-game menu font, OFL)
 	cp third_party/fonts/Baloo2/OFL.txt "$(DIST)/Baloo2-OFL.txt"
 	cp third_party/fidelityfx/bin/amd_fidelityfx_vk.dll "$(DIST)/"  # (FSR 3.1, loaded at run time: without it, FSR 1)
