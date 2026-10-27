@@ -1635,6 +1635,11 @@ static const char *builtin_src(const char *name, int *stage) {
                // (what is lit itself takes less of the others' light, fading out by lit 0.4: a hard cut at 0.02 split the Center's glass
                //  door, near that brightness, into texels with and without light - a stepped edge that crawled when walking)
                "  float rcv = 1.0 - smoothstep(0.0, 0.4, lit);\n"
+               // (nor bright glass: cool and light - the Center's door took the sign's pool as a matte wall would, washed out in blotches
+               //  that moved with the quarter-size map as the camera did; dark blue walls and roofs keep theirs)
+               //  (by ratios: the scene is linear HDR, the door's glass ~0.18 luminance - an absolute 0.12..0.35 caught a fifth of it)
+               "  float cool = (e.b - e.r) / max(e.b, 1e-3);\n"
+               "  rcv *= 1.0 - smoothstep(0.45, 0.7, cool) * smoothstep(0.02, 0.06, dot(e, vec3(0.2126, 0.7152, 0.0722)));\n"
                "#ifdef RT\n"  // (LARECOMP_RT_DEBUG: a ray from the camera through the pixel - green where it hits at the depth buffer's distance, red off, blue none)
                "  if (pc.d.w < -1.5 && d < 0.999999) {\n"
                "    vec3 A = vec3(((vec2(p) + 0.5) / pc.c.zw - 0.5) * vec2(2.0 / pc.c.x, 2.0 / pc.c.y) * zp, zp);\n"
@@ -1789,7 +1794,13 @@ static const char *builtin_src(const char *name, int *stage) {
                "  int nb = 1;\n"
                "  for (int k = 0; k < 4; k++) {\n"
                "    vec3 Q;\n"
-               "    if (!at(gl_FragCoord.xy + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k] * s, Q)) continue;\n"
+               "    vec2 fq = gl_FragCoord.xy + vec2[4](vec2(12.0, 0.0), vec2(-12.0, 0.0), vec2(0.0, 12.0), vec2(0.0, -12.0))[k] * s;\n"
+               // (only at a depth edge - the neighbour 10 % nearer or farther; 1 - depth goes as 1 / distance: 1.4 -> 0.4 ms)
+               "    ivec2 dz = textureSize(dep, 0);\n"
+               "    float d0 = texelFetch(dep, clamp(ivec2(gl_FragCoord.xy / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
+               "    float d1 = texelFetch(dep, clamp(ivec2(fq / pc.a.xy * vec2(dz)), ivec2(0), dz - 1), 0).r;\n"
+               "    if (abs(d1 - d0) < 0.1 * (1.0 - d0)) continue;\n"
+               "    if (!at(fq, Q)) continue;\n"
                "    vec3 bq = floor(Q / 150.0);\n"
                "    bool seen = false;\n"
                "    for (int i = 0; i < nb; i++) seen = seen || all(lessThanEqual(abs(bq - base[i]), vec3(0.5)));\n"
@@ -1864,6 +1875,265 @@ static const char *builtin_src(const char *name, int *stage) {
                "  o = vec4(vec3(1.0 - pc.b.y * sh), 1.0);\n"
                "  if (pc.b.z > 1.5) { vec2 c = floor(P.xz / 200.0); o = vec4(0.4 + 0.6 * vec3(h2(c), h2(c + 7.0), h2(c + 13.0)), 1.0); return; }\n"  // (=2: 2 m world cells, each its own tint)
                "  if (pc.b.z > 0.0) { vec2 gl = step(fract(P.xz / 100.0), vec2(0.08)); o = vec4(1.0 - 0.8 * max(gl.x, gl.y)); }\n"  // (LARECOMP_CLOUDS_DEBUG: a 1 m world grid, dark lines)
+               "}\n";
+    }
+    // atmo: the atmosphere by hour, after the tint (exec.c dn_run; runtime/daynight.c daynight_atmo). Scene copy (0), depth (1).
+    // The sky (no depth, or past 200 m: the game's sky dome) is multiplied from its horizon colour to its zenith's by the view's
+    // elevation; at night stars (a hashed field fixed in the world's directions, twinkling) and a moon. The rest takes the
+    // distance haze. a = (width, height, seconds, depth mode), b = (horizon, stars), c = (zenith, haze density /cm), d = (haze, -).
+    if (!strcmp(name, "atmo.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { layout(row_major) mat4 vp; vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float h3(vec3 c) { uvec3 q = uvec3(ivec3(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u ^ q.z * 2654435761u;\n"
+               "  h = (h ^ (h >> 16)) * 2246822519u; h = (h ^ (h >> 13)) * 3266489917u; h ^= h >> 16; return float(h) * (1.0 / 4294967296.0); }\n"
+               "vec3 unproj(vec2 uv, float z) { vec4 w = inverse(pc.vp) * vec4(uv * 2.0 - 1.0, z, 1.0); return w.xyz / w.w; }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 col = texelFetch(t, p, 0).rgb;\n"
+               "  vec2 uv = (vec2(p) + 0.5) / pc.a.xy;\n"
+               "  ivec2 dsz = textureSize(dep, 0);\n"
+               "  float d = texelFetch(dep, clamp(ivec2(uv * vec2(dsz)), ivec2(0), dsz - 1), 0).r;\n"
+               "  float zn = pc.a.w > 0.5 ? -1.0 : 0.0;\n"  // (the near plane in clip z)
+               "  vec3 C = unproj(uv, zn), F = unproj(uv, pc.a.w > 0.5 ? 0.999 : 0.9995), dir = normalize(F - C);\n"
+               "  float dist = d < 0.999999 ? length(unproj(uv, pc.a.w > 0.5 ? d * 2.0 - 1.0 : d) - C) : 1e9;\n"
+               "  if (dist > 7500.0 && dir.y > -0.05) {\n"  // the sky (the game's far plane is 100 m: its dome is inside it)
+               "    float el = dir.y;\n"
+               "    col *= mix(pc.b.rgb, pc.c.rgb, smoothstep(0.0, 0.55, el));\n"
+               "    if (pc.b.w > 0.01) {\n"
+               "      vec3 sd = dir * 260.0, cell = floor(sd);\n"
+               "      float hs = h3(cell), st = 0.0;\n"
+               "      if (hs > 0.9965) {\n"
+               "        vec3 f = sd - cell - 0.5;\n"
+               "        float tw = 0.65 + 0.35 * sin(pc.a.z * (1.5 + 3.0 * h3(cell + 7.0)) + hs * 60.0);\n"
+               "        st = exp(-dot(f, f) * 14.0) * tw * (0.6 + 2.0 * h3(cell + 3.0));\n"
+               "      }\n"
+               "      vec3 md = normalize(vec3(-0.35, 0.45, 0.82));\n"
+               "      float ca = dot(dir, md);\n"
+               "      vec3 moon = vec3(0.95, 0.96, 1.0) * 2.2 * smoothstep(0.99935, 0.99955, ca) + vec3(0.3, 0.35, 0.5) * 0.25 * pow(max(ca, 0.0), 300.0);\n"
+               "      col += pc.b.w * (vec3(0.8, 0.85, 1.0) * st * smoothstep(0.02, 0.25, el) + moon);\n"
+               // a shooting star: in about half of the 6 s slots, at a hashed moment and place, 0.8 s across 20 degrees of sky
+               "      float sl = floor(pc.a.z / 6.0), hs2 = h3(vec3(sl, 1.0, 2.0)), tt = (pc.a.z - sl * 6.0 - hs2 * 4.0) / 0.8;\n"
+               "      if (hs2 < 0.5 && tt > 0.0 && tt < 1.0) {\n"
+               "        float az = 6.2831853 * h3(vec3(sl, 5.0, 7.0)), e0 = 0.35 + 0.35 * h3(vec3(sl, 9.0, 3.0));\n"
+               "        float g = 0.0;\n"
+               "        for (int k = 0; k < 8; k++) {\n"
+               "          float tk = tt - float(k) * 0.03;\n"  // (the tail: the head's last places)
+               "          if (tk < 0.0) break;\n"
+               "          float a2 = az + 0.35 * tk, e2 = e0 - 0.18 * tk;\n"
+               "          vec3 q = vec3(cos(a2) * cos(e2), sin(e2), sin(a2) * cos(e2));\n"
+               "          vec3 dq = dir - q;\n"
+               "          g = max(g, exp(-dot(dq, dq) * 4e5) * (1.0 - float(k) / 8.0));\n"
+               "        }\n"
+               "        col += pc.b.w * vec3(0.9, 0.95, 1.0) * 3.0 * g * sin(3.14159 * tt);\n"
+               "      }\n"
+               "    }\n"
+               "  } else {\n"  // the haze: past 6 m, by distance
+               "    float f = 1.0 - exp(-max(dist - 600.0, 0.0) * pc.c.w);\n"
+               "    col = mix(col, pc.d.rgb, 0.85 * f);\n"
+               "  }\n"
+               "  if (any(isnan(col)) || any(isinf(col))) col = texelFetch(t, p, 0).rgb;\n"
+               "  o = vec4(col, 1.0);\n"
+               "}\n";
+    }
+    // shafts: light shafts (god rays), added (exec.c dn_run). The sky (past 200 m) is the light; 28 samples from the pixel toward the
+    // sun's place on the screen (it may be off it), each fading, so trees and roofs in front of the sky break the rays into shafts.
+    // Scene copy (0), depth (1); a = (sun uv, strength, depth mode), b = (colour, -), c = (P22, P23, width, height).
+    if (!strcmp(name, "shafts.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float skyw(vec2 uv) {\n"  // (the sky's light at uv: its brightness where the depth is far)
+               "  float d = texture(dep, uv).r;\n"
+               "  float z = d < 0.999999 ? pc.c.y / ((pc.a.w > 0.5 ? d * 2.0 - 1.0 : d) + pc.c.x) : 1e9;\n"
+               "  if (z < 20000.0 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 0.0;\n"
+               "  return min(dot(texture(t, uv).rgb, vec3(0.2126, 0.7152, 0.0722)), 4.0);\n"
+               "}\n"
+               "void main() {\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.c.zw, D = (pc.a.xy - uv) / 28.0;\n"
+               "  float j = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));\n"  // (per-pixel start: no banding)
+               "  float s = 0.0, w = 1.0;\n"
+               "  vec2 q = uv + D * j;\n"
+               "  for (int i = 0; i < 28; i++) { s += skyw(q) * w; w *= 0.93; q += D; }\n"
+               "  float fall = 1.0 - smoothstep(0.2, 1.4, length((uv - pc.a.xy) * vec2(pc.c.z / pc.c.w, 1.0)));\n"
+               "  o = vec4(pc.b.rgb * pc.a.z * s / 28.0 * 3.0 * fall, 1.0);\n"
+               "}\n";
+    }
+    // rain (exec.c dn_run; runtime/daynight.c daynight_rain): the scene darker and greyer, and three layers of slanted streaks at
+    // 3, 7 and 15 m, each hidden behind what is nearer. Scene copy (0), depth (1); a = (width, height, seconds, rain),
+    // b = (P22, P23, depth mode, night).
+    if (!strcmp(name, "rain.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; layout(row_major) mat4 vp; vec4 c; } pc;\n"  // (vp: this frame's camera, for the splashes; c = (snow, lightning flash, -, -))
+               "layout(location = 0) out vec4 o;\n"
+               "float h1(vec2 c);\n"
+               // splashes where the drops land: level surfaces (the world's up, from the depth), 35 cm world cells each with a drop
+               // landing every ~0.7 s at a hashed point and time - a bright flick, then a ring spreading 14 cm and fading
+               "float splash(vec3 P) {\n"
+               "  float s = 0.0, T = pc.a.z;\n"
+               "  vec2 g = P.xz / 35.0, base = floor(g);\n"
+               "  for (int j = 0; j < 9; j++) {\n"
+               "    vec2 c = base + vec2(j % 3 - 1, j / 3 - 1);\n"
+               "    float ph = h1(c * 1.7 + 3.0), per = 0.55 + 0.35 * h1(c + 11.0);\n"
+               "    float tt = fract(T / per + ph);\n"
+               "    vec2 at = (c + 0.15 + 0.7 * vec2(h1(c + 5.0), h1(c + 9.0))) * 35.0;\n"
+               "    float r = length(P.xz - at), R = 2.0 + 14.0 * sqrt(tt);\n"
+               "    float ring = exp(-pow((r - R) / 1.6, 2.0)) * (1.0 - tt) * (1.0 - tt);\n"
+               "    float flick = exp(-r * r / 6.0) * (1.0 - smoothstep(0.0, 0.12, tt));\n"
+               "    s += ring * 0.8 + flick * 2.0;\n"
+               "  }\n"
+               "  return s;\n"
+               "}\n"
+               "float h1(vec2 c) { uvec2 q = uvec2(ivec2(c) + 32768); uint h = q.x * 1597334677u ^ q.y * 3812015801u;\n"
+               "  h = (h ^ (h >> 16)) * 2246822519u; h = (h ^ (h >> 13)) * 3266489917u; h ^= h >> 16; return float(h) * (1.0 / 4294967296.0); }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 col = texelFetch(t, p, 0).rgb;\n"
+               "  float r = pc.a.w, T = pc.a.z;\n"
+               "  vec2 uv = (vec2(p) + 0.5) / pc.a.xy;\n"
+               "  float d = texture(dep, uv).r;\n"
+               "  float z = d < 0.999999 ? pc.b.y / ((pc.b.z > 0.5 ? d * 2.0 - 1.0 : d) + pc.b.x) : 1e9;\n"
+               "  float L = dot(col, vec3(0.2126, 0.7152, 0.0722));\n"
+               "  float sn = pc.c.x, fl = pc.c.y;\n"
+               "  col = mix(col, vec3(L), 0.35 * r + 0.2 * sn) * (1.0 - 0.28 * r - 0.1 * sn);\n"
+               "  float s = 0.0;\n"
+               "  for (int i = 0; i < 3; i++) {\n"
+               "    float dist = float[3](300.0, 700.0, 1500.0)[i], sc = float[3](1.0, 1.8, 3.0)[i];\n"
+               "    if (z < dist) continue;\n"
+               "    vec2 q = vec2((uv.x + uv.y * 0.12) * pc.a.x / pc.a.y * 55.0 * sc, uv.y * 2.2 * sc - T * (3.2 - 0.6 * float(i)));\n"
+               "    vec2 c = floor(q);\n"
+               "    float hc = h1(c + vec2(float(i) * 97.0, 0.0));\n"
+               "    if (hc > 0.3) continue;\n"
+               "    float fx = fract(q.x) - (0.2 + 0.6 * h1(c + 13.0)), fy = fract(q.y + hc * 7.0);\n"
+               "    s += exp(-fx * fx * 900.0) * smoothstep(0.0, 0.08, fy) * (1.0 - smoothstep(0.25, 0.45, fy)) * (1.0 - 0.25 * float(i));\n"
+               "  }\n"
+               "  col += vec3(0.6, 0.65, 0.75) * s * 0.22 * r * (1.0 - 0.6 * pc.b.w);\n"
+               "  if (d < 0.999999) {\n"
+               "    vec4 wp = inverse(pc.vp) * vec4(uv * 2.0 - 1.0, pc.b.z > 0.5 ? d * 2.0 - 1.0 : d, 1.0);\n"
+               "    vec3 P = wp.xyz / wp.w, N = normalize(cross(dFdx(P), dFdy(P)));\n"
+               "    float up = smoothstep(0.8, 0.95, abs(N.y));\n"
+               // the splashes: near ground only - too small to read past 25 m; by the scene's light (dimmer at night)
+               "    if (r > 0.01 && z < 2500.0) col += vec3(0.75, 0.8, 0.9) * splash(P) * up * (1.0 - smoothstep(1500.0, 2500.0, z)) * r * 0.12 * max(L, 0.08) / 0.3;\n"
+               // snow settled on what faces up: toward white at the scene's light, broken up by a world noise so the ground shows through
+               "    if (sn > 0.01) {\n"
+               "      vec2 g = P.xz / 60.0; vec2 i = floor(g), f = fract(g); f = f * f * (3.0 - 2.0 * f);\n"
+               "      float nz = mix(mix(h1(i), h1(i + vec2(1, 0)), f.x), mix(h1(i + vec2(0, 1)), h1(i + vec2(1, 1)), f.x), f.y);\n"
+               "      float cover = up * smoothstep(0.2, 0.6, nz + 0.35 * sn) * sn;\n"
+               "      col = mix(col, vec3(0.9, 0.93, 1.0) * max(L * 1.6, 0.05) + 0.04, 0.75 * cover);\n"
+               "    }\n"
+               "  }\n"
+               // snowflakes: 3 layers of soft dots, at 2, 5 and 11 m, falling slowly and swaying, hidden behind what is nearer
+               "  if (sn > 0.01) {\n"
+               "    float f = 0.0;\n"
+               "    for (int i = 0; i < 3; i++) {\n"
+               "      float dist = float[3](200.0, 500.0, 1100.0)[i], sc = float[3](1.0, 1.7, 2.8)[i];\n"
+               "      if (z < dist) continue;\n"
+               "      vec2 q = vec2(uv.x * pc.a.x / pc.a.y * 14.0 * sc + 0.4 * sin(T * 0.7 + uv.y * 6.0 + float(i)), uv.y * 14.0 * sc - T * (0.9 - 0.2 * float(i)));\n"
+               "      vec2 c = floor(q);\n"
+               "      if (h1(c + vec2(0.0, float(i) * 53.0)) > 0.45) continue;\n"
+               "      vec2 o2 = fract(q) - (0.25 + 0.5 * vec2(h1(c + 3.0), h1(c + 7.0)));\n"
+               "      f += exp(-dot(o2, o2) * (260.0 - 60.0 * float(i))) * (1.0 - 0.3 * float(i));\n"
+               "    }\n"
+               "    col += vec3(0.9, 0.93, 1.0) * f * sn * mix(0.55, 0.2, pc.b.w);\n"
+               "  }\n"
+               // lightning: the whole scene lit blue-white for a moment (a double flicker, exec.c)
+               "  col = col * (1.0 + 2.5 * fl) + vec3(0.25, 0.28, 0.35) * fl;\n"
+               "  o = vec4(col, 1.0);\n"
+               "}\n";
+    }
+    // rtao: ray-traced ambient occlusion (exec.c ssao_run; rt.c's acceleration structure, view space): 4 rays per pixel in the
+    // hemisphere around its normal (from the depth), 120 cm, turned per pixel and frame; the share that hits darkens it. Multiplied
+    // onto the scene. Depth (0), binding 6 the scene. a = (P00, P11, P22, P23), b = (width, height, frame, depth mode), c = (strength, -).
+    if (!strcmp(name, "rtao.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 460\n"
+               "#extension GL_EXT_ray_query : require\n"
+               "layout(set = 0, binding = 0) uniform sampler2D dep;\n"
+               "layout(set = 0, binding = 6) uniform accelerationStructureEXT tlas;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float lin(float d) { return pc.a.w / ((pc.b.w > 0.5 ? d * 2.0 - 1.0 : d) + pc.a.z); }\n"
+               "vec3 vpos(vec2 uv) { float z = lin(texture(dep, uv).r); return vec3((uv - 0.5) * vec2(2.0 / pc.a.x, 2.0 / pc.a.y) * z, z); }\n"
+               "void main() {\n"
+               "  o = vec4(1.0);\n"
+               "  vec2 uv = gl_FragCoord.xy / pc.b.xy, px = 1.0 / pc.b.xy;\n"
+               "  float d = texture(dep, uv).r;\n"
+               "  if (d >= 0.999999) return;\n"
+               "  vec3 A = vpos(uv);\n"
+               "  if (A.z > 8000.0) return;\n"
+               "  vec3 l = vpos(uv - vec2(px.x, 0.0)), r = vpos(uv + vec2(px.x, 0.0)), u = vpos(uv - vec2(0.0, px.y)), w = vpos(uv + vec2(0.0, px.y));\n"
+               "  vec3 dx = abs(r.z - A.z) < abs(A.z - l.z) ? r - A : A - l, dy = abs(w.z - A.z) < abs(A.z - u.z) ? w - A : A - u;\n"
+               "  vec3 N = normalize(cross(dx, dy));\n"
+               "  if (dot(N, A) > 0.0) N = -N;\n"  // (facing the camera)
+               "  vec3 T = normalize(cross(N, abs(N.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0))), B = cross(N, T);\n"
+               "  float a0 = 6.2831853 * fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))) + pc.b.z * 0.618034);\n"
+               "  vec3 O = A * (1.0 - 0.01) + N * (2.0 + A.z * 0.002);\n"
+               "  float occ = 0.0;\n"
+               "  for (int i = 0; i < 4; i++) {\n"
+               "    float an = a0 + float(i) * 1.5707963, el = 0.35 + 0.15 * float(i & 1);\n"  // (cosine-ish: two rings, 30 and 40 degrees off the plane)
+               "    vec3 D = normalize(N * el * 2.0 + (cos(an) * T + sin(an) * B));\n"
+               "    rayQueryEXT rq;\n"
+               "    rayQueryInitializeEXT(rq, tlas, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xFF, O, 0.0, D, 120.0);\n"
+               "    while (rayQueryProceedEXT(rq)) {}\n"
+               "    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionNoneEXT)\n"
+               "      occ += 1.0 - rayQueryGetIntersectionTEXT(rq, true) / 120.0;\n"  // (nearer occluders darker)
+               "  }\n"
+               "  o = vec4(vec3(1.0 - pc.c.x * occ * 0.25), 1.0);\n"
+               "}\n";
+    }
+    // ssr: reflections on water (exec.c dn_run). Water = a strongly blue pixel on a level surface (its view-space normal from the
+    // depth, against the world's up); the view ray is mirrored about up (rippled) and marched through the depth buffer; a hit takes
+    // the scene's colour there, Fresnel-weighted, fading at the screen's edges and with the march's length. Scene copy (0), depth (1);
+    // a = (P00, P11, P22, P23), b = (up in view space, depth mode), c = (width, height, seconds, strength).
+    if (!strcmp(name, "ssr.frag")) {
+        *stage = STAGE_FRAGMENT;
+        return "#version 450\n"
+               "layout(set = 0, binding = 0) uniform sampler2D t;\n"
+               "layout(set = 0, binding = 1) uniform sampler2D dep;\n"
+               "layout(push_constant) uniform P { vec4 a; vec4 b; vec4 c; vec4 d; } pc;\n"
+               "layout(location = 0) out vec4 o;\n"
+               "float lin(float d) { return pc.a.w / ((pc.b.w > 0.5 ? d * 2.0 - 1.0 : d) + pc.a.z); }\n"
+               "vec2 K() { return vec2(2.0 / pc.a.x, 2.0 / pc.a.y); }\n"
+               "vec3 vpos(vec2 uv) { float z = lin(texture(dep, uv).r); return vec3((uv - 0.5) * K() * z, z); }\n"
+               "void main() {\n"
+               "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+               "  vec3 col = texelFetch(t, p, 0).rgb;\n"
+               "  o = vec4(col, 1.0);\n"
+               "  float wat = max(smoothstep(0.06, 0.16, col.b - max(col.r, col.g) * 1.15) * smoothstep(0.02, 0.06, col.b), 0.35 * pc.d.x);\n"  // (d.x: rain - the level ground wet)
+               "  if (wat < 0.01) return;\n"
+               "  vec2 uv = (vec2(p) + 0.5) / pc.c.xy, px = 1.0 / pc.c.xy;\n"
+               "  vec3 A = vpos(uv), ax = vpos(uv + vec2(px.x, 0.0)) - A, ay = vpos(uv + vec2(0.0, px.y)) - A;\n"
+               "  vec3 N = normalize(cross(ax, ay)), up = normalize(pc.b.xyz);\n"
+               "  if (abs(dot(N, up)) < 0.85 || A.z > 15000.0) return;\n"  // (level surfaces only, not the far sky)
+               "  float T = pc.c.z;\n"
+               "  vec3 Nw = normalize(up + 0.035 * vec3(sin(A.x * 0.02 + T * 1.3) + sin(A.z * 0.015 - T), 0.0, cos(A.z * 0.02 + T * 1.1) + sin(A.x * 0.013 + T * 0.7)));\n"
+               "  vec3 I = normalize(A), R = reflect(I, Nw);\n"
+               "  vec3 Q = A + R * 4.0;\n"
+               "  float st = 8.0 + A.z * 0.01, hit = 0.0;\n"
+               "  vec2 huv = uv;\n"
+               "  for (int i = 0; i < 48; i++) {\n"
+               "    Q += R * st; st *= 1.08;\n"
+               "    if (Q.z <= 1.0) break;\n"
+               "    vec2 q = Q.xy / (Q.z * K()) + 0.5;\n"
+               "    if (any(lessThan(q, vec2(0.0))) || any(greaterThan(q, vec2(1.0)))) break;\n"
+               "    float zq = lin(texture(dep, q).r);\n"
+               "    if (Q.z > zq + 2.0 && Q.z - zq < 60.0 + st * 2.0) { hit = 1.0; huv = q; break; }\n"
+               "  }\n"
+               "  if (hit < 0.5) return;\n"
+               "  vec2 e = min(huv, 1.0 - huv);\n"
+               "  float fade = smoothstep(0.0, 0.08, min(e.x, e.y)) * (1.0 - smoothstep(0.6, 1.0, length(huv - uv) * 1.5));\n"
+               "  float fr = 0.3 + 0.7 * pow(1.0 - clamp(dot(-I, Nw), 0.0, 1.0), 5.0);\n"
+               "  vec3 rc = texture(t, huv).rgb;\n"
+               "  o = vec4(mix(col, rc, clamp(wat * fade * fr * pc.c.w, 0.0, 0.85)), 1.0);\n"
                "}\n";
     }
     // Day/night: a constant colour, multiplied onto the scene by the blend (exec.c ssao_run)

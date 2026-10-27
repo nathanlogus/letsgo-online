@@ -91,6 +91,7 @@ typedef struct TexBackend {
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
     uint64_t dirty_seq;  // last host write (backend_pool_written) this texture was checked against
     uint8_t font_k;      // > 1: a glyph cache drawn at that scale (runtime/hle/font_hires.c): filled from its K x image
+    uint8_t shadow_k;    // > 1: the sun's shadow map made at that scale (textures.c tex_shadow_k: sharper shadows)
     uint8_t ui2x;        // 1: an interface texture drawn from its 2x version (runtime/ui2x.c): ui2x_fmt, ui2x_w x ui2x_h
     VkFormat ui2x_fmt;
     uint32_t ui2x_w, ui2x_h;

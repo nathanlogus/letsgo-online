@@ -162,6 +162,19 @@ static bool tex_scalable(const NvnTexture *t) {
     return a > 1.74f && a < 1.81f;
 }
 
+// The sun's shadow map (a square depth render target, 1024+: Let's Go's is 2048²) made K times as large, so its shadows' edges are K
+// times finer: the passes into it take its scale for their viewport (exec.c begin_pass, renderer_texture_scale), the lookups are
+// in normalized coordinates. Not `scalable` (that follows the output resolution and frame generation's reduced images).
+// LARECOMP_SHADOW_SCALE=<1..4> (default 2; 1 = the game's).
+static int tex_shadow_k(const NvnTexture *t) {
+    static int k = -1;
+    if (k < 0) { k = getenv("LARECOMP_SHADOW_SCALE") ? atoi(getenv("LARECOMP_SHADOW_SCALE")) : 2; if (k < 1) k = 1; if (k > 4) k = 4; }
+    if (k == 1 || t->target != 1 || t->samples > 1 || !(t->flags & 8) || t->width != t->height || t->width < 1024 || t->width > 4096 ||
+        !renderer_format_is_depth(t->format))
+        return 1;
+    return k;
+}
+
 bool renderer_texture_first_write(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     uint64_t total_frames = renderer_present_count();
@@ -206,6 +219,7 @@ bool renderer_texture_presented(NvnTexture *t) {
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
     if (b && b->scalable) { *sx = b->sx; *sy = b->sy; }
+    else if (b && b->shadow_k > 1) { *sx = *sy = b->shadow_k; }
     else if (b && b->font_k > 1) { *sx = *sy = b->font_k; }
     else if (b && b->ui2x) { *sx = (float)b->ui2x_w / (float)t->width; *sy = (float)b->ui2x_h / (float)t->height; }
     else { *sx = 1; *sy = 1; }
@@ -271,6 +285,8 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     }
     b->font_k = font_cache_k(t);
     if (b->font_k > 1) { tw *= b->font_k; th *= b->font_k; }
+    b->shadow_k = b->scalable ? 1 : (uint8_t)tex_shadow_k(t);
+    if (b->shadow_k > 1) { tw *= b->shadow_k; th *= b->shadow_k; }
     if (b->ui2x) tw = b->ui2x_w, th = b->ui2x_h;
     VkImageType type = VK_IMAGE_TYPE_2D;
     uint32_t layers = 1, depth = 1;

@@ -123,6 +123,7 @@ static void parse_line(const char *line) {
     else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
     else if (!strcmp(key, "lossless")) g_settings.lossless = atoi(val) != 0;
     else if (!strcmp(key, "rt_shadows")) g_settings.rt_shadows = atoi(val) != 0;
+    else if (!strcmp(key, "weather")) g_settings.weather = atoi(val) >= 0 && atoi(val) <= 6 ? atoi(val) : 0;
     else if (!strcmp(key, "resolution")) {
         int n = atoi(val);
         g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
@@ -311,6 +312,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "lossless = %d\n", g_settings.lossless);
     fprintf(f, "rt_shadows = %d\n", g_settings.rt_shadows);
+    fprintf(f, "weather = %d\n", g_settings.weather);
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
     else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");

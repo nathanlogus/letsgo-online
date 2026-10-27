@@ -1254,6 +1254,9 @@ static bool fsr3_on(void);
 // In steps of 0.25 (a sampler each), -2 .. 0. LARECOMP_MIP_BIAS=<offset> (research) replaces the -1 / -0.5; 0: none.
 static float g_mip_bias;
 static void ssao_run(void);
+static void dn_scene_end(void);  // (day / night at the scene's end: dn_run)
+static bool rt_ao(void);  // (ray-traced occlusion: the scene hook runs for it)
+static uint64_t dn_pending;
 static float g_gck[4];  // day / night: the glass multiplier of the draw being recorded (glow_ck_draw; binding 21)
 static float cam_zoom(void);  // LARECOMP_ZOOM (research): the camera's field of view scaled - below 1 shows more of the world
 static void sun_probe(void);  // (contact shadows: the shadow pass's light)
@@ -1329,6 +1332,9 @@ static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v :
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
+    // day / night: the scene is complete (as for TAA below) - the tint and the lights now, before the TAA sees it
+    if (dn_pending && dn_pending == fx_frame() && !ao.busy && ao.tex && st.rt.ncolor && st.rt.color[0] && st.rt.color[0] != ao.tex)
+        dn_scene_end();
     // TAA: the scene is complete when the game moves on to another colour target (its bloom): resolved there, once
     if ((jitter_on() || g_settings.upscaler == UPSCALE_FSR3) && ao.tex && ao.frame == fx_frame() && ao.taa_frame != ao.frame && ao.opaque >= 16 &&
         st.rt.ncolor && st.rt.color[0] && st.rt.color[0] != ao.tex)
@@ -1412,7 +1418,7 @@ static void begin_pass(void) {
     pass_w = minw; pass_h = minh;
     ao.qual = false;
     float dn_rgb[3];  // (day/night: the scene hook below tints the scene, so the interface drawn after it stays clean)
-    if ((g_settings.ssao || g_settings.gi || g_settings.contact_on || mv_wanted() || daynight_tint(dn_rgb) || cam_zoom() != 1.0f) && pass_ncolor && ca[0].imageView && has_d && pass_samples == 1 && st.rt.color[0]) {  // (TAA: mv_wanted)
+    if ((g_settings.ssao || g_settings.gi || g_settings.contact_on || mv_wanted() || daynight_tint(dn_rgb) || cam_zoom() != 1.0f || rt_ao()) && pass_ncolor && ca[0].imageView && has_d && pass_samples == 1 && st.rt.color[0]) {  // (TAA: mv_wanted)
         TexBackend *c0 = st.rt.color[0]->backend;
         VkFormat f = pass_color[0];
         if (c0 && c0->scalable && (f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 || f == VK_FORMAT_R16G16B16A16_SFLOAT ||
@@ -3520,6 +3526,12 @@ static void ssao_settle_camera(void) {
 // full-screen passes: the occlusion goes in before it (at the pass's end it went onto the fade too: grass showed
 // through the title's white). True: the pass must begin again.
 static bool ssao_draw_hook(void) {
+    // (day / night due and a draw without the depth test onto the scene - a fade: the tint before it, not on it)
+    if (dn_pending && dn_pending == fx_frame() && !ao.busy && !st.ds[0] && st.rt.ncolor && st.rt.color[0] == ao.tex) {
+        vk_end_pass();
+        dn_scene_end();
+        return true;
+    }
     if (ao.busy || ao.done_frame == fx_frame()) return false;
     if (!(st.color_state[0] & 1) && st.ds[0] && st.ds[1]) { ao.opaque++; ssao_find_projection(); }
     if (st.ds[0] || ao.opaque < ao.min_opaque) return false;
@@ -3611,6 +3623,18 @@ static bool rt_lights(void) {
                        !(getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "0"));
     float t[3];
     return env && g_settings.rt_shadows && g_vk.rt && daynight_tint(t) && daynight_night() > 0.05f && rt_available();
+}
+
+// Ray-traced ambient occlusion (rtao.frag, ssao_run): day and night, with the ray-traced shadows setting, on a device that has it.
+// LARECOMP_RTAO=0: off; =<strength> (default 0.6).
+static float rt_ao_strength(void) {
+    static float s = -1;
+    if (s < 0) s = getenv("LARECOMP_RTAO") ? (float)atof(getenv("LARECOMP_RTAO")) : 0.6f;
+    return s;
+}
+static bool rt_ao(void) {
+    extern bool game_title(void);
+    return rt_ao_strength() > 0 && g_settings.rt_shadows && g_vk.rt && !game_title() && rt_available();
 }
 
 // Night, the water's draw (its fragment shader: found with tests/scripts/bisect_tex.py on Viridian's pond; LARECOMP_WATER_FSHASH=<hex>,...
@@ -3781,7 +3805,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.glsl = fkey.glsl = 1;
     vkey.jitter = jitter_on() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (TAA, FSR 3)
     vkey.zoom = cam_zoom() != 1.0f && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0] ? (uint8_t)lroundf(cam_zoom() * 100.0f) : 0;  // (LARECOMP_ZOOM)
-    vkey.xfb = rt_lights() && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (ray-traced light shadows: rt.c)
+    vkey.xfb = (rt_lights() || rt_ao()) && st.rt.depth && st.rt.depth == ao.dtex && st.ds[0];  // (ray tracing: rt.c - the lights' shadows, the occlusion)
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
@@ -4691,6 +4715,8 @@ static VkImageView raw_view(TexBackend *b) {
 static VkPipelineLayout post_layout;
 static VkDescriptorSetLayout post_set_layout;
 static VkAccelerationStructureKHR post_tlas;  // (set: the next post passes bind it at 6 - the lights pass's ray-traced shadows)
+static uint64_t rt_built_frame;  // (the frame whose triangles the acceleration structures hold: ssao_run)
+static uint64_t rf_count(void) { return renderer_present_count(); }
 
 // fmt: the output's format; blend 1: the output multiplies what is there (SSAO onto the game's scene, colour only),
 // 2: replaces the colour, 3: is added to it (GI)
@@ -5132,6 +5158,234 @@ static void contact_run(VkCommandBuffer cb, VkImageView dv, uint32_t w, uint32_t
 // The scene hook (outside any pass: vk_end_pass), once per frame as the scene pass ends: camera motion vectors, the
 // indirect light, then the occlusion - from the depth at its size -> blur across -> blur down ->
 // multiplied onto the scene's colour. The debug views replace the colour (the motion vectors' last).
+// Day / night: the tint, the night lights, fireflies and clouds onto the scene (ssao_run marks it due, dn_pending). Not at the
+// occlusion's hook: the game copies the lit scene there for its refracting glass (the Center's door, the pond), drawn after;
+// lit, the copy put the lights' pools behind the glass and the door showed them in moving blocks. Now at the scene's end: the
+// game moving to another colour target (its bloom), or a draw without the depth test onto it (a fade): dn_scene_end.
+static uint64_t dn_pending;
+static void dn_run(VkCommandBuffer cb, VkImageView dv, float mo) {
+    float dn[3];  // day/night (runtime/daynight.c): the scene multiplied by the hour's tint, overworld only
+    if (daynight_tint(dn)) {
+        float night = daynight_night();
+        Weather wx;  // (runtime/daynight.c: the weather setting)
+        daynight_weather(&wx);
+        static int hash_mode = -1;
+        if (hash_mode < 0) hash_mode = !(getenv("LARECOMP_GLOW_MODE") && !strcmp(getenv("LARECOMP_GLOW_MODE"), "color"));  // (default: the textures' own draws glow; "color": the old colour key + light spill)
+        if (night > 0.05f && !hash_mode) {  // (night lights: glass glows - a colour key on a copy of the scene, tint-or-glow in one pass)
+            TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            post_pass_view(cb, post_pipeline_ex("copy.frag", ao.cfmt, 0), src, 1, post_view(cp), ao.cw, ao.ch, pk, 32, false, false);
+            vk_full_barrier(cb);
+            float pt[8] = {dn[0], dn[1], dn[2], night, 2.3f, 1.45f, 0.55f, (float)ao.ch / 720.0f};  // (glass: warm, 2.3 / 1.45 / 0.55 x its daylight colour; [7]: the pools' scale)
+            if (getenv("LARECOMP_GLOW_DEBUG")) pt[4] = 6, pt[5] = 0, pt[6] = 6;  // (research: the key's matches in magenta)
+            VkImageView ci[4] = {post_view(cp)};
+            post_pass_view(cb, post_pipeline_ex("tint_glow.frag", ao.cfmt, 1), ci, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
+        } else if (night > 0.05f && !(getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "0"))) {
+            // dynamic lights: the lit pixels (colour, intensity, depth) -> a light map at 1/4 size -> the apply pass (pools below sources, halos around)
+            TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            post_pass_view(cb, post_pipeline_ex("copy.frag", ao.cfmt, 0), src, 1, post_view(cp), ao.cw, ao.ch, pk, 32, false, false);
+            float t0 = (getenv("LARECOMP_FIREFLIES") && !strcmp(getenv("LARECOMP_FIREFLIES"), "0")) ? 0.0f : (float)(SDL_GetTicks() % 1000000) / 1000.0f + 0.01f;  // seconds, for the fireflies (0: off)
+            uint32_t lw[4], lh[4];
+            TexBackend *lv[4];
+            // (frame generation's reduced in-between images: a smaller block, so the light map covers the scene as N's does - at 4 the pools
+            //  and halos of every other image came out larger and brighter, a flicker at night)
+            float dl_s = vk_tex_lo_active() ? ip_lo_factor() : 1.0f;
+            int dl_b = (int)lroundf(4.0f * dl_s) < 1 ? 1 : (int)lroundf(4.0f * dl_s);
+            lw[0] = (ao.cw + dl_b - 1) / dl_b, lh[0] = (ao.ch + dl_b - 1) / dl_b;
+            lv[0] = post_image_fmt(48, lw[0], lh[0], VK_FORMAT_R16G16B16A16_SFLOAT);
+            float pe[8] = {ao.proj[2], ao.proj[3], mo, (float)dl_b, (float)ao.cw, (float)ao.ch};
+            VkImageView ei[4] = {post_view(cp), dv};
+            post_pass_view(cb, post_pipeline_ex("dl_extract.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ei, 2, post_view(lv[0]), lw[0], lh[0], pe, 32, false, false);
+            static float flip = 99;  // LARECOMP_DL_FLIP=1: the other row direction (the pools run the wrong way)
+            if (flip == 99) flip = getenv("LARECOMP_DL_FLIP") ? (float)atof(getenv("LARECOMP_DL_FLIP")) : -1.0f;
+            static float gain = -1;  // LARECOMP_DL_GAIN: the lights' strength (default 1.8)
+            if (gain < 0) gain = getenv("LARECOMP_DL_GAIN") ? (float)atof(getenv("LARECOMP_DL_GAIN")) : 1.8f;
+            static float zw = -1;  // LARECOMP_DL_ZW: the depth window of the pools (1 = the default 220 cm)
+            if (zw < 0) zw = getenv("LARECOMP_DL_ZW") ? (float)atof(getenv("LARECOMP_DL_ZW")) : 1.0f;
+            static float rt_shadows = -1;  // LARECOMP_LIGHTS_RT=0: no shadows from the depth (default on)
+            if (rt_shadows < 0) rt_shadows = getenv("LARECOMP_LIGHTS_RT") && !strcmp(getenv("LARECOMP_LIGHTS_RT"), "0") ? 0.0f : 1.0f;
+            // DQ HD-2D's "Dynamic Lighting Improvements" settings, ported: LARECOMP_DL_CONTRAST (mid tones at night, 0.7; 1 = off),
+            // LARECOMP_DL_STREAK (cross streaks, 1; 0 = off), LARECOMP_DL_FAR (the far lights' depth window, 2.5; 1 = off)
+            static float dq[3] = {-1, -1, -1};
+            if (dq[0] < 0) {
+                const char *v[3] = {getenv("LARECOMP_DL_CONTRAST"), getenv("LARECOMP_DL_STREAK"), getenv("LARECOMP_DL_FAR")};
+                const float def[3] = {0.7f, 1.0f, 2.5f};
+                for (int i = 0; i < 3; i++) dq[i] = v[i] ? (float)atof(v[i]) : def[i];
+            }
+            float pa[20] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_RT_DEBUG") ? -2.0f : getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows,
+                            dq[0], dq[1], dq[2], dl_s};
+            for (int k = 1; k < 4; k++) {  // the pyramid: each level half the size of the one above, depth-weighted
+                lw[k] = (lw[k - 1] + 1) / 2, lh[k] = (lh[k - 1] + 1) / 2;
+                lv[k] = post_image_fmt(48 + k, lw[k], lh[k], VK_FORMAT_R16G16B16A16_SFLOAT);
+                vk_full_barrier(cb);
+                VkImageView di[4] = {post_view(lv[k - 1])};
+                float pd[8] = {0, 0, 0, 0, 1.0f / (float)lw[k], 1.0f / (float)lh[k], 1.0f / (float)lw[k - 1], 1.0f / (float)lh[k - 1]};
+                post_pass_view(cb, post_pipeline_ex("dl_down.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), di, 1, post_view(lv[k]), lw[k], lh[k], pd, 32, false, false);
+            }
+            vk_full_barrier(cb);
+            VkImageView ai[6] = {post_view(cp), dv, post_view(lv[0]), post_view(lv[1]), post_view(lv[2]), post_view(lv[3])};
+            // (ray-traced shadows: this frame's captured triangles -> acceleration structures, rt.c; an in-between image traces N's)
+            gp_mark(cb, "ours: ray tracing (acceleration structures)");
+            post_tlas = rt_lights() && rt_built_frame == fx_frame() ? rt_tlas() : rt_lights() && ip_replaying ? rt_tlas() : VK_NULL_HANDLE;  // (built in ssao_run; an in-between image traces N's)
+            gp_mark(cb, "ours: night lights apply%s", post_tlas ? " (ray-traced shadows)" : "");
+            VkPipeline p_dl = post_pipeline_ex(post_tlas ? "dl_apply_rt.frag" : "dl_apply.frag", ao.cfmt, getenv("LARECOMP_DL_DEBUG") || getenv("LARECOMP_RT_DEBUG") ? 2 : 1);
+            {   static bool said;
+                if (!said && post_tlas) { said = true; LOG("[rt] lights pass: ray-traced shadows\n"); } }
+            post_pass_view(cb, p_dl, ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
+            post_tlas = VK_NULL_HANDLE;
+            gp_mark(cb, "ours: fireflies");
+            if (t0 > 0 && ao.vp_frame) {  // fireflies, placed in the world by this frame's camera (dl_ff.frag): they stay put as the camera moves
+                float pf[28];
+                for (int i = 0; i < 16; i++) pf[i] = (float)ao.vp[i];  // (row-major, as the shader's row_major mat4)
+                float rest[12] = {(float)ao.cw, (float)ao.ch, t0, mo, 0.0f /* (row 0 = NDC y -1, as mv.frag) */, night, getenv("LARECOMP_FF_DEBUG") ? 1.0f : 0.0f, 0, dn[0], dn[1], dn[2], 0};
+                memcpy(pf + 16, rest, sizeof rest);
+                vk_full_barrier(cb);
+                VkImageView fi[4] = {post_view(cp), dv};
+                post_pass_view(cb, post_pipeline_ex("dl_ff.frag", ao.cfmt, 1), fi, 2, ao.cview, ao.cw, ao.ch, pf, sizeof pf, false, true);
+            }
+        } else {
+            float pt[8] = {dn[0], dn[1], dn[2]};
+            post_pass_view(cb, post_pipeline_ex("tint_apply.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
+        }
+        gp_mark(cb, "ours: clouds");
+        static float clouds = -1;  // LARECOMP_CLOUDS: the cloud shadows' depth in daylight (default 0.4; 0 = off), a third of it at night
+        if (clouds < 0) clouds = getenv("LARECOMP_CLOUDS") ? (float)atof(getenv("LARECOMP_CLOUDS")) : 0.4f;
+        if (clouds > 0 && ao.vp_frame) {  // cloud shadows drifting over the ground, in the world by this frame's camera (clouds.frag)
+            float pc[28];
+            for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
+            static float cover = -1;  // LARECOMP_CLOUD_COVER: how much of the sky is cloud, 0..1 (default 0.5)
+            if (cover < 0) cover = getenv("LARECOMP_CLOUD_COVER") ? fminf(fmaxf((float)atof(getenv("LARECOMP_CLOUD_COVER")), 0), 1) : 0.5f;
+            // (projected along the sun - the shadow map's light, sun_dir - else a fixed slant; a low sun is clamped)
+            float L[3] = {0.4f, 1, 0.3f}, slope[2];
+            if (!sun_dir(fx_frame(), L) || L[1] < 0.2f) L[0] = 0.4f, L[1] = 1, L[2] = 0.3f;
+            slope[0] = L[0] / L[1], slope[1] = L[2] / L[1];
+            {   static int said;
+                if (said++ == 300) LOG("[clouds] sun (%.2f, %.2f, %.2f)%s\n", L[0], L[1], L[2], sun.frame == fx_frame() && sun.votes > 0 ? "" : " (fixed slant: no shadow map light)"); }
+            float rest[12] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 40000000) / 1000.0f, mo, 0.0f /* (as mv.frag) */,
+                              clouds * (1.0f - 0.67f * night) * (1.0f + 0.6f * wx.cloud), getenv("LARECOMP_CLOUDS_DEBUG") ? (float)atof(getenv("LARECOMP_CLOUDS_DEBUG")) : 0.0f, 0,
+                              slope[0], slope[1], cover + (0.85f - cover) * wx.cloud, 0};  // (cloudy / rain / storm: overcast)
+            memcpy(pc + 16, rest, sizeof rest);
+            vk_full_barrier(cb);
+            post_pass_view(cb, post_pipeline_ex("clouds.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+        }
+        gp_mark(cb, "ours: atmosphere");
+        static int atmo = -1;  // LARECOMP_ATMO=0: no sky colours, stars or haze by hour (atmo.frag, runtime/daynight.c daynight_atmo)
+        if (atmo < 0) atmo = !(getenv("LARECOMP_ATMO") && !strcmp(getenv("LARECOMP_ATMO"), "0"));
+        if (atmo && ao.vp_frame) {
+            float hor[3], zen[3], fog[4], stars;
+            daynight_atmo(hor, zen, fog, &stars);
+            {   // (rain, snow: thicker, greyer haze; fog: a thick pale-grey one; clouds: fewer stars)
+                float rn = fmaxf(wx.rain, wx.snow), g = (fog[0] + fog[1] + fog[2]) / 3.0f, gl = fmaxf(g, 0.08f + 0.5f * (1.0f - night));
+                for (int k = 0; k < 3; k++) fog[k] += (g - fog[k]) * 0.6f * rn, fog[k] += (gl * 1.05f - fog[k]) * 0.8f * wx.fog;
+                fog[3] *= (1.0f + 2.5f * rn) * (1.0f + 45.0f * wx.fog), stars *= 1.0f - fminf(wx.cloud * 1.4f, 1.0f);
+            }
+            float pc[32];
+            for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
+            float rest[16] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 1000000) / 1000.0f, mo, hor[0], hor[1], hor[2], stars,
+                              zen[0], zen[1], zen[2], fog[3], fog[0], fog[1], fog[2], 0};
+            memcpy(pc + 16, rest, sizeof rest);
+            VkPipeline p_copy = post_pipeline_ex("copy.frag", ao.cfmt, 0), p_atmo = post_pipeline_ex("atmo.frag", ao.cfmt, 2);
+            TexBackend *ac = post_image_fmt(54, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            vk_full_barrier(cb);
+            post_pass_view(cb, p_copy, src, 1, post_view(ac), ao.cw, ao.ch, pk, 32, false, false);
+            vk_full_barrier(cb);
+            VkImageView ai[4] = {post_view(ac), dv};
+            post_pass_view(cb, p_atmo, ai, 2, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+        }
+        gp_mark(cb, "ours: reflections");
+        // reflections on water (ssr.frag): the world's up in the view space the shaders rebuild (contact_run's: the view's second
+        // column, z turned). LARECOMP_SSR=0: off; LARECOMP_SSR_STRENGTH (default 1).
+        static float ssr = -1;
+        if (ssr < 0) ssr = getenv("LARECOMP_SSR") ? (float)atof(getenv("LARECOMP_SSR")) : 1.0f;
+        uint32_t bs = ao.scene_size[ao.scene_cur];
+        if (ssr > 0 && ao.poff >= 64 && ao.poff <= bs) {
+            float v[16];
+            memcpy(v, ao.scene[ao.scene_cur] + ao.poff - 64, sizeof v);
+            float pc[16] = {ao.proj[0], ao.proj[1], ao.proj[2], ao.proj[3], v[1], v[5], -v[9], mo,
+                            (float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 1000000) / 1000.0f, ssr, fmaxf(wx.rain, 0.6f * wx.snow), 0, 0, 0};
+            VkPipeline p_copy = post_pipeline_ex("copy.frag", ao.cfmt, 0), p_ssr = post_pipeline_ex("ssr.frag", ao.cfmt, 2);
+            TexBackend *rc = post_image_fmt(55, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            vk_full_barrier(cb);
+            post_pass_view(cb, p_copy, src, 1, post_view(rc), ao.cw, ao.ch, pk, 32, false, false);
+            vk_full_barrier(cb);
+            VkImageView ri[4] = {post_view(rc), dv};
+            post_pass_view(cb, p_ssr, ri, 2, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+        }
+        gp_mark(cb, "ours: rain");
+        // rain, snow, lightning (rain.frag): darker, greyer, streaks or flakes, splashes or settled snow; the weather setting
+        float rn = wx.rain, flash = 0;
+        if (wx.storm > 0.01f) {  // (lightning: a strike in about a quarter of 3 s slots, at a hashed moment - a double flicker)
+            double ts = (double)SDL_GetTicks() / 1000.0;
+            unsigned slot = (unsigned)(ts / 3.0), h = slot * 2654435761u;
+            h ^= h >> 15, h *= 2246822519u, h ^= h >> 13;
+            float at = (float)(h % 1000u) / 1000.0f * 2.2f, tl = (float)fmod(ts, 3.0) - at;
+            if ((h >> 12) % 4u == 0 && tl >= 0) flash = wx.storm * (expf(-tl * 14.0f) + 0.7f * (tl > 0.18f ? expf(-(tl - 0.18f) * 10.0f) : 0.0f));
+        }
+        if (getenv("LARECOMP_FLASH")) flash = (float)atof(getenv("LARECOMP_FLASH"));  // (tests: a fixed flash)
+        if ((rn > 0.01f || wx.snow > 0.01f || flash > 0.005f) && ao.vp_frame) {
+            float pc[28] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 1000000) / 1000.0f, rn, ao.proj[2], ao.proj[3], mo, night};
+            for (int i = 0; i < 16; i++) pc[8 + i] = (float)ao.vp[i];  // (the splashes, the settled snow: in the world)
+            pc[24] = wx.snow, pc[25] = flash, pc[26] = pc[27] = 0;
+            VkPipeline p_copy = post_pipeline_ex("copy.frag", ao.cfmt, 0), p_rain = post_pipeline_ex("rain.frag", ao.cfmt, 2);
+            TexBackend *rc = post_image_fmt(55, ao.cw, ao.ch, ao.cfmt);
+            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+            VkImageView src[4] = {raw_view(ao.color)};
+            vk_full_barrier(cb);
+            post_pass_view(cb, p_copy, src, 1, post_view(rc), ao.cw, ao.ch, pk, 32, false, false);
+            vk_full_barrier(cb);
+            VkImageView ri[4] = {post_view(rc), dv};
+            post_pass_view(cb, p_rain, ri, 2, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+        }
+        gp_mark(cb, "ours: light shafts");
+        // light shafts (shafts.frag): toward the sun's place on the screen - the shadow map's light (sun_dir), as a direction
+        // through this frame's camera; warm and strongest at dawn and dusk, faint by day, none at night. LARECOMP_SHAFTS=0: off.
+        static int shafts = -1;
+        if (shafts < 0) shafts = !(getenv("LARECOMP_SHAFTS") && !strcmp(getenv("LARECOMP_SHAFTS"), "0"));
+        float Ls[3];
+        if (shafts && ao.vp_frame && sun_dir(fx_frame(), Ls) && night < 0.9f) {
+            double cl[4] = {0};
+            for (int r = 0; r < 4; r++) for (int c = 0; c < 3; c++) cl[r] += ao.vp[r * 4 + c] * Ls[c];
+            float edge = 4.0f * night * (1.0f - night);  // (1 at dusk / dawn's middle)
+            float k = (0.1f + 0.35f * edge) * (1.0f - night);
+            if (cl[3] > 1e-6 && k > 0.01f) {
+                float su = (float)(cl[0] / cl[3]) * 0.5f + 0.5f, sv = (float)(cl[1] / cl[3]) * 0.5f + 0.5f;
+                float pc[12] = {su, sv, k, mo, 1.0f, 0.85f + 0.1f * (1 - edge), 0.65f + 0.3f * (1 - edge), 0,
+                                ao.proj[2], ao.proj[3], (float)ao.cw, (float)ao.ch};
+                VkPipeline p_copy = post_pipeline_ex("copy.frag", ao.cfmt, 0), p_sh = post_pipeline_ex("shafts.frag", ao.cfmt, 3);
+                TexBackend *sc = post_image_fmt(55, ao.cw, ao.ch, ao.cfmt);
+                float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
+                VkImageView src[4] = {raw_view(ao.color)};
+                vk_full_barrier(cb);
+                post_pass_view(cb, p_copy, src, 1, post_view(sc), ao.cw, ao.ch, pk, 32, false, false);
+                vk_full_barrier(cb);
+                VkImageView si[4] = {post_view(sc), dv};
+                post_pass_view(cb, p_sh, si, 2, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
+            }
+        }
+    }
+}
+static void dn_scene_end(void) {
+    dn_pending = 0;
+    TexBackend *d = ao.depth;
+    if (!d || !d->image || !(d->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) || d->samples > 1 || !ao.cview) return;
+    static const VkComponentMapping id = {0};
+    VkImageView dv = vk_image_view(d, VK_IMAGE_VIEW_TYPE_2D, d->format, 0, 1, 0, 1, id, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkCommandBuffer cb = vk_cmd();
+    gp_mark(cb, "ours: day / night%s", ip_replaying ? " (in-between)" : "");
+    ao.busy = true;
+    vk_full_barrier(cb);
+    dn_run(cb, dv, nvn_depth_mode() == 0 ? 1.0f : 0.0f);
+    vk_full_barrier(vk_cmd());
+    ao.busy = false;
+}
+
 static void ssao_run(void) {
     // (the marks: motion vectors, GI, SSAO, contact shadows, each its own row - the SSAO's used to start here and so
     // measured the motion vectors, while the GI's row went on through the SSAO: "GI 3.1 ms" was GI + SSAO)
@@ -5238,6 +5492,19 @@ static void ssao_run(void) {
         }
     }
     if (g_settings.contact_on) contact_run(cb, dv, w, h, mo, fr);
+    // ray tracing (rt.c): the acceleration structures from this frame's captured triangles, once - for the occlusion here and the
+    // night lights' shadows (dn_run); then the ray-traced occlusion, multiplied onto the scene
+    rt_built_frame = (rt_lights() || rt_ao()) && rt_build(cb, fr, ao.proj) ? fr : 0;
+    if (rt_built_frame && rt_ao() && rt_tlas()) {
+        gp_mark(cb, "ours: ray-traced occlusion%s", ip_replaying ? " (in-between)" : "");
+        float pr[12] = {ao.proj[0], ao.proj[1], ao.proj[2], ao.proj[3], (float)ao.cw, (float)ao.ch, (float)(rf_count() % 64), mo,
+                        rt_ao_strength(), 0, 0, 0};
+        VkPipeline p_ao = post_pipeline_ex("rtao.frag", ao.cfmt, 1);
+        post_tlas = rt_tlas();
+        vk_full_barrier(cb);
+        post_pass_view(cb, p_ao, &dv, 1, ao.cview, ao.cw, ao.ch, pr, sizeof pr, false, true);
+        post_tlas = VK_NULL_HANDLE;
+    }
     if (mv && g_settings.mv_debug) {  // (x right red, y up green, still: grey; 16 x velocity; shown at the present)
         TexBackend *enc = post_image(13, w, h);
         float ps[8] = {0, 0, 0, 0, 1.0f / (float)w, 1.0f / (float)h, 16, 0};
@@ -5245,107 +5512,8 @@ static void ssao_run(void) {
         post_pass_view(cb, post_pipeline("mv_show.frag"), src, 1, post_view(enc), w, h, ps, 32, false, false);
         debug_view = enc, debug_view_frame = fr;
     }
-    float dn[3];  // day/night (runtime/daynight.c): the scene multiplied by the hour's tint, overworld only
-    if (daynight_tint(dn)) {
-        float night = daynight_night();
-        static int hash_mode = -1;
-        if (hash_mode < 0) hash_mode = !(getenv("LARECOMP_GLOW_MODE") && !strcmp(getenv("LARECOMP_GLOW_MODE"), "color"));  // (default: the textures' own draws glow; "color": the old colour key + light spill)
-        if (night > 0.05f && !hash_mode) {  // (night lights: glass glows - a colour key on a copy of the scene, tint-or-glow in one pass)
-            TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
-            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
-            VkImageView src[4] = {raw_view(ao.color)};
-            post_pass_view(cb, post_pipeline_ex("copy.frag", ao.cfmt, 0), src, 1, post_view(cp), ao.cw, ao.ch, pk, 32, false, false);
-            vk_full_barrier(cb);
-            float pt[8] = {dn[0], dn[1], dn[2], night, 2.3f, 1.45f, 0.55f, (float)ao.ch / 720.0f};  // (glass: warm, 2.3 / 1.45 / 0.55 x its daylight colour; [7]: the pools' scale)
-            if (getenv("LARECOMP_GLOW_DEBUG")) pt[4] = 6, pt[5] = 0, pt[6] = 6;  // (research: the key's matches in magenta)
-            VkImageView ci[4] = {post_view(cp)};
-            post_pass_view(cb, post_pipeline_ex("tint_glow.frag", ao.cfmt, 1), ci, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
-        } else if (night > 0.05f && !(getenv("LARECOMP_LIGHTS") && !strcmp(getenv("LARECOMP_LIGHTS"), "0"))) {
-            // dynamic lights: the lit pixels (colour, intensity, depth) -> a light map at 1/4 size -> the apply pass (pools below sources, halos around)
-            TexBackend *cp = post_image_fmt(47, ao.cw, ao.ch, ao.cfmt);
-            float pk[8] = {0, 0, 0, 0, 1.0f / (float)ao.cw, 1.0f / (float)ao.ch};
-            VkImageView src[4] = {raw_view(ao.color)};
-            post_pass_view(cb, post_pipeline_ex("copy.frag", ao.cfmt, 0), src, 1, post_view(cp), ao.cw, ao.ch, pk, 32, false, false);
-            float t0 = (getenv("LARECOMP_FIREFLIES") && !strcmp(getenv("LARECOMP_FIREFLIES"), "0")) ? 0.0f : (float)(SDL_GetTicks() % 1000000) / 1000.0f + 0.01f;  // seconds, for the fireflies (0: off)
-            uint32_t lw[4], lh[4];
-            TexBackend *lv[4];
-            // (frame generation's reduced in-between images: a smaller block, so the light map covers the scene as N's does - at 4 the pools
-            //  and halos of every other image came out larger and brighter, a flicker at night)
-            float dl_s = vk_tex_lo_active() ? ip_lo_factor() : 1.0f;
-            int dl_b = (int)lroundf(4.0f * dl_s) < 1 ? 1 : (int)lroundf(4.0f * dl_s);
-            lw[0] = (ao.cw + dl_b - 1) / dl_b, lh[0] = (ao.ch + dl_b - 1) / dl_b;
-            lv[0] = post_image_fmt(48, lw[0], lh[0], VK_FORMAT_R16G16B16A16_SFLOAT);
-            float pe[8] = {ao.proj[2], ao.proj[3], mo, (float)dl_b, (float)ao.cw, (float)ao.ch};
-            VkImageView ei[4] = {post_view(cp), dv};
-            post_pass_view(cb, post_pipeline_ex("dl_extract.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), ei, 2, post_view(lv[0]), lw[0], lh[0], pe, 32, false, false);
-            static float flip = 99;  // LARECOMP_DL_FLIP=1: the other row direction (the pools run the wrong way)
-            if (flip == 99) flip = getenv("LARECOMP_DL_FLIP") ? (float)atof(getenv("LARECOMP_DL_FLIP")) : -1.0f;
-            static float gain = -1;  // LARECOMP_DL_GAIN: the lights' strength (default 1.8)
-            if (gain < 0) gain = getenv("LARECOMP_DL_GAIN") ? (float)atof(getenv("LARECOMP_DL_GAIN")) : 1.8f;
-            static float zw = -1;  // LARECOMP_DL_ZW: the depth window of the pools (1 = the default 220 cm)
-            if (zw < 0) zw = getenv("LARECOMP_DL_ZW") ? (float)atof(getenv("LARECOMP_DL_ZW")) : 1.0f;
-            static float rt_shadows = -1;  // LARECOMP_LIGHTS_RT=0: no shadows from the depth (default on)
-            if (rt_shadows < 0) rt_shadows = getenv("LARECOMP_LIGHTS_RT") && !strcmp(getenv("LARECOMP_LIGHTS_RT"), "0") ? 0.0f : 1.0f;
-            // DQ HD-2D's "Dynamic Lighting Improvements" settings, ported: LARECOMP_DL_CONTRAST (mid tones at night, 0.7; 1 = off),
-            // LARECOMP_DL_STREAK (cross streaks, 1; 0 = off), LARECOMP_DL_FAR (the far lights' depth window, 2.5; 1 = off)
-            static float dq[3] = {-1, -1, -1};
-            if (dq[0] < 0) {
-                const char *v[3] = {getenv("LARECOMP_DL_CONTRAST"), getenv("LARECOMP_DL_STREAK"), getenv("LARECOMP_DL_FAR")};
-                const float def[3] = {0.7f, 1.0f, 2.5f};
-                for (int i = 0; i < 3; i++) dq[i] = v[i] ? (float)atof(v[i]) : def[i];
-            }
-            float pa[20] = {dn[0], dn[1], dn[2], night, ao.proj[2], ao.proj[3], mo, flip, ao.proj[0], ao.proj[1], (float)ao.cw, (float)ao.ch, t0, gain, zw, getenv("LARECOMP_RT_DEBUG") ? -2.0f : getenv("LARECOMP_DL_DEBUG") ? -1.0f : rt_shadows,
-                            dq[0], dq[1], dq[2], dl_s};
-            for (int k = 1; k < 4; k++) {  // the pyramid: each level half the size of the one above, depth-weighted
-                lw[k] = (lw[k - 1] + 1) / 2, lh[k] = (lh[k - 1] + 1) / 2;
-                lv[k] = post_image_fmt(48 + k, lw[k], lh[k], VK_FORMAT_R16G16B16A16_SFLOAT);
-                vk_full_barrier(cb);
-                VkImageView di[4] = {post_view(lv[k - 1])};
-                float pd[8] = {0, 0, 0, 0, 1.0f / (float)lw[k], 1.0f / (float)lh[k], 1.0f / (float)lw[k - 1], 1.0f / (float)lh[k - 1]};
-                post_pass_view(cb, post_pipeline_ex("dl_down.frag", VK_FORMAT_R16G16B16A16_SFLOAT, 0), di, 1, post_view(lv[k]), lw[k], lh[k], pd, 32, false, false);
-            }
-            vk_full_barrier(cb);
-            VkImageView ai[6] = {post_view(cp), dv, post_view(lv[0]), post_view(lv[1]), post_view(lv[2]), post_view(lv[3])};
-            // (ray-traced shadows: this frame's captured triangles -> acceleration structures, rt.c; an in-between image traces N's)
-            gp_mark(cb, "ours: ray tracing (acceleration structures)");
-            post_tlas = rt_lights() && rt_build(cb, fx_frame(), ao.proj) ? rt_tlas() : VK_NULL_HANDLE;
-            gp_mark(cb, "ours: night lights apply%s", post_tlas ? " (ray-traced shadows)" : "");
-            VkPipeline p_dl = post_pipeline_ex(post_tlas ? "dl_apply_rt.frag" : "dl_apply.frag", ao.cfmt, getenv("LARECOMP_DL_DEBUG") || getenv("LARECOMP_RT_DEBUG") ? 2 : 1);
-            {   static bool said;
-                if (!said && post_tlas) { said = true; LOG("[rt] lights pass: ray-traced shadows\n"); } }
-            post_pass_view(cb, p_dl, ai, 6, ao.cview, ao.cw, ao.ch, pa, sizeof pa, false, true);
-            post_tlas = VK_NULL_HANDLE;
-            if (t0 > 0 && ao.vp_frame) {  // fireflies, placed in the world by this frame's camera (dl_ff.frag): they stay put as the camera moves
-                float pf[28];
-                for (int i = 0; i < 16; i++) pf[i] = (float)ao.vp[i];  // (row-major, as the shader's row_major mat4)
-                float rest[12] = {(float)ao.cw, (float)ao.ch, t0, mo, 0.0f /* (row 0 = NDC y -1, as mv.frag) */, night, getenv("LARECOMP_FF_DEBUG") ? 1.0f : 0.0f, 0, dn[0], dn[1], dn[2], 0};
-                memcpy(pf + 16, rest, sizeof rest);
-                vk_full_barrier(cb);
-                VkImageView fi[4] = {post_view(cp), dv};
-                post_pass_view(cb, post_pipeline_ex("dl_ff.frag", ao.cfmt, 1), fi, 2, ao.cview, ao.cw, ao.ch, pf, sizeof pf, false, true);
-            }
-        } else {
-            float pt[8] = {dn[0], dn[1], dn[2]};
-            post_pass_view(cb, post_pipeline_ex("tint_apply.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pt, 32, false, true);
-        }
-        static float clouds = -1;  // LARECOMP_CLOUDS: the cloud shadows' depth in daylight (default 0.3; 0 = off), a third of it at night
-        if (clouds < 0) clouds = getenv("LARECOMP_CLOUDS") ? (float)atof(getenv("LARECOMP_CLOUDS")) : 0.3f;
-        if (clouds > 0 && ao.vp_frame) {  // cloud shadows drifting over the ground, in the world by this frame's camera (clouds.frag)
-            float pc[28];
-            for (int i = 0; i < 16; i++) pc[i] = (float)ao.vp[i];
-            static float cover = -1;  // LARECOMP_CLOUD_COVER: how much of the sky is cloud, 0..1 (default 0.45)
-            if (cover < 0) cover = getenv("LARECOMP_CLOUD_COVER") ? fminf(fmaxf((float)atof(getenv("LARECOMP_CLOUD_COVER")), 0), 1) : 0.45f;
-            // (projected along the sun - the shadow map's light, sun_dir - else a fixed slant; a low sun is clamped)
-            float L[3] = {0.4f, 1, 0.3f}, slope[2];
-            if (!sun_dir(fx_frame(), L) || L[1] < 0.2f) L[0] = 0.4f, L[1] = 1, L[2] = 0.3f;
-            slope[0] = L[0] / L[1], slope[1] = L[2] / L[1];
-            float rest[12] = {(float)ao.cw, (float)ao.ch, (float)(SDL_GetTicks() % 40000000) / 1000.0f, mo, 0.0f /* (as mv.frag) */,
-                              clouds * (1.0f - 0.67f * night), getenv("LARECOMP_CLOUDS_DEBUG") ? (float)atof(getenv("LARECOMP_CLOUDS_DEBUG")) : 0.0f, 0,
-                              slope[0], slope[1], cover, 0};
-            memcpy(pc + 16, rest, sizeof rest);
-            vk_full_barrier(cb);
-            post_pass_view(cb, post_pipeline_ex("clouds.frag", ao.cfmt, 1), &dv, 1, ao.cview, ao.cw, ao.ch, pc, sizeof pc, false, true);
-        }
+    {   float t[3];  // (day / night: at the scene's end - dn_scene_end - after the late blended draws, as the refraction copy they read)
+        dn_pending = daynight_tint(t) ? fr : 0;
     }
     vk_full_barrier(cb);
     ao.busy = false;

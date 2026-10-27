@@ -3,6 +3,7 @@
 #include "settings.h"
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 typedef struct { float h, r, g, b, mul, sat, night; } Key;
@@ -43,6 +44,74 @@ static Key sample(void) {
 #undef L
     return k;
 }
+
+// The atmosphere by hour (exec.c atmo pass): the sky multiplied toward its horizon / zenith colours (after the tint), the stars'
+// strength, and the distance haze (colour after the tint, density per cm). Day: the game's own sky and haze, nearly untouched.
+typedef struct { float h, hor[3], zen[3], fog[3], dens, stars; } AtmoKey;
+static const AtmoKey akeys[] = {
+    {0.0f, {0.55f, 0.6f, 0.85f}, {0.3f, 0.35f, 0.65f}, {0.025f, 0.03f, 0.06f}, 5e-5f, 1},
+    {4.0f, {0.55f, 0.6f, 0.85f}, {0.3f, 0.35f, 0.65f}, {0.025f, 0.03f, 0.06f}, 5e-5f, 1},
+    {5.5f, {1.45f, 0.95f, 0.7f}, {0.75f, 0.7f, 0.95f}, {0.55f, 0.45f, 0.42f}, 9e-5f, 0.2f},  // dawn: pink-gold horizon, mist
+    {7.0f, {1, 1, 1}, {1, 1, 1}, {0.6f, 0.7f, 0.85f}, 1.5e-5f, 0},
+    {17.0f, {1, 1, 1}, {1, 1, 1}, {0.6f, 0.7f, 0.85f}, 1.5e-5f, 0},
+    {18.5f, {1.6f, 0.75f, 0.45f}, {0.7f, 0.55f, 0.85f}, {0.6f, 0.38f, 0.25f}, 6e-5f, 0.15f},  // dusk: orange horizon, warm haze
+    {20.0f, {0.55f, 0.6f, 0.85f}, {0.3f, 0.35f, 0.65f}, {0.025f, 0.03f, 0.06f}, 5e-5f, 1},
+    {24.0f, {0.55f, 0.6f, 0.85f}, {0.3f, 0.35f, 0.65f}, {0.025f, 0.03f, 0.06f}, 5e-5f, 1},
+};
+void daynight_atmo(float hor[3], float zen[3], float fog[4], float *stars) {
+    float h = daynight_hour();
+    int i = 0;
+    while (i < (int)(sizeof akeys / sizeof *akeys) - 2 && h >= akeys[i + 1].h) i++;
+    const AtmoKey *a = &akeys[i], *b = &akeys[i + 1];
+    float t = (h - a->h) / (b->h - a->h);
+    t = t * t * (3 - 2 * t);
+    for (int k = 0; k < 3; k++) {
+        hor[k] = a->hor[k] + (b->hor[k] - a->hor[k]) * t;
+        zen[k] = a->zen[k] + (b->zen[k] - a->zen[k]) * t;
+        fog[k] = a->fog[k] + (b->fog[k] - a->fog[k]) * t;
+    }
+    fog[3] = a->dens + (b->dens - a->dens) * t;
+    *stars = a->stars + (b->stars - a->stars) * t;
+}
+
+// Rain, 0..1 (exec.c rain.frag, the clouds' cover, the wet ground's reflections). g_settings.weather: 0 clear, 1 rain, 2 changing -
+// half-hour spells of the real clock, a quarter of them rainy (hashed), fading in and out over a minute. LARECOMP_WEATHER=clear|rain|changing.
+// The weather (exec.c: rain.frag's rain / snow / lightning, the clouds' cover, atmo.frag's fog). g_settings.weather / LARECOMP_WEATHER:
+// 0 clear, 1 rain, 2 changing (half-hour spells of the real clock, each a hashed type, a minute's fade at both ends), 3 cloudy,
+// 4 thunderstorm, 5 snow, 6 fog - after weather-canvas's set (MIT; its types, not its code).
+enum { WX_CLEAR, WX_RAIN, WX_CHANGING, WX_CLOUDY, WX_STORM, WX_SNOW, WX_FOG };
+static void wx_of(int type, float k, Weather *w) {
+    switch (type) {
+    case WX_RAIN: w->rain = k, w->cloud = 0.7f * k; break;
+    case WX_CLOUDY: w->cloud = 0.6f * k; break;
+    case WX_STORM: w->rain = k, w->cloud = k, w->storm = k; break;
+    case WX_SNOW: w->snow = k, w->cloud = 0.6f * k; break;
+    case WX_FOG: w->fog = k, w->cloud = 0.3f * k; break;
+    default: break;
+    }
+}
+void daynight_weather(Weather *w) {
+    static int env = -2;
+    if (env == -2) {
+        const char *e = getenv("LARECOMP_WEATHER");
+        static const char *const names[] = {"clear", "rain", "changing", "cloudy", "storm", "snow", "fog"};
+        env = -1;
+        for (int i = 0; e && i < 7; i++) if (!strcmp(e, names[i])) env = i;
+    }
+    int t = env >= 0 ? env : g_settings.weather;
+    memset(w, 0, sizeof *w);
+    if (t != WX_CHANGING) { wx_of(t, 1, w); return; }
+    double now = (double)time(NULL), block = 1800.0;
+    long b = (long)(now / block);
+    float in = (float)fmod(now, block);
+    unsigned h = (unsigned)b * 2654435761u;
+    h ^= h >> 15, h *= 2246822519u, h ^= h >> 13;
+    unsigned r = h & 1023u;  // (about: clear 45 %, cloudy 20 %, rain 15 %, fog 8 %, storm 7 %, snow 5 %)
+    int type = r < 460 ? WX_CLEAR : r < 665 ? WX_CLOUDY : r < 820 ? WX_RAIN : r < 902 ? WX_FOG : r < 974 ? WX_STORM : WX_SNOW;
+    float k = fminf(fminf(in / 60.0f, (float)(block - in) / 60.0f), 1.0f);
+    wx_of(type, k, w);
+}
+float daynight_rain(void) { Weather w; daynight_weather(&w); return w.rain; }
 
 float daynight_night(void) { return g_settings.daynight || getenv("LARECOMP_HOUR") ? sample().night : 0; }
 

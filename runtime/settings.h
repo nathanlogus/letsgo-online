@@ -86,6 +86,7 @@ typedef struct {
     bool show_fps;
     bool lossless;       // start Lossless Scaling (Steam) with the game and press its scale hotkey (runtime/lossless.c; default off)
     bool rt_shadows;     // night lights cast ray-traced shadows, on a GPU with ray queries (runtime/nvn/vulkan/rt.c; default on)
+    int weather;         // 0 clear, 1 rain, 2 changing, 3 cloudy, 4 storm, 5 snow, 6 fog (runtime/daynight.c daynight_weather; default 0)
     bool dpad_move;      // the d-pad (and arrow keys) move the player like the stick
     bool render_thread;  // the backend runs on its own thread (runtime/nvn/vulkan/renderthread.c); default on
     int vertex_read;     // VREAD_*: where the GPU reads vertex and index data (runtime/nvn/vulkan/exec.c)

@@ -46,6 +46,7 @@ static const char *const aa[] = {"Off", "SMAA", "TAA", "FSR 3.1"};
 static const char *const fsr[] = {"Native AA", "Quality", "Balanced", "Performance", "Ultra performance"};
 static const char *const fg[] = {"Off", "Auto", "2x", "3x", "4x"};
 static const char *const fg_methods[] = {"Re-render", "Optical flow"};
+static const char *const weathers[] = {"Clear", "Rain", "Changing", "Cloudy", "Thunderstorm", "Snow", "Fog"};
 static const char *const hours[] = {"Clock", "00:00", "01:00", "02:00", "03:00", "04:00", "05:00", "06:00", "07:00", "08:00", "09:00", "10:00",
                                     "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00", "22:00", "23:00"};
 #define FIELD(name) offsetof(Settings, name)
@@ -68,6 +69,7 @@ static const Row rows[] = {
     PC("Saturation", "Adjust image colour intensity. 100% preserves the original colours.", saturation, 0, 2, ALWAYS),
     TG("Day and night", "The outdoors follow the time of day: dawn, day, dusk, and night with lit windows and lamps.", daynight, ALWAYS),
     CH("Time of day", "Clock follows the computer's time. An hour keeps the day at that time. Needs Day and night.", daynight_hour, hours, 25, WITH_DN),
+    CH("Weather", "Clear, cloudy, rain, thunderstorm, snow or fog - or changing: a new spell every half hour. Needs Day and night.", weather, weathers, 7, WITH_DN),
     TG("Ray-traced light shadows", "At night, lamps and lit windows cast shadows, traced on the GPU. Needs a ray tracing graphics card.", rt_shadows, WITH_DN),
     PC("TAA sharpness", "Sharpen the TAA image. Available when anti-aliasing is set to TAA.", taa_sharpness, 0, 1, WITH_TAA),
     TG("Object motion", "Track moving objects as well as the camera for TAA, FSR 3.1 and frame generation.", mv_objects, ALWAYS),

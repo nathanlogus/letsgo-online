@@ -1,12 +1,9 @@
-# Day / night
-
-Status (26 October 2026): scene tint by the clock (overworld only, UI untouched) and a first night-lights demo (glass, signs, lantern) work; see below.
-
-## What exists
-- `runtime/daynight.c`: hour -> tint, brightness, `daynight_night()`, and the glow table. `larecomp.ini`: `daynight = 1`,
-  `daynight_speed = N` (1 = real time). `LARECOMP_HOUR=<0..24>` forces an hour (also with the setting off).
-- Scene tint (`runtime/nvn/vulkan/exec.c` `ssao_run`, end): the scene is multiplied by the hour's tint after the scene pass, before the
-  interface is drawn; only while `fps60_world_active()` (no title, battle or capture). Hues / timeline follow `ssrecomp`
+- Cloud layers, after EntroPi's Unity Cloud Shadows (Apache-2.0; the idea, not its code or textures): two layers - big slow clouds
+  (16 m, their outline warped) and smaller wisps (6.5 m) drifting faster another way at 45 % - each set by coverage and softness
+  with its formula (`step = -soft + (1 - cover)(1 + 2 soft)`, a smoothstep around it), composited as "multiply inverse". Projected
+  along the real sun: the shadow map's light (`sun_dir`, now probed whenever day / night is on), a fixed slant without it.
+  `LARECOMP_CLOUDS` strength (default 0.4), `LARECOMP_CLOUD_COVER` 0..1 (default 0.5). `results/cloud_layers_strong.png` (at 0.9).
+meline follow `ssrecomp`
   (night 0.40 / 0.45 / 0.70; full 20:00-4:00; dusk from 17:00).
 - **Night lights** (`tests/runs/daynight/texkeys_demo.png`): a draw that samples a glowing texture is multiplied by M / T through the blend
   constant (`glow_draw` in exec.c), so after the scene tint T it ends at M x its daylight colour - brighter than the dark town, and over
@@ -321,3 +318,58 @@ made by `sheet.py <out.png> <img>...`). What it found and what changed:
   hash lost its precision on the octaves' large cell numbers (GPU `sin` of ~1e5) and its values lined up. Now an integer hash,
   gradient noise with a quintic fade, 5 octaves each turned 37 degrees, and the shape warped by a second fbm: rounded, billowy
   outlines (`tests/runs/daynight/clouds_fbm/h12_1620_i0.6_window.png`, at `LARECOMP_CLOUDS=0.6`).
+  Checked: the sun is the game's (`[clouds] sun (-0.39, 0.82, 0.42)`, the shadow map's light, logged once); at normal zoom and
+  the 0.4 default the clouds read as soft light and shade, and 7 s apart the patches have drifted (`tests/runs/daynight/clouds_check/`,
+  `move_diff.png`); at night (a third of the strength) a faint patch over the grass, lamps and windows untouched
+  (`tests/runs/daynight/clouds_night/night_off_on.png`).
+- Center door, still breaking up while walking (2026-10-27): not the glass material - by day, and at night with clouds, glow and
+  lights off, the door is clean and steady; with the dynamic lights alone it washed out in blocks that moved.
+  The lit sign and window band above put their pool and halo on the curved glass, and the quarter-size map's texels
+  showed as blocks. Glass (strongly cool, `(b - r) / b` 0.45..0.7, above a low brightness: ratios, the scene being linear HDR - an
+  absolute threshold caught a fifth of the door) no longer takes the pool and halo (`dl_apply` `rcv`). Door now one even glass in
+  four frames walking (60 fps, TAA, frame generation; the run folders were pruned).
+- Also moved: the day / night block runs at the scene's end (`dn_scene_end`: the game switching from the scene target to its
+  bloom, or a draw without the depth test onto it - a fade) instead of at the occlusion's hook, so the game's refraction copy
+  (the pond, glass) takes the plain scene and those draws are tinted with the rest. Checked after the move: town, menu (the
+  background tinted, the menu clean), the Center's interior (untinted), a wild battle at 22:00 (tinted: `tests/runs/daynight/dnbattle/battle3.png`).
+
+## Graphics batch (2026-10-27)
+
+- Atmosphere by hour (`atmo.frag`, `daynight_atmo`): sky multiplied from a horizon to a zenith colour by elevation (pink-gold dawn,
+  orange dusk, navy night), stars and a moon at night (not yet seen close up), distance haze by hour. `LARECOMP_ATMO=0` off.
+  (Checked at 5:30, 12, 18:30, 22; the run folder was pruned.)
+- Sun shadow map at 2x (`textures.c tex_shadow_k`: a square depth target 1024-4096 made K times larger, passes into it take the
+  scale): finer edges, small visible gain. `LARECOMP_SHADOW_SCALE=1..4` (default 2).
+- Light shafts (`shafts.frag`): the sky as the light, 28 samples toward the sun's place on screen, warm and strongest at dawn / dusk.
+  In the top-down views the sun is mostly off screen behind the camera: little effect seen. `LARECOMP_SHAFTS=0` off.
+- Water reflections (`ssr.frag`): blue level pixels mirror the view ray (rippled) through the depth buffer; Fresnel, edge fades.
+  Visible on the pond's far edge and on wet ground in the rain. `LARECOMP_SSR=0` off, or a strength.
+- Ray-traced ambient occlusion (`rtao.frag`): 4 hemisphere rays of 120 cm per pixel through rt.c's structure, which is now built
+  once per frame in `ssao_run` for both this and the lights' shadows, day and night. 0.87 ms at 720p. Soft contact under the bench,
+  the pond's rim, the planter, the cliff. `LARECOMP_RTAO=0` off, or a strength (default 0.6). Follows the "Ray-traced light
+  shadows" setting. `results/rtao_off_on.png`.
+- Rain (`rain.frag`, `daynight_rain`): darker, greyer scene, three depth-tested layers of slanted streaks, overcast clouds,
+  thicker haze, no stars, wet level ground reflecting (lamps and the Center's windows on the road at night). Setting `weather`
+  (Options "Weather": Clear / Rain / Changing - half-hour spells of the real clock, a quarter rainy, a minute's fade);
+  `LARECOMP_WEATHER=clear|rain|changing`. `results/rain_noon_night.png`.
+- Not done: ray-traced sun shadows and foliage in the ray traces (alpha testing in the ray query: the leaf cards' UVs and textures
+  would have to be captured too - days); a moving sun (the game's light direction would have to be patched for its shadow map and
+  its shading - research, not started).
+- Rain splashes (`rain.frag` `splash`): on level surfaces (the world's up from the depth's derivatives) within 25 m, 35 cm world
+  cells each with a drop landing every 0.55-0.9 s at a hashed point - a bright flick, then a ring spreading 14 cm and fading; by
+  the scene's light (dim at night). Fixed in the world (this frame's camera). 0.27 ms for the rain pass. `results/rain_splashes.png`.
+- Stars: the sky test was "past 200 m", but the game's far plane is 100 m and its sky dome is inside it - only the empty background
+  counted. Now past 75 m and not below the horizon; stars a little larger. Seen in a night battle (`results/stars_battle.png`); the
+  moon's fixed direction is off screen there.
+- Cost with everything on (Viridian 22:00, rain, 60 fps, TAA, frame generation; real frame + in-between): 12.5 ms. Fireflies were the
+  dearest (1.37 ms: the edge fix's 4 neighbours on every pixel); now only at depth edges: 0.81 ms. Clouds 0.40, atmosphere 0.06,
+  reflections 0.14, rain 0.27, shafts <0.01, ray-traced occlusion 0.89, the acceleration structures ~1 ms.
+- More weathers, after weather-canvas's set (MIT; its types, not its code): the setting is Clear / Rain / Changing / Cloudy /
+  Thunderstorm / Snow / Fog (`daynight_weather`: rain, snow, fog, cloud, storm amounts; old values kept). Changing: each half hour a
+  hashed type (clear 45 %, cloudy 20 %, rain 15 %, fog 8 %, storm 7 %, snow 5 %), a minute's fade at both ends.
+  - Cloudy: the clouds' cover and depth up, fewer stars. Rain / storm: overcast. Storm: lightning - in a quarter of 3 s slots, a
+    double flicker that lights the scene blue-white (`LARECOMP_FLASH=<0..1>` holds one, for tests).
+  - Snow: 3 layers of soft flakes falling and swaying, snow settled on what faces up (broken by a world noise), greyer and dimmer.
+  - Fog: the haze 45x denser and pale grey (dark at night: lamps and windows glow through).
+  - Shooting stars on clear nights: about every 12 s, 0.8 s across 20 degrees of sky (hidden by clouds and rain, as the stars).
+  `results/weather_cloudy_snow_fog_storm.png`, `weather_fog_day_night.png`, `weather_lightning.png`.

@@ -5,6 +5,13 @@
 float daynight_hour(void);
 // 0 by day .. 1 at night (lamps and windows, a later phase), smooth through dawn and dusk.
 float daynight_night(void);
+// The atmosphere by hour (exec.c atmo.frag): sky horizon / zenith multipliers, haze colour + density (per cm), stars 0..1
+void daynight_atmo(float hor[3], float zen[3], float fog[4], float *stars);
+// Rain 0..1 (weather setting: clear / rain / changing - half-hour spells; LARECOMP_WEATHER)
+float daynight_rain(void);
+// The weather, each 0..1 (the setting: clear / rain / changing / cloudy / storm / snow / fog; LARECOMP_WEATHER=<name>)
+typedef struct { float rain, snow, fog, cloud, storm; } Weather;
+void daynight_weather(Weather *w);
 // The scene's multiplier (linear light) when the cycle is on and the world is on screen (not a battle or capture).
 bool daynight_tint(float rgb[3]);
 // Night lights: a texture (content key, exec.c tex_content_key >> 32) that glows, as the multiplier its draw should end up
