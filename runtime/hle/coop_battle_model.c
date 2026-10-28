@@ -35,6 +35,7 @@ static int avatar(unsigned slot, CoopAppearance *peer_out) {
     if (!g_building || !coop_battle_trial_model(&mirrored)) return 0;
     int who = slot == 2 ? (mirrored ? 2 : 1) : slot == 0 && mirrored ? 1 : 0;
     CoopRemote peer;
+    if (who == 1 && getenv("LARECOMP_COOP_WILD_TEST_ALLY")) who = 2; // QA: offline, the local avatar
     if (who == 1 && (!coop_net_remote(&peer) || !peer.appearance.valid)) return 0;
     if (who == 1) *peer_out = peer.appearance;
     return who;

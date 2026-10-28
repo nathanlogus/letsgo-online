@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #ifdef _WIN32
@@ -36,11 +37,14 @@ static void load(const char *path,char (*names)[64],unsigned capacity){
     }
     free(data);
 }
-void coop_battle_names_load(void){
+void coop_battle_names_load(unsigned lang){
     if(atomic_load_explicit(&ready,memory_order_acquire))return;
-    load("bin/message/English/common/wazaname.dat",moves,743);
-    load("bin/message/English/common/monsname.dat",species,810);
-    load("bin/message/English/common/trname.dat",trainers,1024);
+    // The game's message folders in its language order (0x70001b3290); an unknown language reads English.
+    static const char *const folders[]={"JPN","JPN_KANJI","English","French","Italian","German","Spanish","Korean","Simp_Chinese","Trad_Chinese"};
+    const char *f=folders[lang<10?lang:2];char path[96];
+    snprintf(path,sizeof path,"bin/message/%s/common/wazaname.dat",f);load(path,moves,743);
+    snprintf(path,sizeof path,"bin/message/%s/common/monsname.dat",f);load(path,species,810);
+    snprintf(path,sizeof path,"bin/message/%s/common/trname.dat",f);load(path,trainers,1024);
     atomic_store_explicit(&ready,true,memory_order_release);
 }
 const char *coop_battle_move_name(unsigned id){return atomic_load_explicit(&ready,memory_order_acquire) && id<743 && moves[id][0] ? moves[id] : "Move";}

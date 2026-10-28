@@ -6,3 +6,5 @@ bool coop_battle_check_import(Cpu *c,const CoopParty *party,uint16_t species[COO
 void coop_battle_field(Cpu *c);
 void coop_battle_configure(int build);
 void coop_battle_install_hooks(void);
+// The partner's replay of a team-up before its result (runtime/hle/coop_actor.c: its game records are the host's).
+bool coop_battle_replay_in_battle(void);

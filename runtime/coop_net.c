@@ -503,7 +503,7 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
     uint8_t hello[128];
     size_t n = 0;
     hello[n++] = resume ? 'R' : create ? 'C' : 'J';
-    hello[n++] = 8;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches; 8: turn digest skips unset battle Pokemon bytes
+    hello[n++] = 10;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches; 8: turn digest skips unset battle Pokemon bytes; 9: the offer carries the host hold; 10: wild team-ups
     put_u64(hello + n, g_program_id); n += 8;
     put_u64(hello + n, build_id); n += 8;
     if (!create) {

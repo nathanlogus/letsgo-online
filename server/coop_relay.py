@@ -30,7 +30,7 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-PROTO = 8  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; 8: the turn digest (B11) skips battle Pokemon bytes the game never sets; mixed versions are refused and play solo
+PROTO = 10  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; 8: the turn digest (B11) skips battle Pokemon bytes the game never sets; 9: the offer (B0) carries the host's hold; 10: wild team-ups (B0 trainer 0x8000 | species, B7 chunks 12-13 the wild Pokemon), the seed (B8) carries the host's own-Pokemon mask and language; mixed versions are refused and play solo
 RECONNECT_GRACE = 30
 TEAM_INVITE_SECONDS = 45  # Leave time to navigate Communicate and return to the overworld.
 MAX_FRAME = 256
@@ -107,6 +107,7 @@ class Room:
     battle_chunks: int = 0
     battle_count: int = 0
     battle_choices: bytes = b""
+    battle_wild: bool = False
     mirror_count: int = 0
     mirror_chunks: int = 0
     mirror_seed: bool = False
@@ -122,7 +123,7 @@ class Relay:
             body=body or b"\x06"+struct.pack('<QB',room.battle_id,reason)
             for p in room.peers:p.send(b"B",body)
         room.battle_id=room.battle_phase=room.battle_turn=room.battle_sequence=room.battle_chunks=room.battle_count=0
-        room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b""
+        room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b"";room.battle_wild=False
         room.mirror_count=room.mirror_chunks=room.mirror_digest=0;room.mirror_seed=room.mirror_aborted=False;room.mirror_sequences=[0,0]
 
     async def expire_battle_offer(self, room: Room, battle: int) -> None:
@@ -135,10 +136,11 @@ class Relay:
         others=[p for p in room.peers if p is not peer and p.connected]
         if not battle or not others:return
         other=others[0];host=peer.identity==room.owner;now=time.monotonic()
-        if op==0 and len(body)==13 and host and not room.battle_id:
-            timeout,trainer=struct.unpack_from('<HH',body,9)
-            if not 1000<=timeout<=60000 or not 1<=trainer<=601 or room.team_state!=2 or not self.team_near(peer,other):return
-            room.battle_id=battle;room.battle_phase=1;room.battle_chunks=0
+        if op==0 and len(body)==15 and host and not room.battle_id:
+            timeout,trainer,hold=struct.unpack_from('<HHH',body,9)
+            wild=0x8001<=trainer<=0x8000+809
+            if not 1000<=timeout<=60000 or not (1<=trainer<=601 or wild) or not 1000<=hold<=45000 or room.team_state!=2 or not self.team_near(peer,other):return
+            room.battle_id=battle;room.battle_phase=1;room.battle_chunks=0;room.battle_wild=wild
             asyncio.create_task(self.expire_battle_offer(room,battle))
         elif battle!=room.battle_id:return
         elif op==1 and len(body)==9 and not host and room.battle_phase==1:room.battle_phase=2
@@ -179,12 +181,13 @@ class Relay:
         elif room.mirror_aborted and op in (7,8,9):return
         elif op==7 and len(body)==141 and host and room.battle_phase==2 and self.party_done(room):
             count,index=body[9:11]
-            if not 1<=count<=6 or index>=2*count or room.mirror_seed:return
+            # (a wild team-up's wild Pokemon: chunks 12 and 13)
+            if not 1<=count<=6 or (index>=2*count and not (room.battle_wild and index in (12,13))) or room.mirror_seed:return
             if room.mirror_count and room.mirror_count!=count:return
             if room.mirror_chunks&(1<<index):return
             room.mirror_count=count;room.mirror_chunks|=1<<index
-        elif op==8 and len(body)==17 and host and room.battle_phase==2:
-            if room.mirror_seed or not room.mirror_count or room.mirror_chunks!=(1<<(2*room.mirror_count))-1:return
+        elif op==8 and len(body)==19 and host and room.battle_phase==2:
+            if room.mirror_seed or not room.mirror_count or room.mirror_chunks!=((1<<(2*room.mirror_count))-1)|(0x3000 if room.battle_wild else 0):return
             room.mirror_seed=True
         elif op==9 and len(body)==30 and host and room.battle_phase==2 and room.mirror_seed:
             # Any native decision as its command word (low nibble 1 fight, 3 change); request kind 2 action, 4/5 replacement.

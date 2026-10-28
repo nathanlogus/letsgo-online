@@ -135,7 +135,11 @@ In the mirror trial the guest now chooses in the game's own battle menu (Fight -
 - The guest runs the human action handler `0x7000a574f0` on its slot-2 AI controller with its own state, after the AI job and digest of that turn, lending it the battle's single UI client (`context+0x1a8[context+0x18c]+0x280`) through the controller setter `0x7000a57000`. The controller fields the human flow writes (`+0x1e0..+0x27f`, `+0x288..+0x2af`, `+0x3b8..+0x3cb`) are snapshotted and restored, so the replay still applies only the host's canonical slot-2 command. The chosen move/target goes to the host as before (op 4). A target cursor left on a fainted foe is mapped to the only remaining foe; Bag/Pokemon or an unsupported move reopens the menu.
 - Deadline: the native link-battle time limit closes the menu (`+0x260` nonzero, `+0x200` time up; every human sub-step checks them and the time-up step `0x7000a5a340` closes the menu through UI `+0xc0` and auto-picks). It fires at the guest deadline, when the host's command arrives first, on abort or when the link stops waiting. The host's NPC then chooses that turn and the menu opens again next turn.
 - Waiting message: UI vtable `+0x1b0` opens a battle message from a 0x24-byte parameter (`0x7000a6f000` layout: u16 line, type 1 = btl_std). btl_std line 201 (a link-battle-only "The opposing player's time has run out!") is shown, and its decrypted text (`0x70006786b0`) is replaced with "Waiting for <CoopRemote.name>...". Host: once its slot-0 handler returned 1 and the guest has not answered. Guest: once its slot-2 command is in and the host's slot-0 command is not.
-- The turn digest no longer hashes battle Pokemon `+0x218`: the same seeded battle had bit 3 there or not from run to run on one engine (host and guest alike), which aborted two of the first runs (since pruned) at round 1 without any real difference.
+- The turn digest skips battle-Pokemon bytes the game never sets (`raw_unused`), since they keep whatever that heap
+  memory held before and differ per client: setup padding (`+0x93..+0x97`, `+0x22b`, `+0x22f`, `+0x239..+0x23f`,
+  `+0x25a..+0x25f`, `+0x27b`) and the 24 one-byte slots of the set at `+0x212` (count) / `+0x213` past its count.
+  This replaced the earlier `+0x218`-only skip (bit 3 there varied per run). Protocol 8, since a digest of the old
+  rule never matches the new one. See "Round-1 digest mismatch" below.
 
 Verified (copied saves, `tests/tools/run-mirror-save.ps1 -UI -Timeout 20 -Driver drive-native-menu.py`, game input via `key:` presses): `native-ui7` - guest captures `guest-menu-t1.png` (native Fight/Pokemon/Bag), `guest-timeout-t1.png` / `guest-after-timeout-t1.png` (menu closed, NPC chose, battle continued), `guest-menu-t2.png`, `guest-moves-t2.png` (Machamp's own moves and PP), `guest-targets-t2.png`, `guest-waiting.png` ("Waiting for Host..."); host `host-waiting-1.png` ("Waiting for Ally..."). Turn 2 guest Bite reached the host (`ally_injected` 44/1), both digests matched, both returned to the overworld, guest party unchanged. `native-ui6 -SaveCheck`: guest save PASS, digests matched; an earlier aborted run (pruned) closed the open menu cleanly and its guest save also passed.
 
@@ -227,12 +231,205 @@ choices limited to offered slots, the full-party B2, B9 kinds and commands, and 
 
 ### Known issues
 
-- A round-1 digest mismatch appeared in 2 of 9 two-client runs (`teamup-switch3/normal`, and one earlier run).
-  Both had neither `QA` nor `RAW`, and their RNG and rounds were otherwise identical. The guest then stops the
-  replay safely: it finishes locally and discards the results, and the host keeps its battle. This already showed
-  up before this work (see `+0x218` above). It is probably a battle-Pokemon field written outside the battle
-  thread's order. `RAW=1` now dumps both sides' fields at each round so the next occurrence names the field.
-  After an abort the host still waits for the guest's choice each turn, up to the deadline.
+- After a guest abort (B10) the host's NPC no longer chooses only at the deadline: the lost replay is noticed on the
+  wait (`host_replay_aborted`) and the NPC decides at once, for moves and for switch-ins, for the rest of the battle.
+- After an abort the guest finishes its local copy natively. A faint of the host's Pokemon there used to open the
+  replacement list on the guest for the host's side (`teamup-desync3/abort2`); the NPC handler now picks it
+  (`switch_in_hook`, see "Partner rewards" below).
 - The overlay (`LARECOMP_COOP_BATTLE_OVERLAY=1`) lists moves only. A replacement there falls to the NPC at the deadline.
-- The host does not check trapping (Mean Look and similar) for a guest switch. The guest's own native menu refuses it.
+- (Fixed in protocol 10.) The guest's own moves had to target one opponent (`ally_choices`): Growl and other spread
+  or self moves were taken back by its menu (`teamup-midturn2/host-uturn`). Every target type is now offered; see
+  "The partner's move targets" below.
+- The guest's replay presses A through the battle text, the host's Pokemon's level-up included. A host Pokemon that
+  learns a move with a "forget a move?" choice makes the two engines differ when the host keeps its moves or forgets
+  another one than the first: the replay then aborts, and the partner gets no rewards for that battle. A host
+  Pokemon gaining EXP at all broke every replay before protocol 10 (two causes, fixed: see "Replay fixes found by
+  the wild team-ups" in [COOP-TRAINER-ENCOUNTERS.md](COOP-TRAINER-ENCOUNTERS.md#11-wild-team-ups-28-october-2026));
+  the earlier runs had level-100 hosts.
 - Only the first command of a reply travels. That is enough for one active Pokemon per trainer.
+
+### Round-1 digest mismatch (28 October 2026)
+
+`teamup-switch3/normal` and one earlier run (2 of 9) aborted the guest replay at round 1 with otherwise identical
+RNG and fields; their data was pruned. `RAW=1` dumps now also show each skipped byte (` unhashed <value>`).
+
+- Cause: battle-Pokemon bytes that no code writes. In `teamup-desync2` (9 two-client runs, `RAW=1 NOWILD=1`,
+  `tests/scripts/teamup-desync-loop.sh`) host and guest differed at round 1 in 3 runs, always in the second
+  trainer's (an opponent's) slots past the `+0x212` count, which was 0: `+0x218` bit 3 (`r1`, `r9`) and `+0x215..+0x216`
+  (`r3`, `00000072da` on one side, 0 on the other). Other trainers held leftover heap words there (e.g. `0x7000f1484e`).
+  The old `+0x218`-only skip would have aborted `r3`.
+- With the skip list, all 9 runs matched at round 1 (`summary.txt`), and no hashed byte differed in any dump.
+  `teamup-desync3/save` (no QA variables) matched as well.
+- Forced abort (`CORRUPT=1`, `LARECOMP_COOP_MIRROR_CORRUPT_ROUND`, `teamup-desync3/abort3`): the host's round-1 wait
+  ended 51 ms after it began, when B10 arrived. The switch-in and round 3 asked nothing, and the NPC chose 26 ms after
+  the digest. The battle ended normally after 3 rounds. `abort2` shows the same for round 3.
+
+## Partner rewards, Pay Day, trapping and mid-turn switches (28 October 2026)
+
+Protocol 9. User-facing rules: [COOP-ONLINE.md](COOP-ONLINE.md#team-up-trainer-battles). Code: `runtime/hle/coop_battle.c`
+(`partner_exp`, `affection_hook`, `result_hook`, `partner_rewards`, `mirror_after_battle_hook`, `prize_hook`),
+`runtime/coop_battle_link.c` (`coop_battle_link_mirror_matched`, the B0 hold).
+
+### What the partner gets, and why from its own replay
+
+The guest's engine replays the host's battle command by command, and the per-round digests prove both engines hold the
+same battle. So the guest's rewards come from its own engine, computed natively, rather than from data the host would
+send. The host sends only what it already sends (its commands, its digests, a finished end with its command counts),
+plus one more digest at the battle's result. Recomputing the EXP elsewhere would need participation, faint order,
+levels and Let's Go's boosts copied out of the battle, and would miss whatever the game does differently.
+
+- **EXP.** The battle's EXP step `0x70009f2970` (server; called at every knock-out) gives points only to the local
+  player's party: `0x70009e0e10(pool, 0x70009da090(main))`, trainer 0. On the guest that is the host's copy, whose
+  results are discarded. For the guest's own party (trainer 2) `exp_step_hook` first runs the same calculation
+  `0x7000a11a30(server+0x2714, 0x70009d71c0(main), server, party, foe, out[6 x 16 bytes])` for each opponent in the
+  step's knock-out list (`server+0x1354`: count `0x7000a66000`, done `0x7000a66080`, id `0x7000a66030`, opponent side
+  `0x70009dab70`). The calculation (`0x7000a67c30` -> `0x7000a67dd0` -> formula `0x70009d0df0`) counts participation
+  (the foe's faced set, `0x70009e7a50`), gives the rest of the party the share (/24 instead of /12), and applies
+  traded x1.5/x1.7, past-evolution-level x1.2 and affection x1.2. Fainted Pokemon get nothing (`0x70009e3f10`).
+  Nothing is written to the battle: the points are kept per Pokemon (by encryption constant) with the level they
+  raise, and that level is put in the battle Pokemon's `+0x86` only during the next calculation (the formula reads it).
+- **Affection.** `0x70009dadc0` returns 0 unless the Pokemon belongs to trainer 0, and the battle copies friendship
+  (`0x7000727fd0`) into `+0x2e2` only for the player's Pokemon. During the partner's calculation `affection_hook`
+  applies the same rule without the trainer check, on the Pokemon's own friendship. Without it every partner Pokemon
+  got 29/14 per knock-out instead of the solo 35/17 (`teamup-rewards1/pair3`). Let's Go's local co-op keeps P2's
+  Pokemon in trainer 0 too.
+- **The end check.** `result_hook` (`0x70009d3870`, which sets setup `+0x508`, 1 = won) records the result and the
+  prize (`main+0x16c`) and sends one more digest (the next round number) on both sides. The guest applies rewards only
+  if the replay was not aborted, the host's finished end arrived with matching command counts (`mirror.ended`), that
+  last digest matched (`coop_battle_link_mirror_matched`) and the battle was won. Each battle ID is rewarded once (an
+  8-entry ring), and only at the result phase of a replay that ran.
+- **Applying.** The after-battle process `0x7000319bc0` (state `+0x68`) used to be skipped from state 0 on the guest
+  (it applies the battle party, here the host's copy). Now, at state 0, `partner_rewards` adds the EXP to the save
+  party's Pokemon with the game's out-of-battle level-up (`0x70008319c0`, the Exp. Candy step: one level per call,
+  friendship, HP kept), adds one trainer's prize with the money add `0x70001c6f60`, sets the process's per-slot
+  "levelled up" flags `+0xd8+i`, and moves to state 1, the native evolution loop (`0x7000b0c510`, `0x7000728300`, demo
+  `0x700083cef0`). The replay's guard against Spirit writes to the saved party (`mirror_spirit_hook`) is lifted first.
+  Moves for the new levels are not learned (the in-battle learning runs on the battle client).
+- **The wait.** The guest presses through the battle text (`mirror_frame_hook`) and reaches its result phase before
+  the host, which reads its own. The host now sends its finished end at its result phase (B6), not on its overworld.
+  The guest holds state 0 (the screen is black) for up to 2 minutes, with "Waiting for *host* to finish the battle..."
+  (`coop_battle_partner_finishing`, `coop_ui.mm`). `teamup-rewards1/pair2` gave up after a first limit of 15 s, when
+  the host's end came 16 s after the guest's result.
+- **Prize and Pay Day.** `{1,T,T,T}` has two copies of the trainer, and the prize `0x70009d08d0` sums both opponents'
+  `base x level x 4`. It is computed once at the battle's start, into `main+0x16c`. `prize_hook` halves it on both
+  clients. Pay Day accumulates separately (`0x70009da520` -> `main+0x170`), and the result adds `+0x16c` and `+0x170`
+  (`0x70009d3870`), so Pay Day stays whole for the host. Before, `money_hook` halved the whole total at the add
+  (`0x70001c6f60` from `0x7000319e0c`), Pay Day included. The guest gets `+0x16c` only.
+
+### Other fixes in this round
+
+- **Trapping.** `ally_choices` asks the party list's own check `0x7000a5c200(controller, Pokemon, &trapper, &cause)`
+  (5 = free; Shed Shell 0x127 frees; `0x7000a5c590`: Arena Trap / Magnet Pull / Shadow Tag, and conditions 0x16, 8,
+  0x15 such as Mean Look and Wrap). A trapped guest Pokemon is offered no switch slot in B3, so the host
+  (`coop_ally_submit`) and the relay refuse a switch, as for any unoffered slot, and the NPC chooses at the deadline.
+- **After an abort.** The guest's slot-0 switch-in (requests 4 and 5) runs the NPC handler `0x7000a58000` instead of
+  the human one, so the guest is never shown the host's party list.
+- **Digest.** Bits 1-7 of battle Pokemon `+0x92` are now skipped. The halfword at `+0x91` is a bit field: setup
+  `0x70009e2490` sets bits 0-8 and battle code uses only those (`0x70009e3ca8` ... `0x70009e792c`). A reserve that a
+  U-turn sent in held `0xd0` on the host and `0xd2` on the guest there (`teamup-midturn1/host-uturn`, round 4: the
+  replay aborted).
+- **Offer countdown.** B0 now carries the host's hold (10 s for a trainer's held text). The guest's offer expires at
+  `hold - min(2 x RTT, hold / 4)` and its prompt shows "Expires in N s" (`teamup-rewards2/payday/guest/offer.png`: 8 s
+  left 2 s after the offer). `coop_battle_link_offer_deadline` is gone:
+  the hold is an argument of `coop_battle_link_offer`.
+- **Names.** The prompt's trainer name (and the overlay's move and species names) come from the game's own message
+  language, the global `0x7001614b34` (`0x70001b3290`: 0 JPN, 1 JPN_KANJI, 2 English, 3 French, 4 Italian, 5 German,
+  6 Spanish, 7 Korean, 8 Simp_Chinese, 9 Trad_Chinese), not always English. The host save in these runs is Spanish:
+  its log names Doug "Domin", while the English guest's prompt says "Doug" (`offer.png` above). The names test
+  (`battle-names-test.c`, in `run-battle-link-tests.sh`) checks both tables. The overlay font covers Latin-1 and Cyrillic only, so Japanese, Korean and Chinese
+  names show as missing glyphs.
+- **"Eevee" on the guest's Machamp.** That was the test fixture, not the battle code. The guest saves in
+  `tests/saves/coop-mirror-fixtures/guest` and `tests/saves/teamup-switch/guest-*` were made by changing an Eevee's
+  and a Pikachu's species, and the game shows a Pokemon's stored name. The solo baseline showed it too ("Eevee used
+  Bite"). The fixtures now carry species names (`party-fixtures names`; originals in
+  `tests/saves/archives/misnamed-fixtures/`), and both HP boxes read "Machamp" (`teamup-rewards1/pair3`, guest
+  `b-8.png`, host `b-6.png`).
+
+### Verification (two clients, copied saves, `tests/scripts/run-teamup-rewards.sh`)
+
+Fixtures in `tests/saves/teamup-rewards/` (`party-fixtures flag`, `setexp`, `setmon`, `prepare-count`): the guest
+`guest-unbeaten-charmander.bin` (Doug's flag 2742 cleared; party slot 1 a Charmander, Lv 15 and 1 point short of 16),
+`guest-uturn` (lead with U-turn), `guest-growl`, `guest-only-lead-recoil`; the host `host-payday` (Eevee with Pay Day),
+`host-uturn`, `host-growl`, `host-only-lead-recoil`. Savediff: `<role>/save-diff-orig-post.txt` (orig = the copied
+save before the run, post = saved in game after the battle).
+
+| Run (`tests/runs/`) | Covered | Result |
+| --- | --- | --- |
+| `teamup-rewards1/solo` (one game, the guest's save alone vs Doug) | Native baseline | Money +36, 3 Poke Balls, flag 2742 set; Machamp +35, the rest +17; Charmander 15 -> 16 and evolved. |
+| `teamup-rewards1/pair2` (QA) | First try | EXP worked out on the guest; no rewards: the 15 s wait ended 0.1 s before the host's end. |
+| `teamup-rewards1/pair3` (QA) | Rewards before the affection fix | Guest money +36, EXP 29/14 per knock-out, Charmander -> Charmeleon (`guest/b-20.png`), waiting notice (`guest/b-12.png`). |
+| `teamup-rewards2/payday` (no QA variables) | Rewards, Pay Day | Host money +536 (36 + Pay Day 500; Pay Day PP 20 -> 19), 3 Poke Balls, flag set. Guest money +36, Machamp +70 (2 x 35), Charmander +37 (17 + 20, x1.2 past its evolution level) -> Charmeleon, the rest +34 (2 x 17); no items, flag 2742 still unset. |
+| `teamup-midturn2/host-uturn` (QA) | Request 5 for slot 0 | Host U-turn, host picks Pikachu (`0x83`), the guest replays it; digests matched through the final round; guest rewards as above. |
+| `teamup-midturn2/guest-uturn2` (QA) | Request 5 for slot 2 | Guest U-turn, the guest picks in its own list (`guest/switch-1.png`); host `guest sent in its party slot 2`, replay `0x103`; Blastoise, sent in, gets participant EXP (+52). |
+| `teamup-midturn1/host-uturn` (QA) | Before the `+0x92` fix | Aborted at round 4 (the reserve's `+0x92`); no rewards. |
+| `teamup-rewards2/abort` (QA, `CORRUPT=1`) | Abort, then the host's faint | Guest aborted at round 1; the host's Eevee fainted from recoil and the guest's copy sent in the NPC's pick (`mirror_aborted_npc_switch`, no list in `guest/b-*.png`); guest "partner rewards: none (replay aborted)", save unchanged; host +36, 3 Poke Balls, flag set. |
+| `teamup-rewards2/loss` (QA) | Loss | Both single level-2 leads fainted from Double-Edge recoil: result 0 on both; guest "partner rewards: none (battle not won)", save unchanged (money, party). The host whited out to a Pokemon Center as in a solo loss (`host/saved-host.png`; its in-game save was not reached). |
+| `teamup-rewards2/disconnect` (QA, host closed mid-battle) | Disconnect | Host closed 21 s into the battle (`KILL_HOST_AT=4`): the relay's end reason 2 aborted the replay (reason 5); the guest finished its copy locally (a local win) and got "partner rewards: none (replay aborted)"; save unchanged. |
+
+The host's savediff equals the previous behaviour in each won run: +36 (+ Pay Day), 3 Poke Balls, flag 2742, PP.
+Link and relay tests: `tests/scripts/run-battle-link-tests.sh` (the B0 hold and its countdown margin, the end-of-battle
+digest match). Not covered by a run: a trapped guest Pokemon (no Viridian Forest trainer has a trapping move; the check
+is the party list's own), a Pokemon learning a move on the guest, and a crash between the rewards and an in-game save
+(the rewards are then simply not saved; they can't come twice, since they are only applied at the result phase of a
+replay that ran).
+
+## Wild team-ups and the partner's move targets (28 October 2026)
+
+Protocol 10. Rules and decisions: [COOP-TRAINER-ENCOUNTERS.md](COOP-TRAINER-ENCOUNTERS.md#11-wild-team-ups-28-october-2026).
+Code: `runtime/hle/coop_battle.c` (`coop_battle_wild_touch`, `wild_event_hook`, `wild_setup_hook`, `wild_add_ally`,
+`rule3_ally_*`, `main_init_hook`, `own_hook`, `language_hook`, `move_target_type`, `move_targets`),
+`runtime/hle/wildbattle.c` (`wildbattle_replay`, the touch's offer, `LARECOMP_WILDBATTLE_TEST_FILE`),
+`runtime/hle/input.c` (P2's controls), `runtime/hle/coop_actor.c` (the replay's records), `runtime/coop_battle_link.c`.
+
+### The battle setup
+
+- The battle event `0x700028be80` keeps its kind at `+0xd0` (1 trainer, `0x700028c3c0` with the 0x30-byte config at
+  `+0x88`; 2 static/wild, `0x700028c770` with `{mode, config}` at `+0xb8`). Setup is at event `+0xe0`; its result is
+  setup `+0x508`.
+- Setup layout (from `0x70009cc510`, `0x70009ccda0`, `0x70009cd7e0`): `+0` kind (0 wild, 1 trainer), `+4` mode (the
+  rule: 0 single, 1 double/multi, 2 one vs two, 3 two vs one), `+0x65` multi flags, parties `+0xb0/+0xb8/+0xc0/+0xc8`
+  (trainers 0-3), MyStatus `+0x410..+0x428`, trainer data `+0x438..+0x450` (objects of 0xb0 bytes, constructor
+  `0x70009ce5d0`, loaded by `0x7000b0ec00`), trainer info `+0x1a0/+0x270/+0x340` (`0x7000b0f3d0`); a trainer's
+  party is loaded by `0x7000b0ed20`.
+- Position to trainer: `0x70009e1bf0(rule, flags, position)`, tables at `0x7000f46b3c` (rule 0 `{0,1,-,-}`),
+  `0x7000f46b6c` (rule 2), `0x7000f46b7c` (rule 3 `{0,1,0,-}`) and, for rule 1, `0x70015c7590[flags-1]`
+  (`{0,1,2,3}` multi, `{0,1,0,3}`) or `0x7000f46b4c` (`{0,1,0,1}`). Positions per trainer: `0x70009e1a10`. A trainer
+  exists when a position maps to it (`0x7000a54c30`). Non-local trainers with an NPC controller: `0x7000a54ce0`
+  (rule 3: trainer 1 only; table `0x7000f4b1d8`).
+- The main module's init is chosen in `0x70009d2ce0` from the setup: mode 1 with flags 0 `0x70009d4750`, mode 1 with
+  flags `0x70009d4970` (the step table `0x70015c73f8`, by presence), every other mode `0x70009d4490`, whose steps 2-5
+  build the server's (`main +0x140`) and client's (`+0x148`) battle parties of trainers 0 and 1 only
+  (`0x70009d5d50(main, pool, trainer, client)`; sources `main +0xe0 / +0x100`).
+- A static/wild battle in rule 3 with an ally therefore needs: position 2 -> trainer 2, one position each for
+  trainers 0 and 2, an NPC controller for trainer 2 and trainer 2's two parties. The UI then builds the ally's
+  model and Pokemon as for a trainer multi (`0x7000a6e670` reads the position's Pokemon from the client pool).
+
+### Other findings
+
+- 2 vs 1 input: the menu of position 2 reads P2's controller (a sideways right Joy-Con: its stick is the right
+  stick). The partner's lent menu there got no input until `input.c` served P1's controls as P2's while it is open.
+- EXP formula input (`0x7000a67dd0`): `+0x8` the player's language (`0x70001c9d40`, MyStatus `+0x8d`), `+0x1c` the
+  Pokemon's, `+0x30` own Pokemon (`0x70001c9d90`: MyStatus ID, gender and OT name); `0x70009d0df0` applies x1.5
+  (`0x1800`) or x1.7 (`0x1b33`, another language) when not own.
+- Level-up in battle: `0x70009e70d0` (EXP set `0x70007268a0`, stats `0x7000725210` / max HP `0x7000725ef0`), run
+  for both pools' copies of the Pokemon by the client's command playback (`0x7000a61830`, request 7).
+- Requests at the end of a won battle: 7 (commands), `0xd` (`0x7000a590a0`), `0x12` (`0x7000a59530`); the result
+  `0x70009d3870` comes after them. Request `0xe` (`0x7000a59170`) shows the end messages of a lost battle.
+
+### The partner's move targets
+
+Before, `ally_choices` offered only target type 0, so the partner's menu took back Growl, Swords Dance and the like.
+Now every move is offered with the positions its type may name (`move_targets`): type 0 (any adjacent) the living
+foes and the partner's ally, 1 (user or ally) itself and its ally, 2 (ally) the ally, 3 (one foe) the foes, 7
+(itself) its own position; every other type (all adjacent, all foes, a side, the field, a random foe) names no one,
+and any position or 4 (what the NPC sends, e.g. `0x2d41` for Growl) is accepted. The host builds the command from the
+move and the position its native menu sent (`0x7000a50a90`); the relay checks the same masks. The NPC's own pick is
+still pointed back at a foe only for types 0 and 3. The overlay lists the ally and itself too.
+
+### Verification
+
+See [COOP-TRAINER-ENCOUNTERS.md section 11](COOP-TRAINER-ENCOUNTERS.md#11-wild-team-ups-28-october-2026). Offline
+experiments (one game, `run-teamup-wild.sh ally`, QA ally `LARECOMP_COOP_WILD_TEST_ALLY`): `teamup-wild1/e1` (rule 1
+crash), `e7` (rule 3 stuck: no NPC controller), `e12` (first working 2 vs 1 with an ally), `catch-nav1` (the Bag and
+a ball in the 2 vs 1), `learn3` / `learn4` / `learn5` (a level-up with the native party, a shared clone, a clone per
+pool).

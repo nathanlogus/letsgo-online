@@ -328,7 +328,8 @@ Code:
 - The hold: the offer's link deadline is shortened to 10 s (`coop_battle_link_offer_deadline`), so the link itself
   expires it (B6 reason 3) and the host overlay counts down from 10.
 - Prize: `{1,T,T,T}` has two copies of the trainer and the result added twice the prize (+72 instead of +36). The
-  host's prize add (`0x70001c6f60` called from `0x7000319e0c`) is halved for script team-ups.
+  host's prize add (`0x70001c6f60` called from `0x7000319e0c`) was halved for script team-ups; since 28 October the
+  trainer prize itself (`0x70009d08d0`) is halved, so Pay Day stays whole (section 10).
 - Guest items: the trainer's 3 Poke Balls are added during the battle (bag add `0x70001c8e20`), not in the discarded
   result phase. The mirrored guest's bag adds are discarded.
 - Relay: B0 requires `team_state == 2`. `LARECOMP_COOP_AUTO_TAG=1` (QA) tags up automatically; the pair scripts set it.
@@ -401,3 +402,24 @@ In short:
 - **Progression** (section 4) is unchanged. The guest's Pokémon fight as copies: fainting, HP, PP and items used in
   the team-up never reach the guest's save. Verified with `savediff` in `tests/runs/teamup-switch2/*`.
 - **Protocol 8** (client and relay; 8 changed the turn digest, see COOP-BATTLE-PROTOTYPE.md); older builds are refused when connecting.
+
+## 10. Partner rewards (28 October 2026)
+
+Details, addresses and runs: [COOP-BATTLE-PROTOTYPE.md](COOP-BATTLE-PROTOTYPE.md#partner-rewards-pay-day-trapping-and-mid-turn-switches-28-october-2026).
+User-facing rules: [COOP-ONLINE.md](COOP-ONLINE.md#team-up-trainer-battles). Protocol 9.
+
+- **What the partner gets** for a won team-up, in its own save only: EXP for its own Pokemon and one trainer's prize
+  (the same amount the host gets). The EXP is worked out by the game's own calculation, run on the partner's replay
+  of the battle at each knock-out: participation, the shared part, Let's Go's boosts. Level-ups use the game's
+  out-of-battle level-up, and evolutions play right after the battle.
+- **What it never gets:** the trainer's items, Pay Day money, the beaten flag, badges or story flags. Its replay runs
+  no trainer script, so social mode stays independent: the partner can still battle that trainer in their own world.
+- **When it gets nothing:** an aborted replay (desync), a lost link before the host's finished end, a lost battle,
+  or a final state that does not match the host's. A battle ID is rewarded once, at the result phase of a replay that
+  ran, so a replayed message or a reconnect cannot add a second reward. A crash before the next in-game save loses
+  the rewards, as it would lose a solo battle's.
+- **Host:** unchanged, apart from Pay Day now staying whole: one trainer's prize, the trainer's items, the beaten flag.
+- Gyms, badges, rival and league battles stay individual: only script 699's ordinary single trainers (flags `0x200`,
+  Master trainers excluded) become team-ups (section 7).
+- Verified on copied saves with `savediff`: `teamup-rewards2/payday` (no QA variables), and also `teamup-rewards2/abort`,
+  `/loss`, `/disconnect`, `teamup-midturn2/*` and the solo baseline `teamup-rewards1/solo`.

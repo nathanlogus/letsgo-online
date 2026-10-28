@@ -817,7 +817,12 @@ static void fill_state(Cpu *c) {
     static bool logged_p2_state;
     if (nlog < 6 && (sampling % 600) == 1) { nlog++; LOG("[input] GetNpadState id %#x lr %llx\n", id, c->x[30]); }
     if (id == 1 && !logged_p2_state) { logged_p2_state = true; LOG("[input] P2 state requested\n"); }
-    if (id == 1) {  // NpadId::No2: the second local co-op player
+    // A wild team-up is the game's 2 vs 1, whose second position takes its commands from P2's controller: while the
+    // partner's own menu is open there (runtime/hle/coop_battle.c), P2 reads this player's controls.
+    extern bool coop_battle_menu_on_p2(void);
+    bool as_p2 = id == 1 && coop_battle_menu_on_p2();
+    if (as_p2) id = npad_id_used(NULL);
+    else if (id == 1) {  // NpadId::No2: the second local co-op player
         update_virtual_remote_pad2();
         if (!pad2 && !virtual_remote_pad2()) return;
         if (getenv("LARECOMP_COOP_DEBUG")) { static int n; if (n++ < 4) LOG("[coop-debug] P2 state supplied: virtual=%d\n", virtual_remote_pad2()); }
@@ -882,6 +887,7 @@ static void fill_state(Cpu *c) {
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
         if (dx || dy) lx = dx * m, ly = dy * m;
     }
+    if (as_p2 && !rx && !ry) rx = lx, ry = ly;  // (P2 is a sideways right Joy-Con: its stick is the right one, as below)
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;

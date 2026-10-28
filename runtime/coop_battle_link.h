@@ -28,9 +28,12 @@ void coop_battle_link_party(const CoopParty *);
 // Guest: the party it sent with its accept (B2); the battle's ally party is built from it.
 bool coop_battle_link_local_party(CoopParty *);
 void coop_battle_link_view(CoopBattleLinkView *);
-bool coop_battle_link_offer(uint64_t id, unsigned timeout_ms, unsigned trainer);
-// Host: an unanswered offer expires earlier (B6 reason 3), e.g. a trainer's held pre-battle text.
-void coop_battle_link_offer_deadline(uint64_t ns);
+// hold_ms: the host holds the battle that long for an answer (a trainer's held pre-battle text, 10 s), then the
+// offer expires (B6 reason 3); the guest's prompt counts it down. 0: the 45 s default.
+bool coop_battle_link_offer(uint64_t id, unsigned timeout_ms, unsigned trainer, unsigned hold_ms);
+// The offer's trainer for a wild battle: COOP_BATTLE_WILD | the wild Pokemon's species (protocol 10).
+#define COOP_BATTLE_WILD 0x8000u
+static inline bool coop_battle_wild(unsigned trainer){return trainer>COOP_BATTLE_WILD && trainer<=COOP_BATTLE_WILD+809;}
 bool coop_battle_link_accept(void);
 bool coop_battle_link_lead(uint8_t lead[COOP_PB7_BYTES], uint64_t *id);
 // Host: the guest's whole party, once every B2 chunk is in.
@@ -63,15 +66,23 @@ typedef struct {
     bool host,available,ended,aborted;
     uint8_t reason; // COOP_MIRROR_* once aborted
     CoopParty host_party;
+    uint8_t wild[COOP_PB7_BYTES]; // a wild team-up's wild Pokemon, as the host's battle built it
+    // The host's identity for its party's EXP (B8, protocol 10): bit i, host party slot i is its own Pokemon (not
+    // traded); the host's game language (MyStatus +0x8d).
+    uint8_t host_own,host_language;
 } CoopBattleMirrorSetup;
 typedef struct {CoopBattleMove move;bool native_ai;} CoopBattleCanonical;
 bool coop_battle_link_mirror_enabled(void);
 bool coop_battle_link_mirror_party(const CoopParty *);
-bool coop_battle_link_mirror_seed(uint64_t seed);
+// Host, a wild team-up: the wild Pokemon (B7 chunks 12 and 13), after the party and before the seed.
+bool coop_battle_link_mirror_wild(const uint8_t pokemon[COOP_PB7_BYTES]);
+bool coop_battle_link_mirror_seed(uint64_t seed,uint8_t own,uint8_t language);
 bool coop_battle_link_mirror_commit(const CoopBattleMove *,bool native_ai);
 bool coop_battle_link_mirror_setup(CoopBattleMirrorSetup *);
 // Both sides report the same per-round state digest. A mismatch aborts the
 // replay on both clients (false on the guest). Aborted replays stop yielding commands.
 bool coop_battle_link_mirror_digest(uint32_t round,uint64_t digest);
+// Guest: both sides reported this round's digest and they matched (the end-of-battle check before rewards).
+bool coop_battle_link_mirror_matched(uint32_t round);
 bool coop_battle_link_mirror_take(uint64_t battle,unsigned trainer,uint32_t sequence,CoopBattleCanonical *);
 void coop_battle_link_mirror_clear(void);

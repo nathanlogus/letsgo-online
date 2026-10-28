@@ -92,16 +92,14 @@ bool coop_battle_link_pop(uint8_t body[255],size_t *n){
     else if(ok){*n=queue[first].size;memcpy(body,queue[first].data,*n);first=(first+1)%16;count--;}
     pthread_mutex_unlock(&lock);return ok;
 }
-bool coop_battle_link_offer(uint64_t id,unsigned timeout,unsigned trainer){
-    if(!coop_battle_link_enabled() || !id || timeout<1000 || timeout>60000 || !trainer || trainer>601)return false;
+bool coop_battle_link_offer(uint64_t id,unsigned timeout,unsigned trainer,unsigned hold){
+    if(!hold)hold=45000;
+    if(!coop_battle_link_enabled() || !id || timeout<1000 || timeout>60000 || ((!trainer || trainer>601) && !coop_battle_wild(trainer)) || hold<1000 || hold>45000)return false;
     pthread_mutex_lock(&lock);bool ok=offers && view.phase==COOP_LINK_NONE;
-    if(ok){uint8_t p[13]={0};p64(p+1,id);p16(p+9,timeout);p16(p+11,trainer);ok=enqueue(p,sizeof p);
+    if(ok){uint8_t p[15]={0};p64(p+1,id);p16(p+9,timeout);p16(p+11,trainer);p16(p+13,hold);ok=enqueue(p,sizeof p);
         if(ok){clear_mirror();view=(CoopBattleLinkView){.phase=COOP_LINK_PREPARING,.host=true,.battle=id,.timeout_ms=timeout,.trainer=trainer,
-            .deadline_ns=plat_now_ns()+45000000000ull};chunks=0;accepted=pending=false;}}
+            .deadline_ns=plat_now_ns()+hold*1000000ull};chunks=0;accepted=pending=false;}}
     pthread_mutex_unlock(&lock);return ok;
-}
-void coop_battle_link_offer_deadline(uint64_t ns){
-    pthread_mutex_lock(&lock);if(view.host && view.phase==COOP_LINK_PREPARING && ns<view.deadline_ns)view.deadline_ns=ns;pthread_mutex_unlock(&lock);
 }
 bool coop_battle_link_accept(void){
     pthread_mutex_lock(&lock);bool ok=view.phase==COOP_LINK_OFFER && have_party && count+1+2*local_party.count<=16 && plat_now_ns()<view.deadline_ns;
@@ -187,11 +185,21 @@ bool coop_battle_link_mirror_party(const CoopParty *party){
     }
     pthread_mutex_unlock(&lock);return ok;
 }
-bool coop_battle_link_mirror_seed(uint64_t seed){
+bool coop_battle_link_mirror_wild(const uint8_t pokemon[COOP_PB7_BYTES]){
+    if(!coop_battle_link_mirror_enabled() || !coop_party_pokemon_valid(pokemon))return false;
+    pthread_mutex_lock(&lock);
+    bool ok=view.host && view.phase==COOP_LINK_ACTIVE && coop_battle_wild(view.trainer) && mirror_party_sent && !mirror_seed_ready && count+2<=16;
+    for(unsigned i=0;ok && i<2;i++){
+        uint8_t p[141]={7};p64(p+1,view.battle);p[9]=mirror.host_party.count;p[10]=12+i;memcpy(p+11,pokemon+130*i,130);enqueue(p,sizeof p);
+    }
+    if(ok)memcpy(mirror.wild,pokemon,COOP_PB7_BYTES);
+    pthread_mutex_unlock(&lock);return ok;
+}
+bool coop_battle_link_mirror_seed(uint64_t seed,uint8_t own,uint8_t language){
     if(!coop_battle_link_mirror_enabled())return false;
     pthread_mutex_lock(&lock);bool ok=view.host && view.phase==COOP_LINK_ACTIVE && mirror_party_sent && !mirror_seed_ready;
-    if(ok){uint8_t p[17]={8};p64(p+1,view.battle);p64(p+9,seed);ok=enqueue(p,sizeof p);
-        if(ok){mirror.seed=seed;mirror_seed_ready=true;mirror.available=true;}}
+    if(ok){uint8_t p[19]={8};p64(p+1,view.battle);p64(p+9,seed);p[17]=own;p[18]=language;ok=enqueue(p,sizeof p);
+        if(ok){mirror.seed=seed;mirror.host_own=own;mirror.host_language=language;mirror_seed_ready=true;mirror.available=true;}}
     pthread_mutex_unlock(&lock);return ok;
 }
 // Every native decision (move, switch, item, replacement) travels as its command word; the guest's own
@@ -239,23 +247,31 @@ bool coop_battle_link_mirror_digest(uint32_t round,uint64_t digest){
     } else if(ok){digest_record(0,round,digest);ok=!mirror.aborted;}
     pthread_mutex_unlock(&lock);return ok;
 }
+bool coop_battle_link_mirror_matched(uint32_t round){
+    pthread_mutex_lock(&lock);unsigned i=round%16;bool ok=round && !mirror.aborted && digests[i].round==round && digests[i].have==3;
+    pthread_mutex_unlock(&lock);return ok;
+}
 void coop_battle_link_latency(unsigned rtt_ms){pthread_mutex_lock(&lock);link_rtt_ms=rtt_ms>60000?60000:rtt_ms;pthread_mutex_unlock(&lock);}
 // Called under the link mutex, only for an accepted current battle.
 static void mirror_message(const uint8_t *p,size_t n,uint64_t id){
     if(view.host || view.phase!=COOP_LINK_ACTIVE || !accepted)return;
-    if(p[0]==7 && n==141 && p[9]>=1 && p[9]<=6 && p[10]<2*p[9]){
+    // (chunks 12 and 13: a wild team-up's wild Pokemon)
+    bool wild=coop_battle_wild(view.trainer);
+    if(p[0]==7 && n==141 && p[9]>=1 && p[9]<=6 && (p[10]<2*p[9] || (wild && (p[10]==12 || p[10]==13)))){
         if(!mirror.battle){mirror.battle=id;mirror.trainer=view.trainer;}
         if(!mirror.host_party.count)mirror.host_party.count=p[9];
         if(mirror.battle!=id || mirror.host_party.count!=p[9] || (mirror_chunks&(1u<<p[10])))return;
-        memcpy((uint8_t *)mirror.host_party.pokemon+130*p[10],p+11,130);mirror_chunks|=1u<<p[10];
-        if(mirror_chunks==((1u<<(2*p[9]))-1)){
-            if(!coop_party_valid(&mirror.host_party)){mirror_abort(COOP_MIRROR_BAD_PARTY,true);return;}
+        if(p[10]>=12)memcpy(mirror.wild+130*(p[10]-12),p+11,130);
+        else memcpy((uint8_t *)mirror.host_party.pokemon+130*p[10],p+11,130);
+        mirror_chunks|=1u<<p[10];
+        if(mirror_chunks==(((1u<<(2*p[9]))-1)|(wild?0x3000u:0))){
+            if(!coop_party_valid(&mirror.host_party) || (wild && !coop_party_pokemon_valid(mirror.wild))){mirror_abort(COOP_MIRROR_BAD_PARTY,true);return;}
             mirror_party_sent=true;mirror.available=mirror_seed_ready;
         }
-    } else if(p[0]==8 && n==17 && !mirror_seed_ready){
+    } else if(p[0]==8 && n==19 && !mirror_seed_ready){
         if(!mirror.battle){mirror.battle=id;mirror.trainer=view.trainer;}
         if(mirror.battle!=id)return;
-        mirror.seed=u64(p+9);mirror_seed_ready=true;mirror.available=mirror_party_sent;
+        mirror.seed=u64(p+9);mirror.host_own=p[17];mirror.host_language=p[18];mirror_seed_ready=true;mirror.available=mirror_party_sent;
     } else if(p[0]==9 && n==30 && mirror.available && !mirror.aborted){
         CoopBattleCanonical command={.move={.battle=id,.turn=u32(p+9),.sequence=u32(p+13),.trainer=p[17],.party_index=p[18],
             .move_index=p[19],.move=u16(p+20),.target=p[22],.kind=p[24],.count=p[25],.packet=u32(p+26)},.native_ai=p[23]!=0};
@@ -274,9 +290,12 @@ void coop_battle_link_message(const uint8_t *p,size_t n){
     uint64_t id=u64(p+1),now=plat_now_ns();if(!id)return;
     pthread_mutex_lock(&lock);
     // A finished replay may still be draining; a new offer must not wipe it.
-    if(p[0]==0 && n==13 && view.phase==COOP_LINK_NONE && !offers)decline(id);
-    else if(p[0]==0 && n==13 && view.phase==COOP_LINK_NONE && u16(p+9)>=1000 && u16(p+9)<=60000 && !(mirror.available && !mirror.host && !mirror.aborted)){
-        clear_mirror();busy_since=0;view=(CoopBattleLinkView){.phase=COOP_LINK_OFFER,.battle=id,.timeout_ms=u16(p+9),.trainer=u16(p+11),.deadline_ns=now+45000000000ull};
+    if(p[0]==0 && n==15 && view.phase==COOP_LINK_NONE && !offers)decline(id);
+    else if(p[0]==0 && n==15 && view.phase==COOP_LINK_NONE && u16(p+9)>=1000 && u16(p+9)<=60000 && u16(p+13)>=1000 && u16(p+13)<=45000 &&
+        !(mirror.available && !mirror.host && !mirror.aborted)){
+        // The host's hold (a trainer's held text, 10 s) started a one-way trip ago; an answer needs another to arrive.
+        unsigned ms=u16(p+13),margin=2*link_rtt_ms;if(margin>ms/4)margin=ms/4;
+        clear_mirror();busy_since=0;view=(CoopBattleLinkView){.phase=COOP_LINK_OFFER,.battle=id,.timeout_ms=u16(p+9),.trainer=u16(p+11),.deadline_ns=now+(uint64_t)(ms-margin)*1000000};
     } else if(id==view.battle && view.phase!=COOP_LINK_NONE){
         if(p[0]==1 && n==9 && view.host && view.phase==COOP_LINK_PREPARING)accepted=true;
         else if(p[0]==2 && n==141 && view.host && accepted && p[9]>=1 && p[9]<=6 && p[10]<2*p[9] && (!chunks || peer_party.count==p[9]) && !(chunks&(1u<<p[10]))){

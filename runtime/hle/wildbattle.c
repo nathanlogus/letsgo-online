@@ -300,10 +300,13 @@ static void start_battle(Cpu *c) {
     LOG("[wild] factory returned, handle %llx\n", (unsigned long long)out[0]);
 }
 
+static bool g_testing;  // the test encounter below (it starts even with LARECOMP_WILDBATTLE_NONE)
 static int trigger_hook(Cpu *c, uint64_t addr) {
     (void)addr;
     if (g_active) return 1;  // (swallowed: our battle is running)
-    if (getenv("LARECOMP_WILDBATTLE_NONE")) return 1;  // (test runs: touches start nothing, e.g. two-client battle tests)
+    if (getenv("LARECOMP_WILDBATTLE_NONE") && !g_testing) return 1;  // (test runs: touches start nothing, e.g. two-client battle tests)
+    extern bool coop_battle_encounter_blocked(void);  // (runtime/hle/coop_battle.c: a partner who joined a team-up)
+    if (coop_battle_encounter_blocked()) return 1;
     if (!(g_mode_override < 0 ? g_settings.wild_battle : g_mode_override)) return 0;
     if (g_count >= g_max) return 0;  // (the game's capture runs)
     g_starter_alone = starter_walks_alone(c);  // (issue #6: the starter's battle model, above)
@@ -315,10 +318,30 @@ static int trigger_hook(Cpu *c, uint64_t addr) {
     g_alloc = R64(R64(R64(GOT_ALLOCATOR, 0), 0), 0x68);
     LOG("[wild] f%llu encounter intercepted (pokemon obj %llx, manager %llx, allocator %llx): building the static battle process\n",
         (unsigned long long)renderer_game_frame(), (unsigned long long)c->x[0], (unsigned long long)g_mgr, (unsigned long long)g_alloc);
+    extern void coop_battle_wild_touch(unsigned species);  // (runtime/hle/coop_battle.c: a team-up is offered from here)
+    coop_battle_wild_touch(g_wild_valid && !g_explicit ? g_wild_species : (unsigned)g_species);
     start_battle(c);
     c->x[30] = lr;
     c->x[0] = 0;
     return 1;
+}
+
+// Co-op (runtime/hle/coop_battle.c): the partner's replay of the host's wild team-up, the same synthetic battle started
+// as a touch would (the touched Pokémon's species and level; its setup then takes the host's own wild Pokémon).
+bool wildbattle_replay(Cpu *c, unsigned species, unsigned level) {
+    if (g_active || rt_addr(ENCOUNTER_TRIGGER) != ENCOUNTER_TRIGGER) return false;
+    Cpu saved = *c;
+    uint64_t world = R64(R64(0x70015fad08ull, 0), 0);
+    g_mgr = R64(world, 0x68);
+    g_alloc = R64(R64(R64(GOT_ALLOCATOR, 0), 0), 0x68);
+    g_wild_valid = true, g_explicit = false;
+    g_wild_species = species, g_wild_form = 0, g_wild_level = level, g_wild_gender = 0;
+    memset(g_wild_iv, 0, sizeof g_wild_iv);
+    memset(&g_catch, 0, sizeof g_catch);
+    LOG("[wild] f%llu co-op replay: species %u level %u\n", (unsigned long long)renderer_game_frame(), species, level);
+    start_battle(c);
+    *c = saved;
+    return true;
 }
 
 // Research (LARECOMP_WILDBATTLE_DEBUG=1): 240 presents after the battle's process is gone, dump the frame's render passes
@@ -418,17 +441,20 @@ static int field_hook(Cpu *c, uint64_t addr) {
     }
     // Isolated combat tests can start a synthetic encounter after loading a
     // copied save, without depending on a random overworld Pokemon spawning.
+    // LARECOMP_WILDBATTLE_TEST_FILE=<path>: one each time that file appears (it is removed), e.g. after a tag-up.
     static bool test_started;
-    const char *test_at = ENV("LARECOMP_WILDBATTLE_TEST_AT");
-    if (test_at && rt_addr(ENCOUNTER_TRIGGER) == ENCOUNTER_TRIGGER && !test_started &&
-        renderer_game_frame() >= strtoull(test_at, NULL, 10)) {
-        test_started = true;
+    const char *test_at = ENV("LARECOMP_WILDBATTLE_TEST_AT"), *test_file = ENV("LARECOMP_WILDBATTLE_TEST_FILE");
+    bool due = test_file ? !g_active && !remove(test_file)
+                         : test_at && !test_started && renderer_game_frame() >= strtoull(test_at, NULL, 10);
+    if (due && rt_addr(ENCOUNTER_TRIGGER) == ENCOUNTER_TRIGGER) {
+        test_started = g_testing = true;
         Cpu saved = *c;
         uint64_t world = R64(R64(0x70015fad08ull, 0), 0);
         c->x[0] = 0;
         c->x[1] = (uint64_t)(uintptr_t)&world;
         trigger_hook(c, 0);
         *c = saved;
+        g_testing = false;
     }
     if (!g_fadein_done && g_end_frame && (long)renderer_game_frame() >= g_end_frame + g_fadein_delay) {
         g_fadein_done = true;
