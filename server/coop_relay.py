@@ -15,6 +15,7 @@ Environment:
   COOP_RELAY_ADMIN_TOKEN  enables GET /rooms and POST /rooms/<id>/close on the health port for the account
                         service's dashboard (Authorization: Bearer <token>); unset: those answer 404
   COOP_RELAY_MAX_ROOMS  maximum rooms in memory (default 100)
+  COOP_RELAY_TRADE_LOG  file that keeps trade decisions across relay restarts (default: memory only)
 """
 from __future__ import annotations
 
@@ -30,9 +31,12 @@ import struct
 import time
 from dataclasses import dataclass, field
 
-PROTO = 10  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; 8: the turn digest (B11) skips battle Pokemon bytes the game never sets; 9: the offer (B0) carries the host's hold; 10: wild team-ups (B0 trainer 0x8000 | species, B7 chunks 12-13 the wild Pokemon), the seed (B8) carries the host's own-Pokemon mask and language; mixed versions are refused and play solo
+PROTO = 11  # 6: team-up trainer battles (B) in normal play; 7: whole guest party, switches and replacements; 8: the turn digest (B11) skips battle Pokemon bytes the game never sets; 9: the offer (B0) carries the host's hold; 10: wild team-ups (B0 trainer 0x8000 | species, B7 chunks 12-13 the wild Pokemon), the seed (B8) carries the host's own-Pokemon mask and language; 11: meet up (M), trades (W), practice battles and spectating (V, O, B0 0x4000, slot-1 B9/B6), story scenes (Y); mixed versions are refused and play solo
 RECONNECT_GRACE = 30
+SCENE_SECONDS = 60  # a Shared Adventure ready prompt
+VERSUS_START = 20  # after a practice battle request is accepted, the room's host offers the battle (B0 0x4000) within this
 TEAM_INVITE_SECONDS = 45  # Leave time to navigate Communicate and return to the overworld.
+TRADE_KEEP = 7 * 86400  # a trade decision answers a client in doubt this long
 MAX_FRAME = 256
 MAX_ROOMS = max(1, int(os.getenv("COOP_RELAY_MAX_ROOMS", "100")))
 CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -77,6 +81,7 @@ class Peer:
     pose: tuple[int, int, int, int] | None = None
     pose_at: float = 0
     activity: int = 0
+    adventure: int = 0  # Y0: 0 Social, 1 Shared, 2 Shared with this session's consent
 
     def send(self, kind: bytes, body: bytes = b"") -> None:
         if self.connected and not self.writer.is_closing():
@@ -98,6 +103,19 @@ class Room:
     team_id: int = 0
     team_from: int = 255
     team_until: float = 0
+    meet_state: int = 0  # meet-up request (M): 0 none, 1 pending; 2 (accepted) is only sent
+    meet_id: int = 0
+    meet_from: int = 255
+    meet_until: float = 0
+    # Practice battle request (V), as M; until versus_start the room's host may offer the agreed battle. watcher: the
+    # slot watching the other player's battle (O), 255 none.
+    versus_state: int = 0
+    versus_id: int = 0
+    versus_from: int = 255
+    versus_until: float = 0
+    versus_start: float = 0
+    battle_pvp: bool = False
+    watcher: int = 255
     battle_id: int = 0
     battle_phase: int = 0
     battle_turn: int = 0
@@ -114,6 +132,19 @@ class Room:
     mirror_sequences: list[int] = field(default_factory=lambda: [0, 0])
     mirror_aborted: bool = False
     mirror_digest: int = 0
+    # Trade (W): 1 requested, 2 open, 3 both confirmed (waiting for both "prepared"). Per slot: offer [rev, bytes,
+    # chunks], confirmation (own rev, other rev), prepared digest.
+    trade_id: int = 0
+    trade_phase: int = 0
+    trade_from: int = 255
+    trade_offers: dict[int, list] = field(default_factory=dict)
+    trade_confirms: dict[int, tuple[int, int]] = field(default_factory=dict)
+    trade_prepared: dict[int, int] = field(default_factory=dict)
+    # Shared Adventure (Y): the open scene offer, its initiator's slot and the partner it was sent to.
+    scene_id: int = 0
+    scene_from: int = 255
+    scene_to: bytes = b""
+    scene_offer: bytes = b""
 
 
 class Relay:
@@ -123,7 +154,7 @@ class Relay:
             body=body or b"\x06"+struct.pack('<QB',room.battle_id,reason)
             for p in room.peers:p.send(b"B",body)
         room.battle_id=room.battle_phase=room.battle_turn=room.battle_sequence=room.battle_chunks=room.battle_count=0
-        room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b"";room.battle_wild=False
+        room.battle_deadline=0;room.battle_sent=False;room.battle_choices=b"";room.battle_wild=False;room.battle_pvp=False
         room.mirror_count=room.mirror_chunks=room.mirror_digest=0;room.mirror_seed=room.mirror_aborted=False;room.mirror_sequences=[0,0]
 
     async def expire_battle_offer(self, room: Room, battle: int) -> None:
@@ -138,9 +169,14 @@ class Relay:
         other=others[0];host=peer.identity==room.owner;now=time.monotonic()
         if op==0 and len(body)==15 and host and not room.battle_id:
             timeout,trainer,hold=struct.unpack_from('<HHH',body,9)
-            wild=0x8001<=trainer<=0x8000+809
-            if not 1000<=timeout<=60000 or not (1<=trainer<=601 or wild) or not 1000<=hold<=45000 or room.team_state!=2 or not self.team_near(peer,other):return
-            room.battle_id=battle;room.battle_phase=1;room.battle_chunks=0;room.battle_wild=wild
+            wild=0x8001<=trainer<=0x8000+809;pvp=trainer==0x4000
+            if not 1000<=timeout<=60000 or not (1<=trainer<=601 or wild or pvp) or not 1000<=hold<=45000:return
+            # A practice battle needs the agreement (V) just before; a team-up needs the tag, nearby.
+            if pvp:
+                if now>=room.versus_start or room.watcher!=255:return
+                room.versus_start=0
+            elif room.team_state!=2 or not self.team_near(peer,other):return
+            room.battle_id=battle;room.battle_phase=1;room.battle_chunks=0;room.battle_wild=wild;room.battle_pvp=pvp
             asyncio.create_task(self.expire_battle_offer(room,battle))
         elif battle!=room.battle_id:return
         elif op==1 and len(body)==9 and not host and room.battle_phase==1:room.battle_phase=2
@@ -193,10 +229,11 @@ class Relay:
             # Any native decision as its command word (low nibble 1 fight, 3 change); request kind 2 action, 4/5 replacement.
             turn,sequence=struct.unpack_from('<II',body,9);trainer,party,index=body[17:20];move=struct.unpack_from('<H',body,20)[0];target,ai,kind,count=body[22:26]
             packet=struct.unpack_from('<I',body,26)[0]
-            if trainer not in (0,2) or not turn or not sequence or party>=6 or ai>1 or (ai and trainer!=2) or kind not in (2,4,5) or count>10:return
-            actor=trainer//2
+            remote=1 if room.battle_pvp else 2  # the guest's trainer slot: the opponent in a practice battle, else the ally
+            if trainer not in (0,remote) or not turn or not sequence or party>=6 or ai>1 or (ai and trainer!=remote) or kind not in (2,4,5) or count>10:return
+            actor=int(trainer!=0)
             if sequence!=room.mirror_sequences[actor]+1:return
-            if trainer==2 and not ai:
+            if trainer==remote and not ai:
                 # The guest's own decision: it must be one the host offered it.
                 choice=room.battle_choices
                 if not choice or (turn,sequence)!=(room.battle_turn,room.battle_sequence) or party!=choice[19]:return
@@ -210,6 +247,120 @@ class Relay:
     @staticmethod
     def party_done(room: Room) -> bool:
         return room.battle_count>0 and room.battle_chunks==(1<<(2*room.battle_count))-1
+
+    # Trades: the relay is the commit point. A trade commits only when both sides said "prepared" (each wrote its
+    # durable record first) for the offers both confirmed; anything earlier (cancel, disconnect, timeout) aborts it.
+    # Decisions are kept (TRADE_KEEP seconds, and in COOP_RELAY_TRADE_LOG) so a client in doubt can ask (W7).
+    # W5 reasons: 1 cancelled, 2 disconnected, 3 expired, 4 prepare timeout, 5 digest mismatch, 6 refused.
+    def trade_decide(self, room: Room, decision: int, reason: int) -> None:
+        tid=room.trade_id
+        if not tid:return
+        now=time.time();self.trade_decisions[tid]=(decision,reason,now)
+        for k in [k for k,v in self.trade_decisions.items() if now-v[2]>TRADE_KEEP]:del self.trade_decisions[k]
+        log=os.getenv("COOP_RELAY_TRADE_LOG")
+        if log:
+            with open(log,"a") as f:f.write(f"{tid:016x} {decision} {reason} {int(now)}\n");f.flush();os.fsync(f.fileno())
+        for p in room.peers:p.send(b"W",b"\x05"+struct.pack('<QBB',tid,decision,reason))
+        room.trade_id=room.trade_phase=0;room.trade_from=255;room.trade_offers={};room.trade_confirms={};room.trade_prepared={}
+
+    async def expire_trade(self, room: Room, tid: int, phase: int, seconds: float, reason: int) -> None:
+        await asyncio.sleep(seconds)
+        if room.trade_id==tid and room.trade_phase==phase:self.trade_decide(room,2,reason)
+
+    @staticmethod
+    def fnv(data: bytes) -> int:
+        h=0xcbf29ce484222645
+        for b in data:h=((h^b)*0x100000001b3)&0xffffffffffffffff
+        return h
+
+    def trade_action(self, peer: Peer, body: bytes) -> None:
+        if len(body)<9:return
+        room=peer.room;op=body[0];tid=struct.unpack_from('<Q',body,1)[0]
+        other=next((p for p in room.peers if p is not peer and p.connected),None)
+        if not tid:return
+        if op==7 and len(body)==9:
+            d=self.trade_decisions.get(tid)
+            peer.send(b"W",b"\x05"+struct.pack('<QBB',tid,d[0] if d else 0,d[1] if d else 0));return
+        if op==8 and len(body)==11 and body[9]<=3 and body[10]<=1:
+            if other:other.send(b"W",body)
+            return
+        if op==0 and len(body)==9:
+            if (room.trade_id or other is None or room.battle_id or tid in self.trade_decisions or
+                    not (room.team_state==2 or self.team_near(peer,other))):
+                peer.send(b"W",b"\x05"+struct.pack('<QBB',tid,2,6));return
+            room.trade_id=tid;room.trade_phase=1;room.trade_from=peer.slot
+            asyncio.create_task(self.expire_trade(room,tid,1,TEAM_INVITE_SECONDS,3))
+        elif tid!=room.trade_id or other is None:return
+        elif op==1 and len(body)==9 and room.trade_phase==1 and peer.slot!=room.trade_from:room.trade_phase=2
+        elif op==2 and len(body)==144 and room.trade_phase==2 and body[13]<2:
+            rev=struct.unpack_from('<I',body,9)[0];offer=room.trade_offers.setdefault(peer.slot,[0,bytearray(260),0])
+            if rev<offer[0]:return
+            if rev>offer[0]:offer[0]=rev;offer[2]=0
+            offer[1][130*body[13]:130*body[13]+130]=body[14:144];offer[2]|=1<<body[13]
+            room.trade_confirms={}  # any offer change clears both confirmations
+        elif op==3 and len(body)==17 and room.trade_phase==2:
+            mine,theirs=room.trade_offers.get(peer.slot),room.trade_offers.get(other.slot)
+            if not mine or not theirs or mine[2]!=3 or theirs[2]!=3 or struct.unpack_from('<II',body,9)!=(mine[0],theirs[0]):return
+            room.trade_confirms[peer.slot]=(mine[0],theirs[0])
+            if len(room.trade_confirms)==2:
+                room.trade_phase=3;asyncio.create_task(self.expire_trade(room,tid,3,30,4))
+        elif op==4 and len(body)==17 and room.trade_phase==2:
+            # (it prepared on confirmations an offer change has cleared here: the two sides disagree)
+            self.trade_decide(room,2,5);return
+        elif op==4 and len(body)==17 and room.trade_phase==3:
+            digest=(self.fnv(bytes(room.trade_offers[peer.slot][1]))+self.fnv(bytes(room.trade_offers[other.slot][1])))&0xffffffffffffffff
+            if struct.unpack_from('<Q',body,9)[0]!=digest:self.trade_decide(room,2,5);return
+            room.trade_prepared[peer.slot]=digest
+            if len(room.trade_prepared)==2:self.trade_decide(room,1,0)
+            return
+        elif op==6 and len(body)==9:self.trade_decide(room,2,1);return
+        else:return
+        other.send(b"W",body)
+
+    # Shared Adventure scenes: a gated forwarder. An offer reaches the partner only when both players are in Shared
+    # mode with this session's consent (Y0 mode 2), and for "Nearby" only tagged up or within 30 m. The answer is the
+    # partner's own, final decision; the relay keeps the offer through the reconnect grace and resends it.
+    # Y4 reasons: 1 not both sharing, 2 not nearby, 3 another offer is open, 4 no partner, 5 expired, 6 initiator gone,
+    # 7 no such offer.
+    def scene_close(self, room: Room, reason: int) -> None:
+        if room.scene_id:
+            for p in room.peers:p.send(b"Y",b"\x04"+struct.pack('<QB',room.scene_id,reason))
+        room.scene_id=0;room.scene_from=255;room.scene_to=b"";room.scene_offer=b""
+
+    async def expire_scene(self, room: Room, sid: int) -> None:
+        await asyncio.sleep(SCENE_SECONDS)
+        if room.scene_id==sid:self.scene_close(room,5)
+
+    async def scene_grace(self, room: Room, sid: int, identity: bytes) -> None:
+        await asyncio.sleep(RECONNECT_GRACE)
+        if room.scene_id==sid and not any(p.identity==identity and p.connected for p in room.peers):self.scene_close(room,6)
+
+    def scene_action(self, peer: Peer, body: bytes) -> None:
+        room=peer.room
+        other=next((p for p in room.peers if p is not peer and p.connected),None)
+        if len(body)==2 and body[0]==0 and body[1]<=2:
+            peer.adventure=body[1]
+            for p in room.peers:
+                if p is not peer:p.send(b"Y",body)
+            return
+        if len(body)<10:return
+        op=body[0];sid=struct.unpack_from('<Q',body,1)[0]
+        if not sid:return
+        if op==1 and len(body)==12 and body[11]<=1:
+            reason=(3 if room.scene_id else 4 if other is None else 1 if peer.adventure!=2 or other.adventure!=2 else
+                    2 if body[11] and not (room.team_state==2 or self.team_near(peer,other)) else 0)
+            if reason:peer.send(b"Y",b"\x04"+struct.pack('<QB',sid,reason));return
+            room.scene_id=sid;room.scene_from=peer.slot;room.scene_to=other.identity;room.scene_offer=body
+            asyncio.create_task(self.expire_scene(room,sid))
+        elif sid!=room.scene_id:
+            if op==2 and len(body)==10:peer.send(b"Y",b"\x04"+struct.pack('<QB',sid,7))
+            return
+        elif op==2 and len(body)==10 and 1<=body[9]<=5 and peer.slot!=room.scene_from:
+            room.scene_id=0;room.scene_from=255;room.scene_to=b"";room.scene_offer=b""
+        elif op==3 and len(body)==10 and body[9] in (1,2) and peer.slot==room.scene_from:
+            room.scene_id=0;room.scene_from=255;room.scene_to=b"";room.scene_offer=b""
+        else:return
+        if other:other.send(b"Y",body)
 
     def team_status(self, room: Room, reason: int = 0, target: Peer | None = None) -> None:
         remaining=max(0,int((room.team_until-time.monotonic())*1000)) if room.team_state==1 else 0
@@ -262,11 +413,146 @@ class Relay:
         else:
             self.team_status(room,7,peer)
 
+    # Meet-up (M): the U invitation's commands, states and reasons, without the distance rule (they are apart). On
+    # accept both get state 2 once and the room is free for the next request; the requester's game flies.
+    def meet_status(self, room: Room, state: int, reason: int = 0, target: Peer | None = None) -> None:
+        remaining=max(0,int((room.meet_until-time.monotonic())*1000)) if state==1 else 0
+        body=struct.pack('<BBBII',state,room.meet_from,reason,room.meet_id,remaining)
+        for peer in ([target] if target else room.peers):
+            peer.send(b'M',body)
+
+    def clear_meet(self, room: Room, reason: int) -> None:
+        room.meet_state=0;room.meet_until=0;self.meet_status(room,0,reason);room.meet_from=255
+
+    async def expire_meet(self, room: Room, request: int) -> None:
+        await asyncio.sleep(TEAM_INVITE_SECONDS)
+        if room.meet_state==1 and room.meet_id==request:
+            self.clear_meet(room,5)
+
+    @staticmethod
+    def meet_ready(peer: Peer) -> bool:
+        return peer.activity==1 and peer.pose is not None and time.monotonic()-peer.pose_at<1
+
+    def meet_action(self, peer: Peer, command: int, request: int) -> None:
+        room=peer.room
+        other=next((p for p in room.peers if p is not peer and p.connected),None)
+        if command==0:
+            if room.meet_state or other is None:
+                self.meet_status(room,room.meet_state,3,peer);return
+            if not (self.meet_ready(peer) and self.meet_ready(other)):
+                self.meet_status(room,0,4,peer);return
+            room.meet_id=secrets.randbits(32) or 1
+            room.meet_state=1;room.meet_from=peer.slot;room.meet_until=time.monotonic()+TEAM_INVITE_SECONDS
+            self.meet_status(room,1)
+            asyncio.create_task(self.expire_meet(room,room.meet_id))
+        elif request!=room.meet_id or room.meet_state!=1:
+            self.meet_status(room,room.meet_state,7,peer)
+        elif command==1 and peer.slot!=room.meet_from and other is not None:
+            if time.monotonic()>=room.meet_until:
+                self.clear_meet(room,5);return
+            if not (self.meet_ready(peer) and self.meet_ready(other)):
+                self.meet_status(room,1,4,peer);return
+            room.meet_state=0;room.meet_until=0;self.meet_status(room,2);room.meet_from=255
+        elif command==2 and peer.slot!=room.meet_from:
+            self.clear_meet(room,1)
+        elif command==3 and peer.slot==room.meet_from:
+            self.clear_meet(room,2)
+        else:
+            self.meet_status(room,room.meet_state,7,peer)
+
+    # Practice battles (V): the meet-up's commands, states and reasons. Both players must be on the overworld, with no
+    # battle, trade or watch running; on accept both get state 2 once, and the room's host may offer the battle.
+    def versus_status(self, room: Room, state: int, reason: int = 0, target: Peer | None = None) -> None:
+        remaining=max(0,int((room.versus_until-time.monotonic())*1000)) if state==1 else 0
+        body=struct.pack('<BBBII',state,room.versus_from,reason,room.versus_id,remaining)
+        for peer in ([target] if target else room.peers):peer.send(b'V',body)
+
+    def clear_versus(self, room: Room, reason: int) -> None:
+        room.versus_state=0;room.versus_until=0;self.versus_status(room,0,reason);room.versus_from=255
+
+    async def expire_versus(self, room: Room, request: int) -> None:
+        await asyncio.sleep(TEAM_INVITE_SECONDS)
+        if room.versus_state==1 and room.versus_id==request:self.clear_versus(room,5)
+
+    def versus_free(self, room: Room, peer: Peer, other: Peer) -> bool:
+        return self.meet_ready(peer) and self.meet_ready(other) and not room.battle_id and not room.trade_id and room.watcher==255
+
+    def versus_action(self, peer: Peer, command: int, request: int) -> None:
+        room=peer.room
+        other=next((p for p in room.peers if p is not peer and p.connected),None)
+        if command==0:
+            if room.versus_state or other is None:
+                self.versus_status(room,room.versus_state,3,peer);return
+            if not self.versus_free(room,peer,other):
+                self.versus_status(room,0,4,peer);return
+            room.versus_id=secrets.randbits(32) or 1
+            room.versus_state=1;room.versus_from=peer.slot;room.versus_until=time.monotonic()+TEAM_INVITE_SECONDS
+            self.versus_status(room,1)
+            asyncio.create_task(self.expire_versus(room,room.versus_id))
+        elif request!=room.versus_id or room.versus_state!=1:
+            self.versus_status(room,room.versus_state,7,peer)
+        elif command==1 and peer.slot!=room.versus_from and other is not None:
+            if time.monotonic()>=room.versus_until:
+                self.clear_versus(room,5);return
+            if not self.versus_free(room,peer,other):
+                self.versus_status(room,1,4,peer);return
+            room.versus_state=0;room.versus_until=0;room.versus_start=time.monotonic()+VERSUS_START
+            self.versus_status(room,2);room.versus_from=255
+        elif command==2 and peer.slot!=room.versus_from:
+            self.clear_versus(room,1)
+        elif command==3 and peer.slot==room.versus_from:
+            self.clear_versus(room,2)
+        else:
+            self.versus_status(room,room.versus_state,7,peer)
+
+    # Spectating (O): a player watches the other's battle as a summary the battler sends. 0 watch (the other is in a
+    # battle, the watcher is not, and no battle link runs), 1 stop, 2 + 30-byte summary: from the battler to the watcher
+    # only. Status 0x10: watching, watcher slot, reason (1 stopped, 2 battle over, 3 refused, 4 disconnected). The relay
+    # drops the watcher's battle messages (B): a spectator can't affect any battle.
+    def watch_status(self, room: Room, reason: int = 0, target: Peer | None = None) -> None:
+        body=bytes([0x10,int(room.watcher!=255),room.watcher,reason])
+        for peer in ([target] if target else room.peers):peer.send(b'O',body)
+
+    def clear_watch(self, room: Room, reason: int) -> None:
+        if room.watcher!=255:
+            room.watcher=255;self.watch_status(room,reason)
+
+    def watch_action(self, peer: Peer, body: bytes) -> None:
+        room=peer.room
+        other=next((p for p in room.peers if p is not peer and p.connected),None)
+        if body==b'\x00':
+            if room.watcher!=255 or other is None or other.activity!=3 or peer.activity==3 or room.battle_id:
+                self.watch_status(room,3,peer);return
+            room.watcher=peer.slot;self.watch_status(room)
+        elif body==b'\x01' and room.watcher==peer.slot:
+            self.clear_watch(room,1)
+        elif len(body)==31 and body[0]==2 and other is not None and room.watcher==other.slot and peer.activity==3:
+            other.send(b'O',body)
+
+    def watch_activity(self, room: Room, peer: Peer) -> None:
+        # The battler back on the overworld ends the watch; so does the watcher entering a battle.
+        if peer.slot==room.watcher:
+            if peer.activity==3:self.clear_watch(room,1)
+        elif peer.activity==1:
+            self.clear_watch(room,2)
+
+    def versus_reset(self, room: Room) -> None:
+        if room.versus_state:self.clear_versus(room,6)
+        room.versus_start=0;self.clear_watch(room,4)
+
     def __init__(self) -> None:
         self.rooms: dict[str, Room] = {}
         self.connections = 0
         self.started = time.monotonic()
         self.writers: set[asyncio.StreamWriter] = set()
+        self.trade_decisions: dict[int, tuple[int, int, float]] = {}
+        log = os.getenv("COOP_RELAY_TRADE_LOG")
+        if log and os.path.exists(log):
+            with open(log) as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) == 4:
+                        self.trade_decisions[int(parts[0], 16)] = (int(parts[1]), int(parts[2]), float(parts[3]))
 
     def new_code(self) -> str:
         while True:
@@ -421,6 +707,8 @@ class Relay:
             peer = Peer(reader, writer, name, slot, room, identity=identity)
             if previous:
                 if room.team_state:self.clear_team(room,6)
+                if room.meet_state:self.clear_meet(room,6)
+                self.versus_reset(room)
                 peer.token = previous.token
                 room.peers.remove(previous)
             existing = [p for p in room.peers if p.connected]
@@ -431,6 +719,8 @@ class Relay:
             for other in existing:
                 peer.send(b"P", bytes([other.slot, len(other.name.encode())]) + other.name.encode() + other.identity)
                 other.send(b"P", bytes([slot, len(name.encode())]) + name.encode() + identity)
+                if other.adventure:peer.send(b"Y",bytes([0,other.adventure]))
+            if room.scene_id and identity==room.scene_to:peer.send(b"Y",room.scene_offer)  # (back within the grace)
             await writer.drain()
 
             while True:
@@ -442,6 +732,7 @@ class Relay:
                         peer.pose=struct.unpack_from('<I4xiii',body);peer.pose_at=time.monotonic()
                     else:
                         peer.pose_at=0
+                    if room.watcher!=255:self.watch_activity(room,peer)
                     # map id, sequence, x/y/z in centimetres, yaw, motion, and two signed
                     # stick axes. Only movement axes are mirrored into the native P2 actor.
                     for other in room.peers:
@@ -459,7 +750,17 @@ class Relay:
                 elif op == b"Q" and len(body) == 4:
                     peer.send(b"q", body)
                 elif op == b"B":
-                    self.battle_action(peer,body)
+                    if room.watcher!=peer.slot:self.battle_action(peer,body)
+                elif op == b"W":
+                    self.trade_action(peer,body)
+                elif op == b"Y":
+                    self.scene_action(peer,body)
+                elif op == b"M" and len(body)==5 and body[0]<=3:
+                    self.meet_action(peer,body[0],struct.unpack_from('<I',body,1)[0])
+                elif op == b"V" and len(body)==5 and body[0]<=3:
+                    self.versus_action(peer,body[0],struct.unpack_from('<I',body,1)[0])
+                elif op == b"O" and len(body) in (1,31):
+                    self.watch_action(peer,body)
                 elif op == b"U" and len(body)==5 and body[0]<=3:
                     self.team_action(peer,body[0],struct.unpack_from('<I',body,1)[0])
                 elif op == b"L" and not body:
@@ -476,6 +777,10 @@ class Relay:
                     if target:
                         if room.battle_id:self.clear_battle(room)
                         if room.team_state:self.clear_team(room,6)
+                        if room.meet_state:self.clear_meet(room,6)
+                        self.versus_reset(room)
+                        self.trade_decide(room,2,2)
+                        self.scene_close(room,6)
                         room.removed.add(target.identity)
                         await self.reject(target.writer, "Removed by the host")
                         target.writer.close()
@@ -492,8 +797,13 @@ class Relay:
                 room = peer.room
                 if peer in room.peers:
                     if room.battle_id:self.clear_battle(room)
+                    self.trade_decide(room,2,2)
                     if room.team_state:
                         self.clear_team(room,6)
+                    if room.meet_state:self.clear_meet(room,6)
+                    self.versus_reset(room)
+                    if leaving:self.scene_close(room,6)
+                    elif room.scene_id and room.scene_from==peer.slot:asyncio.create_task(self.scene_grace(room,room.scene_id,peer.identity))
                     peer.connected = False
                     for other in list(room.peers):
                         other.send(b"L", bytes([peer.slot]))

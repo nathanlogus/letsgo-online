@@ -26,6 +26,7 @@ static struct {uint32_t round;uint64_t value[2];uint8_t have;} digests[16];
 static uint32_t digest_sent;
 static bool abort_unsent;
 static unsigned link_rtt_ms;
+static uint64_t pvp_consent; // guest: until then, a practice battle's offer is joined (coop_battle_link_pvp_consent)
 static void clear_mirror(void){
     memset(&mirror,0,sizeof mirror);mirror_seed_ready=mirror_party_sent=abort_unsent=false;mirror_chunks=0;
     memset(mirror_received,0,sizeof mirror_received);memset(mirror_published,0,sizeof mirror_published);
@@ -66,7 +67,7 @@ void coop_battle_link_reset(void){
     // A guest replay still owns its native battle; keep it so the native side sees the lost link.
     if(mirror.available && !mirror.host){if(!mirror.ended)mirror_abort(COOP_MIRROR_LINK_LOST,false);abort_unsent=false;}
     else clear_mirror();
-    chunks=0;accepted=pending=have_party=false;first=count=0;
+    chunks=0;accepted=pending=have_party=false;first=count=0;pvp_consent=0;
     pthread_mutex_unlock(&lock);
 }
 void coop_battle_link_tick(void){
@@ -94,21 +95,25 @@ bool coop_battle_link_pop(uint8_t body[255],size_t *n){
 }
 bool coop_battle_link_offer(uint64_t id,unsigned timeout,unsigned trainer,unsigned hold){
     if(!hold)hold=45000;
-    if(!coop_battle_link_enabled() || !id || timeout<1000 || timeout>60000 || ((!trainer || trainer>601) && !coop_battle_wild(trainer)) || hold<1000 || hold>45000)return false;
-    pthread_mutex_lock(&lock);bool ok=offers && view.phase==COOP_LINK_NONE;
+    if(!coop_battle_link_enabled() || !id || timeout<1000 || timeout>60000 || ((!trainer || trainer>601) && !coop_battle_wild(trainer) && !coop_battle_pvp(trainer)) || hold<1000 || hold>45000)return false;
+    // (a practice battle was asked for by both players: the "Team-up battles" option is not about it)
+    pthread_mutex_lock(&lock);bool ok=(offers || coop_battle_pvp(trainer)) && view.phase==COOP_LINK_NONE;
     if(ok){uint8_t p[15]={0};p64(p+1,id);p16(p+9,timeout);p16(p+11,trainer);p16(p+13,hold);ok=enqueue(p,sizeof p);
         if(ok){clear_mirror();view=(CoopBattleLinkView){.phase=COOP_LINK_PREPARING,.host=true,.battle=id,.timeout_ms=timeout,.trainer=trainer,
             .deadline_ns=plat_now_ns()+hold*1000000ull};chunks=0;accepted=pending=false;}}
     pthread_mutex_unlock(&lock);return ok;
 }
-bool coop_battle_link_accept(void){
-    pthread_mutex_lock(&lock);bool ok=view.phase==COOP_LINK_OFFER && have_party && count+1+2*local_party.count<=16 && plat_now_ns()<view.deadline_ns;
+// Called under the link mutex.
+static bool accept_offer(void){
+    bool ok=view.phase==COOP_LINK_OFFER && have_party && count+1+2*local_party.count<=16 && plat_now_ns()<view.deadline_ns;
     if(ok){uint8_t p[141]={1};p64(p+1,view.battle);enqueue(p,9);
         p[0]=2;p[9]=local_party.count;
         for(unsigned i=0;i<2u*local_party.count;i++){p[10]=i;memcpy(p+11,(const uint8_t *)local_party.pokemon+130*i,130);enqueue(p,sizeof p);}
         view.phase=COOP_LINK_ACTIVE;view.waiting=false;accepted=true;}
-    pthread_mutex_unlock(&lock);return ok;
+    return ok;
 }
+bool coop_battle_link_accept(void){pthread_mutex_lock(&lock);bool ok=accept_offer();pthread_mutex_unlock(&lock);return ok;}
+void coop_battle_link_pvp_consent(uint64_t until){pthread_mutex_lock(&lock);pvp_consent=until;pthread_mutex_unlock(&lock);}
 bool coop_battle_link_guest_party(CoopParty *out,uint64_t *id){
     pthread_mutex_lock(&lock);
     bool ok=view.host && accepted && peer_party.count && chunks==(1u<<(2*peer_party.count))-1 && coop_party_valid(&peer_party);
@@ -204,13 +209,15 @@ bool coop_battle_link_mirror_seed(uint64_t seed,uint8_t own,uint8_t language){
 }
 // Every native decision (move, switch, item, replacement) travels as its command word; the guest's own
 // engine executes it and the per-round digest catches a divergence.
-static bool canonical_valid(const CoopBattleMove *m,bool ai){
-    return m && m->battle && m->turn && m->sequence && (m->trainer==0 || m->trainer==2) && m->party_index<6 &&
-        (m->kind==2 || m->kind==4 || m->kind==5) && m->count<=10 && (!ai || m->trainer==2);
+// remote: the guest's trainer slot (coop_battle_remote_slot); actor 0 is the host's slot 0, actor 1 the guest's.
+static bool canonical_valid(const CoopBattleMove *m,bool ai,unsigned remote){
+    return m && m->battle && m->turn && m->sequence && (m->trainer==0 || m->trainer==remote) && m->party_index<6 &&
+        (m->kind==2 || m->kind==4 || m->kind==5) && m->count<=10 && (!ai || m->trainer==remote);
 }
 bool coop_battle_link_mirror_commit(const CoopBattleMove *m,bool ai){
-    if(!coop_battle_link_mirror_enabled() || !canonical_valid(m,ai))return false;
-    pthread_mutex_lock(&lock);unsigned actor=m->trainer/2;
+    if(!coop_battle_link_mirror_enabled())return false;
+    pthread_mutex_lock(&lock);unsigned actor=m && m->trainer!=0;
+    if(!canonical_valid(m,ai,coop_battle_remote_slot(view.trainer))){pthread_mutex_unlock(&lock);return false;}
     bool ok=view.host && view.phase==COOP_LINK_ACTIVE && mirror.available && !mirror.aborted &&
         m->battle==mirror.battle && mirror_published[actor]!=UINT32_MAX && m->sequence==mirror_published[actor]+1;
     if(ok){uint8_t p[30]={9};p64(p+1,m->battle);p32(p+9,m->turn);p32(p+13,m->sequence);
@@ -224,7 +231,7 @@ bool coop_battle_link_mirror_setup(CoopBattleMirrorSetup *out){
     if(!out)return false;pthread_mutex_lock(&lock);*out=mirror;bool ok=mirror.available;pthread_mutex_unlock(&lock);return ok;
 }
 bool coop_battle_link_mirror_take(uint64_t battle,unsigned trainer,uint32_t sequence,CoopBattleCanonical *out){
-    if(!out || !battle || (trainer!=0 && trainer!=2))return false;
+    if(!out || !battle || trainer>2)return false;
     pthread_mutex_lock(&lock);bool ok=false;
     if(!mirror.aborted)for(unsigned i=0;i<32;i++)if(mirror_commands[i].used && mirror_commands[i].command.move.battle==battle && mirror_commands[i].command.move.trainer==trainer &&
         mirror_commands[i].command.move.sequence==sequence){*out=mirror_commands[i].command;mirror_commands[i].used=false;ok=true;break;}
@@ -275,8 +282,8 @@ static void mirror_message(const uint8_t *p,size_t n,uint64_t id){
     } else if(p[0]==9 && n==30 && mirror.available && !mirror.aborted){
         CoopBattleCanonical command={.move={.battle=id,.turn=u32(p+9),.sequence=u32(p+13),.trainer=p[17],.party_index=p[18],
             .move_index=p[19],.move=u16(p+20),.target=p[22],.kind=p[24],.count=p[25],.packet=u32(p+26)},.native_ai=p[23]!=0};
-        if(p[23]>1 || !canonical_valid(&command.move,command.native_ai))return;
-        unsigned actor=command.move.trainer/2;
+        if(p[23]>1 || !canonical_valid(&command.move,command.native_ai,coop_battle_remote_slot(view.trainer)))return;
+        unsigned actor=command.move.trainer!=0;
         if(command.move.sequence<=mirror_received[actor])return;
         if(mirror_received[actor]==UINT32_MAX || command.move.sequence!=mirror_received[actor]+1){mirror_abort(COOP_MIRROR_GAP,true);return;}
         for(unsigned i=0;i<32;i++)if(!mirror_commands[i].used){
@@ -290,12 +297,15 @@ void coop_battle_link_message(const uint8_t *p,size_t n){
     uint64_t id=u64(p+1),now=plat_now_ns();if(!id)return;
     pthread_mutex_lock(&lock);
     // A finished replay may still be draining; a new offer must not wipe it.
-    if(p[0]==0 && n==15 && view.phase==COOP_LINK_NONE && !offers)decline(id);
+    bool pvp=p[0]==0 && n==15 && coop_battle_pvp(u16(p+11));
+    if(p[0]==0 && n==15 && view.phase==COOP_LINK_NONE && (pvp?now>=pvp_consent:!offers))decline(id);
     else if(p[0]==0 && n==15 && view.phase==COOP_LINK_NONE && u16(p+9)>=1000 && u16(p+9)<=60000 && u16(p+13)>=1000 && u16(p+13)<=45000 &&
         !(mirror.available && !mirror.host && !mirror.aborted)){
         // The host's hold (a trainer's held text, 10 s) started a one-way trip ago; an answer needs another to arrive.
         unsigned ms=u16(p+13),margin=2*link_rtt_ms;if(margin>ms/4)margin=ms/4;
         clear_mirror();busy_since=0;view=(CoopBattleLinkView){.phase=COOP_LINK_OFFER,.battle=id,.timeout_ms=u16(p+9),.trainer=u16(p+11),.deadline_ns=now+(uint64_t)(ms-margin)*1000000};
+        // Both players already agreed to this practice battle: join at once (no prompt), or decline without a party.
+        if(pvp){pvp_consent=0;if(!accept_offer()){decline(id);memset(&view,0,sizeof view);}}
     } else if(id==view.battle && view.phase!=COOP_LINK_NONE){
         if(p[0]==1 && n==9 && view.host && view.phase==COOP_LINK_PREPARING)accepted=true;
         else if(p[0]==2 && n==141 && view.host && accepted && p[9]>=1 && p[9]<=6 && p[10]<2*p[9] && (!chunks || peer_party.count==p[9]) && !(chunks&(1u<<p[10]))){

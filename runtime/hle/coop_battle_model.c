@@ -11,7 +11,7 @@
 
 void rt_register_fnhook(uint64_t addr, int (*fn)(Cpu *, uint64_t));
 void rt_call_original(Cpu *c, uint64_t addr);
-bool coop_battle_trial_model(bool *mirrored);
+bool coop_battle_trial_model(bool *mirrored, unsigned *remote);
 
 #define TRAINER_MODEL 0x7000a99160ull // x0 = view (slot at +0xe8)
 #define SLOT_STATUS 0x7000a7e170ull   // x0 = main module, w1 = slot, x8 = out shared_ptr (null for an NPC)
@@ -29,11 +29,12 @@ static uint64_t ptr(uint64_t p) { return guest(p) ? *(const uint64_t *)(uintptr_
 static uint64_t local_status(void) { return ptr(ptr(ptr(ptr(ptr(WORLD_GOT)) + 0x98) + 0x58) + 0x78); }
 
 // The avatar slot `slot` stands for: 1 the peer, 2 this player, 0 leave it native.
-// Host: 0 is the host, 2 the guest. Mirrored guest: 0 replays the host, 2 is the guest itself.
+// Host: 0 is the host, 2 the guest (1, the opponent, in a practice battle). Mirrored guest: 0 replays the host, the
+// guest's slot is the guest itself.
 static int avatar(unsigned slot, CoopAppearance *peer_out) {
-    bool mirrored;
-    if (!g_building || !coop_battle_trial_model(&mirrored)) return 0;
-    int who = slot == 2 ? (mirrored ? 2 : 1) : slot == 0 && mirrored ? 1 : 0;
+    bool mirrored; unsigned remote;
+    if (!g_building || !coop_battle_trial_model(&mirrored, &remote)) return 0;
+    int who = slot == remote ? (mirrored ? 2 : 1) : slot == 0 && mirrored ? 1 : 0;
     CoopRemote peer;
     if (who == 1 && getenv("LARECOMP_COOP_WILD_TEST_ALLY")) who = 2; // QA: offline, the local avatar
     if (who == 1 && (!coop_net_remote(&peer) || !peer.appearance.valid)) return 0;
@@ -42,8 +43,8 @@ static int avatar(unsigned slot, CoopAppearance *peer_out) {
 }
 
 static int model_hook(Cpu *c, uint64_t addr) {
-    bool mirrored;
-    if (!coop_battle_trial_model(&mirrored)) return 0;
+    bool mirrored; unsigned remote;
+    if (!coop_battle_trial_model(&mirrored, &remote)) return 0;
     g_building = true;
     rt_call_original(c, addr);
     g_building = false;

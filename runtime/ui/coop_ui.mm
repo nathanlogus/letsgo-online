@@ -8,8 +8,11 @@
 extern "C" {
 #include "../coop_net.h"
 #include "../coop_invite.h"
+#include "../coop_meet.h"
 #include "../coop_battle_link.h"
 #include "../coop_battle_names.h"
+#include "../coop_trade.h"
+#include "../coop_versus.h"
 uint64_t plat_now_ns(void);
 bool coop_battle_native_ui(void);
 bool coop_battle_partner_finishing(void);
@@ -109,54 +112,82 @@ void coop_battle_ui_draw(float scale) {
     ImGui::End();
 }
 
-static std::atomic<bool> g_invite_open, g_invite_hovered;
-bool coop_invite_ui_captures(void) { return g_invite_open; }
+static std::atomic<bool> g_invite_open[3], g_invite_hovered;
+bool coop_invite_ui_captures(void) { return g_invite_open[0] || g_invite_open[1] || g_invite_open[2]; }
+// The practice battle request (V, runtime/coop_versus.c) and the spectator's panel: runtime/ui/coop_versus_ui.mm.
+static bool versus_action(uint8_t command) { return coop_versus_action(command, coop_net_local_slot()); }
+void coop_versus_friends_ui(void);
+bool coop_watch_ui_draw(float scale, bool allowed);
 bool coop_invite_ui_hovered(void) { return g_invite_hovered; }
 
-void coop_invite_ui_draw(float scale, bool allowed) {
-    CoopTeamUp team={};coop_net_teamup(&team);CoopRemote peer={};
+// One pop-up for the invitations: k 0 the tag-up (U), 1 the meet-up request (M), 2 a practice battle (V). Returns true
+// when it drew.
+static bool invite_popup(float scale, bool allowed, int k) {
+    CoopTeamUp team={};if(k==2)coop_versus_request(&team);else if(k)coop_net_meetup(&team);else coop_net_teamup(&team);CoopRemote peer={};
+    bool (*action)(uint8_t)=k==2?versus_action:k?coop_net_meetup_action:coop_net_teamup_action;
     const char *name=coop_net_remote(&peer)?peer.name:"Your friend";
     uint8_t local=coop_net_local_slot();uint64_t now=plat_now_ns();
-    static uint32_t answered,sent;static uint64_t toast_until,shown_at;static int result;
-    int mode=coop_invite_mode(&team,local,now,answered);
-    if(mode==2)sent=team.id;
-    else if(sent){int r=coop_invite_result(&team,local,sent);if(r>=0){sent=0;result=r;toast_until=r?now+4000000000ull:0;}}
-    bool incoming=mode==1 && allowed,waiting=mode==2 && allowed,toast=now<toast_until && allowed;
-    if(g_invite_open && !incoming){input_quarantine_pad();input_reset();}
-    if(!g_invite_open && incoming){shown_at=now;fprintf(stderr,"[coop-ui] tag-up invitation pop-up shown\n");}
-    g_invite_open=incoming;g_invite_hovered=false;
-    if(!incoming && !waiting && !toast)return;
+    static uint32_t answered[3],sent[3],focused[3];static uint64_t toast_until[3],shown_at[3];static int result[3];
+    int mode=coop_invite_mode(&team,local,now,answered[k]);
+    if(mode==2)sent[k]=team.id;
+    else if(sent[k]){int r=coop_invite_result(&team,local,sent[k]);if(r>=0){sent[k]=0;result[k]=r;toast_until[k]=r?now+4000000000ull:0;}}
+    bool incoming=mode==1 && allowed,waiting=mode==2 && allowed,toast=now<toast_until[k] && allowed;
+    if(g_invite_open[k] && !incoming){input_quarantine_pad();input_reset();}
+    if(!g_invite_open[k] && incoming){shown_at[k]=now;fprintf(stderr,"[coop-ui] %s pop-up shown\n",k==2?"practice battle request":k?"meet-up request":"tag-up invitation");}
+    g_invite_open[k]=incoming;if(!k)g_invite_hovered=false;
+    if(!incoming && !waiting && !toast)return false;
     ImGuiIO &io=ImGui::GetIO();
     ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x*.5f,24*scale),ImGuiCond_Always,ImVec2(.5f,0));
     if(incoming)ImGui::SetNextWindowSize(ImVec2(510*scale,0),ImGuiCond_Always);
     ImGuiWindowFlags flags=ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_AlwaysAutoResize;
     if(!incoming)flags|=ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNav|(waiting?0:ImGuiWindowFlags_NoInputs);
-    static uint32_t focused;bool new_prompt=incoming && focused!=team.id;
-    if(new_prompt){ImGui::SetNavCursorVisible(true);ImGui::SetNextWindowFocus();focused=team.id;}
-    if(!incoming)focused=0;
-    ImGui::Begin("Tag-up invitation",nullptr,flags);
+    bool new_prompt=incoming && focused[k]!=team.id;
+    if(new_prompt){ImGui::SetNavCursorVisible(true);ImGui::SetNextWindowFocus();focused[k]=team.id;}
+    if(!incoming)focused[k]=0;
+    ImGui::Begin(k==2?"Practice battle request":k?"Meet-up request":"Tag-up invitation",nullptr,flags);
     unsigned seconds=team.expires_ns>now?(unsigned)((team.expires_ns-now+999999999)/1000000000):0;
     if(incoming){
         // An A pressed for the game just as the pop-up appears must not answer it.
-        bool armed=now-shown_at>400000000ull;
+        bool armed=now-shown_at[k]>400000000ull;
         bool back=ImGui::IsKeyPressed(ImGuiKey_Escape,false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight,false);
-        ImGui::TextWrapped("%s wants to tag up!",name);
-        ImGui::TextWrapped("Travel together; progress stays individual.");ImGui::TextDisabled("Expires in %us",seconds);
-        if(team.reason==4)ImGui::TextWrapped("Move closer to %s, then accept again.",name);
+        ImGui::TextWrapped(k==2?"%s wants a practice battle!":k?"%s wants to meet up!":"%s wants to tag up!",name);
+        ImGui::TextWrapped(k==2?"Your own Pokemon battle each other. Nothing is saved: no EXP, money or items, and HP and PP come back after.":
+            k?"They will fly to your town, or the nearest town they have visited.":"Travel together; progress stays individual.");
+        ImGui::TextDisabled("Expires in %us",seconds);
+        if(team.reason==4)ImGui::TextWrapped(k?"%s is busy, or you are. Accept again on the overworld.":"Move closer to %s, then accept again.",name);
         if(new_prompt)ImGui::SetKeyboardFocusHere();
         bool accept=ui_button("Accept");ImGui::SameLine();bool decline=ui_button("Decline") || back;
-        if(armed && (accept || decline) && coop_net_teamup_action(accept?1:2)){
-            answered=team.id;g_invite_open=false;input_quarantine_pad();input_reset();
+        if(armed && (accept || decline) && action(accept?1:2)){
+            answered[k]=team.id;g_invite_open[k]=false;input_quarantine_pad();input_reset();
         }
     } else if(waiting){
         ImGui::Text("Waiting for %s... %us",name,seconds);ImGui::SameLine();
-        if(ui_button("Cancel"))coop_net_teamup_action(3);
-        g_invite_hovered=ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+        if(ui_button("Cancel"))action(3);
+        g_invite_hovered=g_invite_hovered || ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
     } else {
-        const char *messages[]={"","%s accepted. Tagged up!","%s declined the invitation.","%s did not answer in time.","%s disconnected."};
-        ImGui::Text(messages[result],name);
+        const char *messages[3][5]={{"","%s accepted. Tagged up!","%s declined the invitation.","%s did not answer in time.","%s disconnected."},
+            {"","%s accepted. Flying to meet them...","%s declined the meet-up.","%s did not answer in time.","%s disconnected."},
+            {"","%s accepted. The practice battle starts...","%s declined the practice battle.","%s did not answer in time.","%s disconnected."}};
+        ImGui::Text(messages[k][result[k]],name);
     }
     ImGui::End();
+    return true;
+}
+
+void coop_invite_ui_draw(float scale, bool allowed) {
+    bool drawn=invite_popup(scale,allowed,0);
+    // A field script (a trainer's text, a sign) keeps the meet-up request waiting: the relay only sees menus and battles.
+    drawn=invite_popup(scale,allowed && !drawn && !coop_meet_script_busy(),1) || drawn;
+    drawn=invite_popup(scale,allowed && !drawn,2) || drawn;
+    drawn=coop_watch_ui_draw(scale,allowed && !drawn) || drawn;
+    char text[160];
+    if(!drawn && allowed && coop_meet_toast(text,sizeof text)){
+        ImGuiIO &io=ImGui::GetIO();
+        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x*.5f,24*scale),ImGuiCond_Always,ImVec2(.5f,0));
+        ImGui::Begin("Meet-up",nullptr,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoCollapse|
+                     ImGuiWindowFlags_AlwaysAutoResize|ImGuiWindowFlags_NoInputs|ImGuiWindowFlags_NoFocusOnAppearing|ImGuiWindowFlags_NoNav);
+        ImGui::TextUnformatted(text);ImGui::End();
+    }
 }
 
 static const char *activity_name(CoopActivity a) {
@@ -241,8 +272,38 @@ bool coop_ui_page(bool launcher) {
                     if(ui_button("Invite to tag up"))coop_net_teamup_action(0);
                     ImGui::EndDisabled();
                 }
+                // Trades (runtime/ui/coop_trade_ui.mm shows the trade window once Friends is closed).
+                CoopTradeView trade;coop_trade_view(&trade);
+                if(trade.phase==COOP_TRADE_ASKING){if(ui_button("Cancel trade request"))coop_trade_cancel();}
+                else {
+                    ImGui::BeginDisabled(trade.phase!=COOP_TRADE_IDLE || !(team.state==2 || coop_net_social_near(3000)));
+                    if(ui_button("Trade Pokemon"))coop_trade_request(peer.identity,peer.name);
+                    ImGui::EndDisabled();
+                }
+                ImGui::SameLine();ImGui::TextDisabled("Close Friends to choose your Pokemon.");
+                coop_versus_friends_ui();
+                // Meet-up: the requester flies to the partner's town (runtime/hle/coop_meet.c).
+                CoopTeamUp meet={};coop_net_meetup(&meet);CoopMeetPlan plan;coop_meet_view(&plan);
+                if(meet.state==1 && meet.from_slot!=session.local_slot) {
+                    ImGui::BeginDisabled(coop_meet_script_busy());if(ui_button("Accept meet-up"))coop_net_meetup_action(1);ImGui::EndDisabled();
+                    ImGui::SameLine();if(ui_button("Decline meet-up"))coop_net_meetup_action(2);
+                } else if(meet.state==1) {
+                    if(ui_button("Cancel meet-up"))coop_net_meetup_action(3);
+                } else {
+                    ImGui::BeginDisabled(plan.reason!=COOP_MEET_OK || coop_meet_script_busy());
+                    if(ui_button("Meet up"))coop_net_meetup_action(0);
+                    ImGui::EndDisabled();ImGui::SameLine();
+                    if(plan.reason)ImGui::TextDisabled("%s",coop_meet_reason(plan.reason));
+                    else ImGui::TextDisabled("Fly to %s%s",coop_meet_town[plan.town].name,plan.exact?"":" (nearest town you visited)");
+                }
+                if(!meet.state && meet.reason>=3 && meet.reason<=7) {
+                    const char *why[]={"Another request is active","Both trainers must be on the overworld","Meet-up expired",
+                        "Friend disconnected","Request is no longer valid"};
+                    ImGui::TextWrapped("%s",why[meet.reason-3]);
+                }
                 CoopOptions prefs;coop_net_options(&prefs);
                 if(ImGui::Checkbox("Team-up battles",&prefs.teamup_battles))coop_net_preferences(&prefs);
+                coop_scene_ui_settings(true);
                 ImGui::TextWrapped("Tagged up, a trainer who challenges the host asks the partner to join.");
                 if(team.reason) {
                     const char *reasons[]={"","Invitation declined","Tag-up ended","Another invitation is active",
@@ -305,5 +366,6 @@ bool coop_ui_page(bool launcher) {
     }
     if (ui_button(show_code ? "Hide saved codes" : "Show saved codes")) show_code = !show_code;
     ImGui::TextWrapped("Host and guest need the same game build and online protocol. Open Friends in-game with F8 or from the pause overlay.");
+    coop_scene_ui_settings(false);
     return false;
 }

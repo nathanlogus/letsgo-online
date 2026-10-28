@@ -2,6 +2,9 @@
 // The worker never touches game memory. Game hooks publish a copied pose; rendering reads a copied peer pose.
 #include "coop_net.h"
 #include "coop_battle_link.h"
+#include "coop_trade.h"
+#include "coop_scene.h"
+#include "coop_versus.h"
 
 #include <math.h>
 #include <pthread.h>
@@ -69,6 +72,9 @@ static uint8_t g_local_emote;
 static CoopTeamUp g_team;
 static uint8_t g_team_command=255;
 static uint32_t g_team_command_id;
+static CoopTeamUp g_meet;  // meet-up request (M): the states and reasons of g_team; 2 is the accepted event
+static uint8_t g_meet_command=255;
+static uint32_t g_meet_command_id;
 static uint64_t g_local_emote_at;
 static bool g_has_pending_emote;
 static char g_room_code[17];
@@ -97,6 +103,7 @@ static void save_options(void) { // g_lock held; no save-game data is read or wr
     fprintf(f, "\n");
     for (unsigned i = 0; i < 4; i++) fprintf(f, "room%u=%s\n", i, g_options.saved_rooms[i]);
     fprintf(f, "teamup_battles=%d\n", g_options.teamup_battles);
+    fprintf(f, "adventure=%s\nscene_offer=%s\n", g_options.shared_adventure ? "shared" : "social", g_options.scene_nearby ? "nearby" : "everyone");
     fclose(f);
 }
 static void load_options(void) { // g_lock held
@@ -118,6 +125,8 @@ static void load_options(void) { // g_lock held
             if (strlen(line) == 5 && !strncmp(line, "room", 4) && line[4] >= '0' && line[4] <= '3')
                 snprintf(g_options.saved_rooms[line[4]-'0'], 17, "%s", v);
             if (!strcmp(line, "teamup_battles")) g_options.teamup_battles = atoi(v) != 0;
+            if (!strcmp(line, "adventure")) g_options.shared_adventure = !strcmp(v, "shared");
+            if (!strcmp(line, "scene_offer")) g_options.scene_nearby = !strcmp(v, "nearby");
         }
         fclose(f);
     }
@@ -132,6 +141,7 @@ static void load_options(void) { // g_lock held
         save_options();
     }
     coop_battle_link_set_offers(g_options.teamup_battles);
+    coop_scene_set_mode(g_options.shared_adventure, g_options.scene_nearby);
 }
 
 void coop_net_options(CoopOptions *out) {
@@ -146,6 +156,8 @@ void coop_net_preferences(const CoopOptions *options) {
     for(char *p=g_options.server;*p;p++) if((unsigned char)*p<32) *p=' ';
     for(char *p=g_options.name;*p;p++) if((unsigned char)*p<32) *p=' ';
     g_options.teamup_battles=options->teamup_battles; coop_battle_link_set_offers(options->teamup_battles);
+    g_options.shared_adventure=options->shared_adventure; g_options.scene_nearby=options->scene_nearby;
+    coop_scene_set_mode(options->shared_adventure, options->scene_nearby);
     save_options(); pthread_mutex_unlock(&g_lock);
 }
 void coop_net_session(CoopSession *out) {
@@ -163,8 +175,11 @@ void coop_net_connect(const CoopOptions *options) {
     pthread_mutex_lock(&g_lock); load_options();
     char saved_rooms[4][17]; memcpy(saved_rooms, g_options.saved_rooms, sizeof saved_rooms);
     bool teamup = g_options.teamup_battles;  // (changed through coop_net_preferences only)
+    bool shared = g_options.shared_adventure, nearby = g_options.scene_nearby;
     g_options = *options;
     memcpy(g_options.saved_rooms, saved_rooms, sizeof saved_rooms); g_options.teamup_battles = teamup;
+    g_options.shared_adventure = shared, g_options.scene_nearby = nearby;
+    coop_scene_consent(false);  // (a new session asks again)
     g_options.server[255] = g_options.name[24] = g_options.room[16] = 0;
     for (char *p = g_options.room; *p; p++) if (*p >= 'a' && *p <= 'z') *p -= 32;
     for (char *p = g_options.server; *p; p++) if ((unsigned char)*p < 32) *p = ' ';
@@ -175,11 +190,12 @@ void coop_net_connect(const CoopOptions *options) {
 }
 void coop_net_leave(void) {
     coop_battle_link_reset();
+    coop_scene_consent(false);
     pthread_mutex_lock(&g_lock);
     g_request = false; g_generation++; g_configured = false;
     g_session.connection = COOP_OFFLINE; g_session.detail[0] = 0;
     memset(&g_remote, 0, sizeof g_remote); g_avatar_head.visible = false;
-    memset(&g_team,0,sizeof g_team);g_team_command=255;
+    memset(&g_team,0,sizeof g_team);g_team_command=255;memset(&g_meet,0,sizeof g_meet);g_meet_command=255;
     pthread_cond_signal(&g_wake); pthread_mutex_unlock(&g_lock);
 }
 void coop_net_lock(bool locked) { pthread_mutex_lock(&g_lock); if (g_local_slot == g_session.host_slot && g_session.connection == COOP_CONNECTED) g_control = locked ? 1 : 0; pthread_mutex_unlock(&g_lock); }
@@ -335,9 +351,12 @@ static void set_socket(CoopSocket s) {
 
 static void clear_remote(void) {
     coop_battle_link_reset();
+    coop_trade_link_lost();
+    coop_scene_link_lost();
+    coop_versus_link_lost();
     pthread_mutex_lock(&g_lock);
     memset(&g_remote, 0, sizeof g_remote);
-    memset(&g_team,0,sizeof g_team);g_team_command=255;
+    memset(&g_team,0,sizeof g_team);g_team_command=255;memset(&g_meet,0,sizeof g_meet);g_meet_command=255;
     g_stats.snapshot_interval_ms = 0;
     g_stats.snapshots_received = 0;
     g_join_ready_since = 0;
@@ -348,12 +367,22 @@ static void clear_remote(void) {
 static void process_message(const uint8_t *p, size_t n) {
     if (!n) return;
     if(p[0]=='B'){coop_battle_link_message(p+1,n-1);return;}
+    if(p[0]=='W'){coop_trade_message(p+1,n-1);return;}
+    if(p[0]=='Y'){coop_scene_message(p+1,n-1);return;}
+    if(p[0]=='V' || p[0]=='O'){coop_versus_message(p,n);return;}
     if(p[0]=='U' && n==12 && p[1]<=2 && (p[2]<=1 || p[2]==255) && p[3]<=7) {
         pthread_mutex_lock(&g_lock);
         g_team=(CoopTeamUp){.state=p[1],.from_slot=p[2],.reason=p[3],.id=get_u32(p+4),
             .expires_ns=p[1]==1 ? plat_now_ns()+(uint64_t)get_u32(p+8)*1000000ull : 0};
         pthread_mutex_unlock(&g_lock);
         LOG("[coop] team-up state %u, reason %u\n",p[1],p[3]);return;
+    }
+    if(p[0]=='M' && n==12 && p[1]<=2 && (p[2]<=1 || p[2]==255) && p[3]<=7) {
+        pthread_mutex_lock(&g_lock);
+        g_meet=(CoopTeamUp){.state=p[1],.from_slot=p[2],.reason=p[3],.id=get_u32(p+4),
+            .expires_ns=p[1]==1 ? plat_now_ns()+(uint64_t)get_u32(p+8)*1000000ull : 0};
+        pthread_mutex_unlock(&g_lock);
+        LOG("[coop] meet-up state %u, from %u, reason %u\n",p[1],p[2],p[3]);return;
     }
     if (p[0] == 'q' && n == 5) {
         // The echoed 32-bit monotonic millisecond counter also works across its wrap.
@@ -503,7 +532,7 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
     uint8_t hello[128];
     size_t n = 0;
     hello[n++] = resume ? 'R' : create ? 'C' : 'J';
-    hello[n++] = 10;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches; 8: turn digest skips unset battle Pokemon bytes; 9: the offer carries the host hold; 10: wild team-ups
+    hello[n++] = 11;  // 5: social sessions and team-up invitations; 6: team-up trainer battles (B) in normal play; 7: party switches; 8: turn digest skips unset battle Pokemon bytes; 9: the offer carries the host hold; 10: wild team-ups; 11: meet up (M), trades (W), practice battles and spectating (V, O, B0 0x4000, slot-1 B9/B6), story scenes (Y)
     put_u64(hello + n, g_program_id); n += 8;
     put_u64(hello + n, build_id); n += 8;
     if (!create) {
@@ -531,6 +560,7 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
         uint8_t emote = 0;
         bool send_emote = false;
         uint8_t team_command=255; uint32_t team_id=0;
+        uint8_t meet_command=255; uint32_t meet_id=0;
         CoopActivity activity;
         int control;
         pthread_mutex_lock(&g_lock);
@@ -545,6 +575,9 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
         // Communicate cannot race the relay's last busy-state snapshot.
         if(g_team_command<=3 && (g_team_command>=2 || now>=next_snapshot)) {
             team_command=g_team_command;team_id=g_team_command_id;g_team_command=255;
+        }
+        if(g_meet_command<=3 && (g_meet_command>=2 || now>=next_snapshot)) {
+            meet_command=g_meet_command;meet_id=g_meet_command_id;g_meet_command=255;
         }
         pthread_mutex_unlock(&g_lock);
         if (send_appearance) {
@@ -577,10 +610,19 @@ static void run_connection(const CoopOptions *options, uint64_t build_id, unsign
             uint8_t body[5]={team_command};put_u32(body+1,team_id);
             if(!send_frame(s,'U',body,sizeof body))break;
         }
+        if (meet_command<=3) {
+            uint8_t body[5]={meet_command};put_u32(body+1,meet_id);
+            if(!send_frame(s,'M',body,sizeof body))break;
+        }
         coop_battle_link_guest_ready(activity == COOP_OVERWORLD);
         coop_battle_link_tick();
         { uint8_t body[255];size_t size;bool failed=false;
           while(coop_battle_link_pop(body,&size))if(!send_frame(s,'B',body,size)){failed=true;break;}
+          coop_trade_tick();
+          while(!failed && coop_trade_pop(body,&size))if(!send_frame(s,'W',body,size)){failed=true;break;}
+          coop_scene_tick();
+          while(!failed && coop_scene_pop(body,&size))if(!send_frame(s,'Y',body,size)){failed=true;break;}
+          uint8_t op;while(!failed && coop_versus_pop(&op,body,&size))if(!send_frame(s,op,body,size)){failed=true;break;}
           if(failed)break;
         }
         if (control >= 0) { uint8_t value = control == 2 ? (uint8_t)(1 - g_local_slot) : control; if (!send_frame(s, control == 2 ? 'D' : 'K', &value, 1)) break; }
@@ -705,7 +747,7 @@ void coop_net_start(void) {
     g_appearance_pending = false;
     g_join_ready_since = 0;
     g_has_pending_emote = false;
-    memset(&g_team,0,sizeof g_team);g_team_command=255;
+    memset(&g_team,0,sizeof g_team);g_team_command=255;memset(&g_meet,0,sizeof g_meet);g_meet_command=255;
     g_local_emote = 0; g_local_emote_at = 0;
     pthread_mutex_unlock(&g_lock);
     if (pthread_create(&g_thread, NULL, coop_worker, NULL)) {
@@ -745,7 +787,7 @@ void coop_net_reset(void) {
     memset(&g_local, 0, sizeof g_local);
     g_local_emote = 0; g_local_emote_at = 0;
     g_local_slot = 0xff;
-    memset(&g_team,0,sizeof g_team);g_team_command=255;
+    memset(&g_team,0,sizeof g_team);g_team_command=255;memset(&g_meet,0,sizeof g_meet);g_meet_command=255;
     memset(&g_remote, 0, sizeof g_remote);
     g_stats = (CoopNetStats){.relay_rtt_ms = -1};
     memset(&g_appearance, 0, sizeof g_appearance);
@@ -884,6 +926,20 @@ bool coop_net_teamup_action(uint8_t command) {
          g_team.state==1 && g_team.from_slot!=g_local_slot :
          g_team.state==2 || (g_team.state==1 && g_team.from_slot==g_local_slot));
     if(ok){g_team_command=command;g_team_command_id=g_team.id;g_team.reason=0;}
+    pthread_mutex_unlock(&g_lock);return ok;
+}
+
+void coop_net_meetup(CoopTeamUp *out) {
+    if(!out)return;
+    pthread_mutex_lock(&g_lock);*out=g_meet;pthread_mutex_unlock(&g_lock);
+}
+bool coop_net_meetup_action(uint8_t command) {
+    pthread_mutex_lock(&g_lock);
+    // Unlike a tag, an accepted meet-up (state 2) is already over: a new request may follow it.
+    bool ok=g_session.connection==COOP_CONNECTED && g_remote.present && command<=3 &&
+        (command==0 ? g_meet.state!=1 : command==1 || command==2 ?
+         g_meet.state==1 && g_meet.from_slot!=g_local_slot : g_meet.state==1 && g_meet.from_slot==g_local_slot);
+    if(ok){g_meet_command=command;g_meet_command_id=g_meet.id;g_meet.reason=0;}
     pthread_mutex_unlock(&g_lock);return ok;
 }
 

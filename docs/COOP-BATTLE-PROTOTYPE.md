@@ -433,3 +433,94 @@ experiments (one game, `run-teamup-wild.sh ally`, QA ally `LARECOMP_COOP_WILD_TE
 crash), `e7` (rule 3 stuck: no NPC controller), `e12` (first working 2 vs 1 with an ally), `catch-nav1` (the Bag and
 a ball in the 2 vs 1), `learn3` / `learn4` / `learn5` (a level-up with the native party, a shared clone, a clone per
 pool).
+
+## Practice battles (PvP) and spectating (28 October 2026)
+
+User rules: [COOP-ONLINE.md](COOP-ONLINE.md#practice-battles-and-spectating). Code: `runtime/coop_versus.{h,c}` (the `V`
+request and the `O` watch state), `runtime/coop_battle_link.c` (`COOP_BATTLE_PVP`, `coop_battle_link_pvp_consent`,
+the guest's trainer slot in `canonical_valid`), `runtime/hle/coop_battle.c` (`pvp_battle`, `remote_slot`,
+`maybe_trainer`, `gives_exp_hook`, `dex_seen_hook`, `watch_publish`), `runtime/hle/coop_battle_model.c`,
+`runtime/ui/coop_versus_ui.mm`, `server/coop_relay.py` (`versus_action`, `watch_action`). Static work only so far: no
+game was run (the live checks are in `tests/coop-final-checklist.md`).
+
+### The battle setup
+
+- **Not the game's link battle.** Let's Go's own PvP goes through the Communicate app and Nintendo's local or online
+  service: its battle uses link controllers (type 2, `+0x1fb`; handler table `0x70015d0c68`, link action select
+  `0x7000a57be0`) fed by the game's communication layer, which the recomp does not provide. Emulating that layer
+  statically was out of reach.
+- **The trainer factory, single battle.** The host starts `0x700028bb60` with `{0, 0, 26}` (the QA path of the
+  preflight, verified with trainer 26 then): trainer 0 is the host, trainer 1 an ordinary NPC trainer whose party
+  `trainer_party_hook` replaces with the guest's whole party (setup `+0xb8`; a team-up's ally is `+0xc0`). Trainer 1's
+  NPC controller takes the guest's decisions exactly like the team-up ally's: the action select `0x7000a577f0` and the
+  switch-in `0x7000a58000` wait for B4 under the same deadline, and the NPC decides a missed turn. Every slot-2
+  constant of the team-up became `remote_slot()` (1 in a practice battle): the hooks' trainer checks, `ally_choices`'
+  opponents (the other side's trainers) and partner (`self ^ 2`, when present), the NPC target normalization (foes at
+  positions 0/2), the published B9 slot, `take_held`. The B9 actor index is now `trainer != 0` (team-ups unchanged).
+- **The guest** replays it like a trainer team-up (`maybe_trainer`: the same factory call, the host's party clone as
+  trainer 0, its own party as trainer 1, the B8 seed) and lends its battle UI to trainer 1's controller. Both engines
+  run the battle from trainer 0's side: the guest's view is the host's (its own Pokemon are "the opposing" ones).
+  Making the guest's client trainer 1 (setup `+0x66`, the local slot) would be the native way to flip its view, but
+  changes the controller set on one client only; not tried.
+- **The guest's menu targets.** In a single battle the lent menu may name a position relative to the host's side.
+  `native_menu` sends a move whose legal targets are one position to that position (`move_targets` gives one bit or
+  "any" in a single battle).
+- **The request.** `V` reuses the meet-up's states. On accept both clients get state 2 once: the host's
+  `coop_versus_take_start` offers B0 with trainer `0x4000` (no tag, no distance, "Team-up battles" off or on), the
+  guest's `coop_battle_link_pvp_consent` makes its link join that offer at once (B1 + B2, no prompt) within 20 s; the
+  relay accepts that B0 only within 20 s of the accept.
+- **Level scaling:** none. The game's link-battle rules are unreachable (above); the levels are the players'.
+- **Fixed on the way:** `trainer_started` stayed set after a factory-started battle, so a guest could replay only one
+  trainer team-up per boot (`maybe_trainer` returned at once). It is now cleared after a team-up, its replay or a
+  practice battle; the QA factory battle stays one-shot.
+
+### Nothing is saved
+
+On both clients, from the start of the battle (`pvp_battle`) to the overworld:
+
+| What | How | Where |
+| --- | --- | --- |
+| HP, PP, status, held items, friendship | Trainer 0's party is a clone on the host too (`battle_party_hook`, from the B7 party); the after-battle process `0x7000319bc0` goes from state 0 straight to its end (4), so nothing is copied back; the Spirit setter `0x7000737490` is refused for the saved party's buffers | `mirror_after_battle_hook`, `mirror_spirit_hook` |
+| EXP, level-ups, evolutions, move learning | The battle's "gives EXP" check `0x70009d8ae0` answers 0 (natively 0 when setup kind > 1); its callers are the knock-out EXP step `0x70009f2970` and `0x70009f6230`, which return at once; the guest's `partner_exp` is skipped | `gives_exp_hook`, `exp_step_hook` |
+| Money | The prize `0x70009d08d0` is 0; Pay Day and the prize are added in the skipped after-battle state 0 | `prize_hook` |
+| Items | Both Bags refused (`0x70009e3e50` called from `0x7000a5a918`); bag add `0x70001c8e20` and remove `0x70001c9490` skipped | `bag_check_hook`, `item_hook`, `item_use_hook` |
+| Pokedex | "Seen" registration `0x70009d8ed0` (skips setup kind > 1 natively) skipped | `dex_seen_hook` |
+| Records | The battle code's record calls found (a BL scan of main) all go through `RECORD_INC` `0x70001cac40` (callers `0x70009dad94`, `0x700028d57c`, `0x700031d010`, `0x700031f89c`), refused by `coop_actor.c` while `coop_battle_replay_in_battle()` holds, now also for a practice battle | `coop_battle_replay_in_battle` |
+| Trainer flag | The factory battle runs no trainer script | `maybe_trainer` |
+
+Expected savediff for both players (`party-fixtures savediff`, in-game save before and after): only PlayerGeoLocation,
+PlayTime and Coordinates differ.
+
+### Spectating
+
+With two players, a battle one can watch is the other's own battle: a team-up or a practice battle has both in it.
+A mirrored replay as a third view was not built: it would need every battle the other player can start (story
+setups, double battles, Let's Go's catch mode) rebuilt on the watcher, it would put the watcher's own world into a
+battle, and "stop watching" would need a way out of a native battle that has none (a trainer battle can't be fled).
+So the watcher gets a read-only summary instead:
+
+- The battler's `human_select_hook`, at the start (state 0) of each of its own action menus, reads the active Pokemon
+  of trainer slots 0-3 from the battle pool (`0x70009e14c0`: species `+0x78`, max HP `+0x7c`, HP `+0x7e`, level
+  `+0x86`) and sends it (`O` 2) only while the other player watches. It reads; it changes nothing.
+- The watcher's panel (`coop_watch_ui_draw`) takes no input; Friends starts and stops the watch.
+- The relay owns the watch: it starts only when the other player is in a battle (activity 3), the watcher is not, and
+  no battle link runs; it ends on stop, on the battler's return to the overworld (activity 1), on the watcher's own
+  battle and on a disconnect. A summary goes only from the battler to the watcher, and every `B` message of the
+  watcher is dropped (trust boundary: a spectator can't answer, accept or command anything).
+
+### Wire changes (protocol 11)
+
+- New `V` (client 5 bytes, server 12 bytes, as `M`) and `O` (client 1 or 31 bytes, server 4 or 31 bytes). A protocol
+  10 relay disconnects a client that sends either.
+- B0 trainer `0x4000` (a practice battle) and B9 / B6 counts for trainer slot 1: a protocol 10 client or relay
+  refuses them.
+
+### Verification (no game run)
+
+`tests/scripts/run-battle-link-tests.sh` (all pass): `tests/tools/pvp-test.c` (request states, take-start once within
+20 s, the guest's agreed join and its refusals, host slot-1 publishing with slot 2 refused, the guest's slot-1 replay
+and finished end, summaries only while watched, the read-only view, link loss) and `tests/tools/pvp-relay-test.py`
+(request lifecycle with refusals, decline, cancel and expiry, the 0x4000 offer gated on the accept and used once, slot 1
+commands with the offered-choice check, slot 2 refused, watch start/refusal/stop/battle over/own battle/disconnect,
+summaries to the watcher only, the watcher's `B` dropped). The meet-up, tag-up, trade and admin relay tests still pass.
+The build is `tests/build-pvp/LetsGoRecomp.exe`.

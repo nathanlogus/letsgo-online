@@ -112,6 +112,7 @@ static int field_hook(Cpu *c, uint64_t addr) {
     g_scene = false;
     rt_call_original(c, addr);
     coop_actor_field(c); // Local emote anchor also updates while playing solo.
+    { extern void coop_meet_field(Cpu *c); coop_meet_field(c); }
     return 1;
 }
 
@@ -295,6 +296,7 @@ void fps60_configure(void) {
     if (rt_addr(FIELD_UPDATE) && rt_addr(0x7000245750ull)) {
         rt_register_fnhook(MOVE_FN, move_hook);
         coop_actor_configure();
+        { extern void coop_meet_configure(void); coop_meet_configure(); }
     }
     if (g_on || g_stats || getenv("LARECOMP_INPUT_LOOP") || g_settings.daynight || getenv("LARECOMP_HOUR")) hook_all();  // (daynight: battles end the tint)
     // the world's update always: g_played tells the title screen (game_title) whatever the frame rate

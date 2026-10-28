@@ -34,6 +34,14 @@ bool coop_battle_link_offer(uint64_t id, unsigned timeout_ms, unsigned trainer, 
 // The offer's trainer for a wild battle: COOP_BATTLE_WILD | the wild Pokemon's species (protocol 10).
 #define COOP_BATTLE_WILD 0x8000u
 static inline bool coop_battle_wild(unsigned trainer){return trainer>COOP_BATTLE_WILD && trainer<=COOP_BATTLE_WILD+809;}
+// A practice battle (PvP): the guest's party is the opponent's (trainer slot 1), and neither save keeps anything from it.
+// Offered only after both players agreed through a V request (runtime/coop_versus.c); the guest then joins at once.
+#define COOP_BATTLE_PVP 0x4000u
+static inline bool coop_battle_pvp(unsigned trainer){return trainer==COOP_BATTLE_PVP;}
+// The guest's native trainer slot: 2 (the host's ally) in a team-up, 1 (the opponent) in a practice battle.
+static inline unsigned coop_battle_remote_slot(unsigned trainer){return coop_battle_pvp(trainer)?1:2;}
+// Guest: the practice battle both players agreed to; its offer, until `until_ns`, is accepted without a prompt.
+void coop_battle_link_pvp_consent(uint64_t until_ns);
 bool coop_battle_link_accept(void);
 bool coop_battle_link_lead(uint8_t lead[COOP_PB7_BYTES], uint64_t *id);
 // Host: the guest's whole party, once every B2 chunk is in.

@@ -91,13 +91,25 @@ add:
 }
 
 void rt_register_fnhook(uint64_t addr, FnHook fn) { reg(addr, fn, false); }
+static struct { uint64_t addr; FnHook wrapper; FnHook *previous; } chains[NREG];
+static int nchains;
 void rt_register_fnhook_chain(uint64_t addr, FnHook wrapper, FnHook *previous) {
     if(!wrapper || !previous)return;
     FnHook prior=NULL;
-    for(int i=0;i<nregs;i++)if(regs[i].addr==addr && !regs[i].user) {
-        if(regs[i].fn==wrapper)return;
-        prior=regs[i].fn;break;
+    for(int i=0;i<nregs;i++)if(regs[i].addr==addr && !regs[i].user){prior=regs[i].fn;break;}
+    // A reboot registers every hook again: a wrapper already anywhere in this address's chain stays where it is
+    // (re-chaining one below the top would make the chain loop). A plain registration on top ends the walk.
+    int link=-1;
+    FnHook f=prior;
+    for(int n=0;f && n<=nchains;n++){
+        int i=0;while(i<nchains && !(chains[i].addr==addr && chains[i].wrapper==f))i++;
+        if(i==nchains)break;
+        if(f==wrapper)return;
+        f=*chains[i].previous;
     }
+    for(int i=0;i<nchains;i++)if(chains[i].addr==addr && chains[i].wrapper==wrapper)link=i;
+    if(link<0 && nchains<NREG)link=nchains++;
+    if(link>=0)chains[link].addr=addr,chains[link].wrapper=wrapper,chains[link].previous=previous;
     *previous=prior;
     reg(addr,wrapper,false);
 }

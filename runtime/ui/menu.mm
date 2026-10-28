@@ -172,7 +172,7 @@ extern "C" void menu_copy_text(const char *text) {
     g_copy_pending = true; pthread_mutex_unlock(&q_lock);
 }
 static int g_kbd_max = 8;
-static bool capturing() { return coop_battle_ui_captures() || coop_invite_ui_captures() || emote_wheel_open() || g_open.load() || g_cfg.load() || g_friends.load() || g_kbd.load() == 1; }
+static bool capturing() { return coop_battle_ui_captures() || coop_invite_ui_captures() || coop_trade_ui_captures() || coop_scene_ui_captures() || emote_wheel_open() || g_open.load() || g_cfg.load() || g_friends.load() || g_kbd.load() == 1; }
 // The game gets no input while this is true (runtime/hle/input.c): the question, the settings or the name entry is up.
 extern "C" bool menu_input_captured(void) { return capturing(); }
 // Friends is a social overlay over a still-running overworld. Keep the trainer
@@ -205,7 +205,7 @@ bool menu_handle_event(const SDL_Event *e) {
     }
     // Battle prompts own Escape too; it must not open the quit dialog while
     // declining an invitation or returning from target selection.
-    if((coop_battle_ui_captures() || coop_invite_ui_captures()) && e->type==SDL_EVENT_KEY_DOWN && e->key.scancode==SDL_SCANCODE_ESCAPE){
+    if((coop_battle_ui_captures() || coop_invite_ui_captures() || coop_trade_ui_captures() || coop_scene_ui_captures()) && e->type==SDL_EVENT_KEY_DOWN && e->key.scancode==SDL_SCANCODE_ESCAPE){
         QEvent q={};q.kind=QEvent::KEY;q.key=ImGuiKey_Escape;q.down=true;push(q);
         q.down=false;push(q);return true;
     }
@@ -279,7 +279,7 @@ bool menu_handle_event(const SDL_Event *e) {
         bool captured=capturing();
         // Neutralize navigation on releases after an overlay has closed too.
         float v = captured ? e->gaxis.value / 32767.0f : 0;
-        bool battle_nav=captured && (coop_battle_ui_captures() || coop_invite_ui_captures());
+        bool battle_nav=captured && (coop_battle_ui_captures() || coop_invite_ui_captures() || coop_trade_ui_captures() || coop_scene_ui_captures());
         QEvent q = {};
         q.kind = QEvent::ANALOG;
         switch (e->gaxis.axis) {
@@ -749,7 +749,7 @@ static void draw_coop_plate(ImDrawList *dl, const CoopPlate &p, float scale) {
 
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load(), cfg = g_cfg.load(), kbd = g_kbd.load() == 1;
-    emote_wheel_available(fps60_social_overworld() && !coop_battle_ui_captures() && !coop_invite_ui_captures() && !open && !cfg && !kbd && !g_friends.load() && !coop_menu_visible());
+    emote_wheel_available(fps60_social_overworld() && !coop_battle_ui_captures() && !coop_invite_ui_captures() && !coop_trade_ui_captures() || coop_scene_ui_captures() && !open && !cfg && !kbd && !g_friends.load() && !coop_menu_visible());
     float fx, fy;
     bool fdown, finger = !capturing() && input_finger_cursor(&fx, &fy, &fdown);
     CoopRemote peer = {};
@@ -814,6 +814,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             ImGui::TextUnformatted("Tag-up invitation | Friends: F8 / Communicate");
         else if(team.state==2){CoopOptions o;coop_net_options(&o);
             ImGui::TextUnformatted(o.teamup_battles ? "Tagged up | Team-up trainer battles" : "Tagged up for travel | Individual battles");}
+        ImGui::TextUnformatted(coop_scene_ui_mode());  // (Social / Shared Adventure: always visible)
         ImGui::End();
 
         CoopPlate local_plate;
@@ -904,6 +905,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     coop_battle_ui_draw(scale);
     coop_invite_ui_draw(scale, fps60_social_overworld() && !open && !cfg && !kbd && !g_friends.load() && !emote_wheel_open() &&
                                !coop_menu_visible() && !coop_battle_ui_captures());
+    coop_trade_ui_draw(scale, fps60_social_overworld() && !open && !cfg && !kbd && !g_friends.load() && !emote_wheel_open() &&
+                              !coop_menu_visible() && !coop_battle_ui_captures() && !coop_invite_ui_captures());
+    coop_scene_ui_draw(scale, fps60_social_overworld() && !open && !cfg && !kbd && !g_friends.load() && !emote_wheel_open() &&
+                              !coop_menu_visible() && !coop_battle_ui_captures() && !coop_invite_ui_captures() && !coop_trade_ui_captures());
     ui_frame_end();
     ImGui::Render();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering

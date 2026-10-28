@@ -6,7 +6,7 @@ This prototype relays player presence and emote packets between two matching gam
 
 Upstream `raulzrrs/letsgo-recomp` was merged through `60b8bdf` (0.7.3). This includes renderer/optical-flow optimizations, SSE4.2 game-code support, setup validation/rebuild fixes and the native CATCH implementation. The local Eevee classic battle-Bag catching mode remains the default; upstream CATCH/GO-return hooks run in the alternate mode (`LARECOMP_WILDBATTLE_CLASSIC=0`) to avoid two battle implementations modifying the same callbacks. Frame generation method is also exposed in native PC Options.
 
-Protocol **5** added voluntary social tag-ups; protocol **6** added team-up trainer battles and protocol **7** lets each partner switch in their own Pokémon (below) protocol **8** fixes the replay's round check, protocol **9** adds the partner's rewards and the offer's countdown, and protocol **10** adds team-up wild battles, every move in the partner's menu and two fixes of the partner's replay. Both clients and the relay must be updated together. Friends and Communicate → Play With Others → Players → remote trainer → Team up offer an invitation, accept/decline, cancellation and end-tag controls. Invitations expire after 45 seconds. Both trainers must have fresh poses, be exploring the same area and be within 30 metres; the relay checks these conditions again on acceptance. Disconnect, removal and resumed sessions cancel the tag. The HUD identifies incoming invitations and an accepted social tag. Battles, rewards and saves remain individual; synchronized battles are not implemented by this invitation foundation.
+Protocol **5** added voluntary social tag-ups; protocol **6** added team-up trainer battles and protocol **7** lets each partner switch in their own Pokémon (below) protocol **8** fixes the replay's round check, protocol **9** adds the partner's rewards and the offer's countdown, protocol **10** adds team-up wild battles, every move in the partner's menu and two fixes of the partner's replay, and protocol **11** adds meet up (`M`), trades (`W`), practice battles and spectating (`V`, `O`, B0 trainer `0x4000`, trainer slot 1 in B9/B6) and Shared Adventure scenes (`Y`). Both clients and the relay must be updated together. Friends and Communicate → Play With Others → Players → remote trainer → Team up offer an invitation, accept/decline, cancellation and end-tag controls. Invitations expire after 45 seconds. Both trainers must have fresh poses, be exploring the same area and be within 30 metres; the relay checks these conditions again on acceptance. Disconnect, removal and resumed sessions cancel the tag. The HUD identifies incoming invitations and an accepted social tag. Battles, rewards and saves remain individual; synchronized battles are not implemented by this invitation foundation.
 
 ## Team-up trainer battles
 
@@ -35,7 +35,7 @@ Of the trainers, only ordinary overworld trainers are offered (wild Pokémon: [b
 
 **Setting:** *Team-up battles* (default on) is in **Communicate → Play With Others → Online settings → More settings**, or the **Team-up battles** checkbox in Friends (F8). It is saved in `coop.ini` (`teamup_battles=0/1`). Off, the host never offers a team-up and the partner declines every offer automatically, so both play their trainer and wild battles solo. Each player's setting applies to themselves only.
 
-Team-up battles need protocol 10 on both clients and the relay (10: wild team-ups, every move for the partner, and the partner's replay no longer breaks when a host Pokémon below level 100 gains EXP; 8: the per-round battle check no longer reads memory the game leaves unset, which aborted some replays at round 1; 9: the offer carries the host's 10-second hold, the check also skips one more unset byte, which aborted replays after a mid-turn switch, and the partner's rewards). An older client or relay is refused when connecting ("protocol mismatch"), so mixed versions play solo instead.
+Team-up battles need protocol 11 on both clients and the relay (11: the channels below; 10: wild team-ups, every move for the partner, and the partner's replay no longer breaks when a host Pokémon below level 100 gains EXP; 8: the per-round battle check no longer reads memory the game leaves unset, which aborted some replays at round 1; 9: the offer carries the host's 10-second hold, the check also skips one more unset byte, which aborted replays after a mid-turn switch, and the partner's rewards). An older client or relay is refused when connecting ("protocol mismatch"), so mixed versions play solo instead.
 
 **Invitation pop-up.** An incoming tag-up invitation opens a pop-up at the top of the screen: "*Name* wants to tag up!" with the seconds left, **Accept** and **Decline** (A / Enter or a click accepts, B / Escape declines; the cursor starts on Accept). It opens only on the overworld with no other overlay up. The relay already refuses an invitation to a trainer in a game menu, battle or story scene, so in practice it waits behind Friends (F8) or the emote wheel, or hides when a battle or script starts while it is up (a wild Pokémon or a trainer reaching the player); it shows again once the player is back on the overworld, while the invitation is still valid. While it is open the game gets no input, and the pad's confirm must be released before it reaches the game again; an A pressed in the first 0.4 s is ignored, so a press meant for the game cannot answer it. It closes on expiry, cancellation, disconnect or answer; if the relay refuses an acceptance (the trainers moved apart) it stays with "Move closer...". The sender sees a small "Waiting for *Name*... *s*" notice with **Cancel** (mouse; the notice never captures the game's input, so controller players cancel from F8 or Communicate), then a 4-second result: accepted, declined, did not answer in time, or disconnected. Tag-up is the only invitation type; the team-up battle offer keeps its own prompt. The code is `coop_invite_ui_draw` in `runtime/ui/coop_ui.mm`, with the decisions in `runtime/coop_invite.h` (unit test `tests/tools/invite-popup-test.c`) and the run script `tests/scripts/run-invite-popup.sh`.
 
@@ -63,7 +63,102 @@ With **Wild battles** on (the PC setting that turns a touched wild Pokémon into
 
 While a partner has joined a team-up, wild Pokémon do not touch it until its battle is over. A wild Pokémon that touches the partner while an offer is open makes it busy: the offer is declined and both battles go on separately.
 
-Wild team-ups need protocol 10 on both clients and the relay.
+Wild team-ups need protocol 11 on both clients and the relay.
+
+## Meet up
+
+A player can ask to **meet up** with their partner from **Friends (F8) → Meet up** or **Communicate → Play With Others → Players → (your friend) → Team up → Meet up**. The partner gets a pop-up like the tag-up invitation ("*Name* wants to meet up!", Accept / Decline, 45 seconds). On accept, the **requester** flies to the partner with the game's own Fly (the sky animation, the fade and the landing at the town's Fly point). Nobody is teleported by a position write, and no flag or save data changes hands.
+
+**Where to.** The requester flies to a town, never to an exact map:
+
+- The partner's town, when the partner is in a town (or a route's town; see below) that the requester can fly to.
+- Otherwise the nearest town the requester can fly to: of the towns next to the partner's town or route, the one in the same area nearest to the partner, then the others. For example, on Route 1 near Viridian City it is Viridian City; with Viridian unvisited, it is Pallet Town.
+- Indoors, in a cave or in the Safari Zone, the partner's **last outdoor** town or route stands in. A partner who has not been outdoors since they joined gets "Your friend is indoors".
+
+**Allowed only when all of these hold** (the requester's own save decides):
+
+- The town is unlocked for Fly on the requester's save: its `FSYS_ARRIVE_TOWNnnn` flag (the town map's own rule) and its landing point exist. Sky Dash itself is **not** required.
+- The requester's current place allows Fly (the game's own check, `f_700024a670`; a building or a cave refuses: "You can't fly from here").
+- The requester is not already in that town.
+- Neither trainer is in a battle, a menu, a story scene or a field script (a sign, a trainer's text). The relay checks the overworld state of both at request and at accept. Scripts are not in the snapshot, so each game checks its own: the request and the acceptance wait while a script runs, and the requester's Fly waits up to 20 seconds for both trainers to be free, then gives up with a reason.
+
+Refusals are shown on the Friends page and in Communicate ("No town near them visited yet", "Your friend is indoors", "You are already in that town", ...). The requester's result ("Flying to Viridian City" or "Meet-up cancelled: ...") and the partner's notice ("*Name* is flying to meet you") show for 5 seconds on the overworld.
+
+The code: `runtime/coop_meet.h` (the decision, unit test `tests/tools/meetup-test.c`), `runtime/hle/coop_meet.c` (the game calls), the relay's `meet_action` (test `tests/tools/meetup-relay-test.py`). Static evidence: `FLY_START` `0x700029dd70` is how the field menu (`f_70002800f0`, after the town map) and an item process (`f_700033fb70`) start Fly; the town map's choice is FNV-1a 64 of the town's zone name (`f_70009862f0`); the town map offers a town when the Sky Dash flag, `f_700024a670() == 0`, the landing point (`f_70001331c0`) and `FSYS_ARRIVE_<name>` (`f_7000984b20`) hold. Field scripts are seen through the AMX interpreter `f_70006708a0`.
+
+## Trades
+
+You can trade one party Pokémon with your partner. Status: implemented, not yet run in a live game.
+
+**Sending a request.** Use **Friends (F8) → Trade Pokemon**, or **Communicate → Play With Others → Players → (your friend) → Inspect trainer → Trade Pokémon**. The Communicate request is sent once you are back on the overworld. You must be tagged up, or both on the overworld within 30 m of each other, and out of battle. Your friend gets a pop-up (Trade / Decline, 45 seconds).
+
+**Choosing.** Once accepted, a trade window opens on both screens:
+
+- **Left side:** your party. Pick the Pokémon you want to offer.
+- **Right side:** your friend's offer, with nickname, species, level, gender, shiny, Original Trainer and ID, held item and moves.
+
+Some Pokémon can't be offered:
+
+- your partner Pikachu or Eevee;
+- your last Pokémon that can still battle.
+
+**Confirming.** Press **Confirm trade** when you're happy with both offers. If either of you changes an offer, both confirmations are cleared. **Cancel trade** or B ends the trade.
+
+**After both confirm.** The game shows "Trading... don't close the game". Then:
+
+- Your Pokémon is replaced by the one you received, in the same party slot. You become its handling trainer; its Original Trainer stays the same.
+- It is registered in your Pokédex.
+- Kadabra, Machoke, Graveler and Haunter evolve right away, without the evolution scene.
+
+**Saving.** The trade is kept once you **save your game**: the window says "Trade complete! Save your game to keep it". If the game closes or the connection drops partway through, nothing is lost or duplicated: the trade finishes on both sides or on neither. The game keeps a small file next to your save (`savedata.bin.trade`) and settles the trade when you next connect or start the game. Don't delete that file while a trade is pending.
+
+Only the two Pokémon change: no items, money, flags or other save data. Trades need protocol 11 (the `W` channel) on both clients and the relay. A relay operator can set `COOP_RELAY_TRADE_LOG=<file>` so trades still in progress survive a relay restart. Details: [COOP-TRADES.md](COOP-TRADES.md).
+
+## Shared Adventure
+
+An optional mode where a story scene your friend completes can count in your own save too. It is **off by default**: in the default **Social** mode your story, items and Pokédex are only ever changed by your own play. Status: implemented, not yet run in a live game.
+
+**Turning it on.** Set **Adventure mode** to **Shared** in the launcher's online settings or in Friends (F8). Then, in each session, tick **Share story scenes this session** in Friends. Both of you need both. The overlay at the top left always shows the mode: "Social mode", "Shared Adventure: on", "…: waiting for your friend" or "…: not on this session". **Offer my scenes to Everyone / Nearby** chooses whether your friend must be tagged up or within 30 m when you offer.
+
+**When your friend completes a scene,** you get a prompt for 60 seconds that says what you'd receive:
+
+- **Ready:** the scene counts in your save. Its one-time gift and its completion are added on the overworld.
+- **Not Yet:** nothing changes now. The scene waits in **Friends → Story scenes**, where **Catch up** adds it later, even offline.
+- **Stay Out:** never added; you won't be asked about it again.
+
+If your save hasn't reached that point of the story yet, Ready is disabled: Not Yet keeps it for later. If you already did the scene yourself, you aren't asked. Your friend can **Cancel** before you answer, or **Continue Without** you (you can still catch up). A scene completed earlier can be offered from Friends with **Share with your friend**.
+
+**What is shared.** For now one scene: the Poké Mart clerk's free sample on Route 1 (a Potion, and the clerk's "already given" state). Badges, gyms, the rival, the League and trainer battles always stay personal. Watching the scene together isn't supported: your friend plays it, you get its result.
+
+**Saving.** Save your game to keep it. A disconnect or a crash never gives the gift twice: the game remembers your answers in a small file next to your save (`savedata.bin.scene`) and the scene's own completion in your save decides whether the gift is still due. Shared Adventure needs protocol 11 (the `Y` channel) on both clients and the relay. Details: [COOP-SHARED-ADVENTURE.md](COOP-SHARED-ADVENTURE.md).
+
+## Practice battles and spectating
+
+Status: implemented, not yet run in a live game (Eevee 1.0.0).
+
+### Practice battles
+
+A practice battle is a battle between your Pokémon and your friend's, with nothing saved.
+
+1. Open **Friends (F8) → Practice battle**. Both of you must be on the overworld (anywhere: you don't need to be tagged up or close), with no battle, trade or watch running.
+2. Your friend gets a pop-up: "*Name* wants a practice battle!" with **Accept** and **Decline** (45 seconds, the same controls as the tag-up invitation). They can also answer from Friends. Either player can ask.
+3. On accept, the battle starts in both games at once. Each player picks moves and switches for their own Pokémon in the game's battle menu. A player who hasn't chosen within **30 seconds** gets the computer's choice for that turn only.
+
+**Nothing is saved, on either side.** No EXP and no level-ups, no money (the battle has no prize), no Pokédex entries and no game records. Both **Bags are disabled** (the game's "can't use items" message), so no item is used up. Your Pokémon fight as copies: HP, PP, status and fainting are gone after the battle, and you return to the overworld as you left it. A loss is not meant to send you to a Pokémon Center (not yet checked in a live game).
+
+**Levels are not scaled**: each Pokémon fights at its own level. Let's Go's own link battles are reached through Nintendo's online service, so their rules were not used.
+
+**What you see.** The room's host sees the battle from its own side, with the friend's trainer as the opponent. The other player's game replays the same battle, also from the host's side: its own Pokémon appear as the opponent's ("The opposing ..."). The opponent's name in the battle text is that of an ordinary trainer (the battle uses one's data); its model is your friend's avatar.
+
+If either game loses the connection, the other finishes the battle against the computer's choices. Nothing is saved either way.
+
+### Watching a battle
+
+When your friend is in a battle you are not part of (any wild or trainer battle of theirs), **Friends (F8) → Watch their battle** shows a small panel at the top left of your screen: each Pokémon in the battle with its level and HP, updated at each of your friend's turns. It is read-only: you keep playing, nothing in your game or save changes, and you can't affect their battle. The panel closes when their battle ends ("*Name*'s battle is over."), when you press **Stop watching** in Friends, or when your own battle starts. Your friend sees "*Name* is watching your battle" in Friends.
+
+You can't watch a team-up or a practice battle: in a two-player room both players are in it. Watching replaces only the battle scene: the panel shows the state, not the animations.
+
+Practice battles and watching need protocol 11 (the `V` and `O` messages) on both clients and the relay.
 
 ## Friends interface
 
@@ -158,11 +253,11 @@ Screenshots are saved separately as `host/host-window.png` and `join/join-window
 
 ## Wire protocol
 
-Each TCP message is a little-endian 16-bit byte length followed by a one-byte opcode and body (maximum 256 bytes). Protocol **10** requires matching relay and client versions. `C` creates, `J` joins and `R` resumes. The handshake body is version (u8), title ID and main build ID (u64 LE each), code length/code for `J` or `R`, name length/UTF-8 name, profile identity (16 bytes), and resume token (16 bytes; zero for a new session).
+Each TCP message is a little-endian 16-bit byte length followed by a one-byte opcode and body (maximum 256 bytes). Protocol **11** requires matching relay and client versions. `C` creates, `J` joins and `R` resumes. The handshake body is version (u8), title ID and main build ID (u64 LE each), code length/code for `J` or `R`, name length/UTF-8 name, profile identity (16 bytes), and resume token (16 bytes; zero for a new session).
 
 `A` accepts with slot, code length/code, host slot, lock flag and a 16-byte token. `P` announces slot, name length/name and 16-byte identity. `H` reports host slot/lock flag. Host-only `K` sets the lock (one byte) and `D` removes another slot (one byte). `L` explicitly leaves; host leave closes the room. An unexpected drop preserves its reservation for 30 seconds. `X` rejects/ends with a length-prefixed reason. `Q`/`q` echo a 32-bit monotonic millisecond counter for RTT.
 
-A 28-byte snapshot is area fingerprint (u32), sequence (u32), x/y/z centimetres (i32 each), yaw (u16 turns), motion/readiness (u8), left-stick axes (i16 each), and activity (u8: 0 loading, 1 exploring, 2 menu/loading, 3 battle, 4 story). Bit 7 of motion signals overworld readiness. Unready heartbeats zero the axes. `T` appearance is gender/style (u8 each) and 80 bytes of native resource IDs. `E` carries one emote ID byte (1–63; see All emotes). `U` client actions carry command (u8: 0 invite, 1 accept, 2 decline, 3 cancel/end) and invitation ID (u32 LE). Server `U` status is state (u8: 0 none, 1 pending, 2 tagged), initiator slot (u8; 255 when none), reason (u8), invitation ID and remaining milliseconds (u32 LE each). Invalid or stale actions cannot change another invitation; no save/party data is transferred. Forwarded `S`, `T` and `E` prepend the sender slot. Normal social packets carry no save blocks, party data, inventory or event flags. The `B` battle channel below exchanges an accepted guest lead, the host's temporary battle party and turn decisions.
+A 28-byte snapshot is area fingerprint (u32), sequence (u32), x/y/z centimetres (i32 each), yaw (u16 turns), motion/readiness (u8), left-stick axes (i16 each), and activity (u8: 0 loading, 1 exploring, 2 menu/loading, 3 battle, 4 story). Bit 7 of motion signals overworld readiness. Unready heartbeats zero the axes. `T` appearance is gender/style (u8 each) and 80 bytes of native resource IDs. `E` carries one emote ID byte (1–63; see All emotes). `U` client actions carry command (u8: 0 invite, 1 accept, 2 decline, 3 cancel/end) and invitation ID (u32 LE). Server `U` status is state (u8: 0 none, 1 pending, 2 tagged), initiator slot (u8; 255 when none), reason (u8), invitation ID and remaining milliseconds (u32 LE each). Invalid or stale actions cannot change another invitation; no save/party data is transferred. `M` meet-up messages use the same layouts as `U` (client: command u8 0 request, 1 accept, 2 decline, 3 cancel, and request ID u32; server: state u8 0 none, 1 pending, 2 accepted (sent once; the room is free again), requester slot, reason, request ID, remaining ms), with no distance rule and reason 4 meaning a trainer is not on the overworld. `M` arrived with protocol 11: a protocol 10 relay disconnects a client that sends it. `V` (practice battle request) has the layouts of `M`; the relay also refuses it while a battle link, a trade or a watch runs. `O` (spectating): client body 0 watch, 1 stop, or 2 + a 30-byte summary (turn u16, then for battle trainer slots 0-3 species u16, level u8, HP u16, max HP u16); server status 0x10, watching u8, watcher slot u8 (255 none), reason u8 (1 stopped, 2 battle over, 3 refused, 4 disconnected); a summary goes only from the battler to the watcher, and the relay drops every `B` message of the watcher. `V` and `O` arrived with protocol 11 too, as did `W` (trades, [COOP-TRADES.md](COOP-TRADES.md#wire-changes-protocol-11)) and `Y` (Shared Adventure scenes, [COOP-SHARED-ADVENTURE.md](COOP-SHARED-ADVENTURE.md#wire-changes-protocol-11)). Forwarded `S`, `T` and `E` prepend the sender slot. Normal social packets carry no save blocks, party data, inventory or event flags. The `B` battle channel below exchanges an accepted guest lead, the host's temporary battle party and turn decisions.
 
 ## Verification on 25 October 2026
 
@@ -203,14 +298,14 @@ Team-up trainer battles (above) use this channel in normal play since protocol 6
 
 | Subtype | Body bytes | Contents after subtype and battle ID |
 | --- | ---: | --- |
-| 0 offer | 15 | timeout u16, trainer ID u16 (a wild team-up: 0x8000 + the wild Pokémon's species), hold ms u16 (1000-45000: the host holds the battle that long, 10 s for a trainer's held text; the guest's prompt counts it down, a round trip early) |
+| 0 offer | 15 | timeout u16, trainer ID u16 (a wild team-up: 0x8000 + the wild Pokémon's species; a practice battle: 0x4000, accepted by the relay only within 20 s of a `V` accept, and then joined by the guest without a prompt), hold ms u16 (1000-45000: the host holds the battle that long, 10 s for a trainer's held text; the guest's prompt counts it down, a round trip early) |
 | 1 accept | 9 | none |
 | 2 lead chunk | 140 | index u8 (0/1), 130 encrypted PB7 bytes |
 | 3 turn | 52 | turn/sequence u32 each, remaining ms u16, party slot u8, four move IDs u16, four PP u8, four target masks u16, two species u16, two current/max HP pairs u16 |
 | 4 choice | 22 | turn/sequence u32 each, party slot u8, move index u8, move ID u16, target u8 |
 | 5 outcome | 18 | turn/sequence u32 each, outcome u8 (1 guest, 2 NPC this turn) |
-| 6 end | 10 / 18 | reason u8 (0 finished, 1 cancelled/declined, 2 peer disconnected or removed, 3 offer expired); a host's finished mirror battle appends its final command count u32 for trainer 0 and trainer 2 |
-| 7-9 mirror | 141 / 19 / 30 | host party chunks (chunks 12-13: a wild team-up's wild Pokémon), battle seed with the host's own-Pokémon mask u8 and language u8, committed commands (see [the native battle notes](COOP-BATTLE-PROTOTYPE.md#guest-replay-prerequisites-and-experimental-bridge)) |
+| 6 end | 10 / 18 | reason u8 (0 finished, 1 cancelled/declined, 2 peer disconnected or removed, 3 offer expired); a host's finished mirror battle appends its final command count u32 for trainer 0 and the guest's trainer (2, or 1 in a practice battle) |
+| 7-9 mirror | 141 / 19 / 30 | host party chunks (chunks 12-13: a wild team-up's wild Pokémon), battle seed with the host's own-Pokémon mask u8 and language u8, committed commands of trainer 0 and the guest's trainer: 2 (the ally) in a team-up, 1 (the opponent) in a practice battle (see [the native battle notes](COOP-BATTLE-PROTOTYPE.md#guest-replay-prerequisites-and-experimental-bridge)) |
 | 10 desync | 10 | reason u8 (1 sequence gap, 2 invalid host party, 3 queue overflow, 4 turn digest mismatch); either side, once; the relay then stops relaying 7-9 and 11 |
 | 11 digest | 21 | round u32, state digest u64; host only, strictly increasing rounds; one more at the battle's result (the guest's rewards need it to match) |
 

@@ -7,6 +7,8 @@
 #include "../hle.h"
 #include "../gamesetup.h"
 #include "../coop_net.h"
+#include "../coop_meet.h"
+#include "../coop_trade.h"
 
 void rt_register_fnhook(uint64_t addr,int (*fn)(Cpu *,uint64_t));
 void rt_call_original(Cpu *c,uint64_t addr);
@@ -23,7 +25,7 @@ uint64_t input_buttons_now(void);
 #define UI_REARM        0x70003623c0ull
 
 enum { ROOT, ROOM, MANAGE, PLAYERS, REMOTE, INSPECT, SETTINGS, SAVED, SAVED_DETAIL,
-       REMOVE_CONFIRM, LEAVE_CONFIRM, FORGET_CONFIRM, STATUS, TEAM, SOCIAL, MORE_SETTINGS };
+       REMOVE_CONFIRM, LEAVE_CONFIRM, FORGET_CONFIRM, STATUS, TEAM, SOCIAL, MORE_SETTINGS, MEET };
 static uint64_t g_app;
 static atomic_bool g_visible;
 static int g_page, g_stack[16], g_depth, g_saved;
@@ -35,7 +37,11 @@ static int g_emote_page;  // Social actions: three emotes a page, L / R turn pag
 static uint64_t g_emote_until;
 static uint8_t g_team_queued=255;
 static uint32_t g_team_queued_id;
+static uint64_t g_trade_until;  // a trade request waits for the overworld (the trade window is an overlay there)
 static uint64_t g_team_until;
+static uint8_t g_meet_queued=255;  // 0 request, 1 accept: sent back on the overworld, as the tag-up
+static uint32_t g_meet_queued_id;
+static uint64_t g_meet_until;
 static bool guest(uint64_t p,size_t n) { return p>=GUEST_LO && p<GUEST_HI && n<=GUEST_HI-p; }
 static uint64_t ptr(uint64_t p) { return guest(p,8) ? *(const uint64_t *)(uintptr_t)p : 0; }
 static uint64_t hash(const char *s) { uint64_t h=0xcbf29ce484222645ull; while(*s) h=(h^(unsigned char)*s++)*0x100000001b3ull; return h; }
@@ -95,11 +101,25 @@ static void labels(char out[3][256]) {
                 "Friend is busy or too far","Invitation expired","Friend disconnected","Invitation no longer valid"};
             b=why[team.reason<=7 ? team.reason : 7];
         }
+        d="Meet up";break;
+    case MEET: {
+        CoopTeamUp m;coop_net_meetup(&m);CoopMeetPlan plan;coop_meet_view(&plan);
+        bool in=m.state==1 && m.from_slot!=s.local_slot,sent=m.state==1 && m.from_slot==s.local_slot;
+        if(g_meet_queued<=1)a="Return to the overworld";else if(in)a="Accept meet-up";else if(sent)a="Waiting for your friend";
+        else if(plan.reason)a="Meet up";else {snprintf(out[0],256,"Fly to %s",coop_meet_town[plan.town].name);a=NULL;}
+        if(g_meet_queued<=1)b="Cancel queued request";else if(in)b="Decline meet-up";else if(sent)b="Cancel meet-up";
+        else if(!m.state && m.reason) {
+            static const char *why[]={"","Meet-up declined","Meet-up cancelled","Another request is active",
+                "Friend is busy","Meet-up expired","Friend disconnected","Request no longer valid"};
+            b=why[m.reason<=7 ? m.reason : 7];
+        } else b=plan.reason ? coop_meet_reason(plan.reason) : plan.exact ? "Your friend's town" : "The nearest town you visited";
         d="Back";break;
+    }
     case INSPECT:
         snprintf(out[0],256,"%.24s",!g_inspect_self && peer ? p.name : s.name);
         snprintf(out[1],256,"%s",!g_inspect_self && peer ? activity(p.activity) : activity(s.activity));
-        snprintf(out[2],256,"%s",!g_inspect_self && peer && p.appearance.valid ? p.appearance.gender ? "Female trainer" : "Male trainer" : "Independent save");a=b=d=NULL;break;
+        snprintf(out[2],256,"%s",!g_inspect_self && peer && p.appearance.valid ? p.appearance.gender ? "Female trainer" : "Male trainer" : "Independent save");a=b=d=NULL;
+        if(!g_inspect_self && peer)d="Trade Pokémon";break;
     case SETTINGS:
         snprintf(out[0],256,"Trainer: %.24s",o.name);a=NULL;b="Relay server";d="More settings";break;
     case MORE_SETTINGS:
@@ -164,7 +184,7 @@ static void choose(unsigned item) {
         if(!peer)notice("Your friend has left");
         else {g_emote=g_emote_page*3+item;g_emote_until=plat_now_ns()+60000000000ull;notice("Emote ready for the overworld");}break;
     case TEAM:
-        if(item==3){back();break;}
+        if(item==3){page(MEET);break;}
         if(item==2 && g_team_queued<=1){g_team_queued=255;break;}
         if(item==2 && team.state){coop_net_teamup_action(team.state==1 && team.from_slot!=s.local_slot ? 2 : 3);break;}
         if(item==1 && (team.state==0 || (team.state==1 && team.from_slot!=s.local_slot))) {
@@ -193,7 +213,17 @@ static void choose(unsigned item) {
         else if(item==2 && !g_notice[0] && connected)page(ROOM);
         else if(item==2 && !g_notice[0] && (s.connection==COOP_CONNECTING || s.connection==COOP_RECONNECTING)){coop_net_leave();back();}
         else back();break;
-    case INSPECT:back();break;
+    case MEET: {
+        if(item==3){back();break;}
+        CoopTeamUp m;coop_net_meetup(&m);CoopMeetPlan plan;coop_meet_view(&plan);bool in=m.state==1 && m.from_slot!=s.local_slot;
+        if(item==2 && g_meet_queued<=1)g_meet_queued=255;
+        else if(item==2 && m.state==1)coop_net_meetup_action(in ? 2 : 3);
+        else if(item==1 && (in || (m.state!=1 && !plan.reason))){g_meet_queued=in;g_meet_queued_id=m.id;g_meet_until=plat_now_ns()+30000000000ull;}
+        break;
+    }
+    case INSPECT:
+        if(item==3 && !g_inspect_self && peer){g_trade_until=plat_now_ns()+30000000000ull;notice("Trade request ready for the overworld");}
+        else back();break;
     }
     g_last[0][0]=g_last[1][0]=g_last[2][0]=0;
     LOG("[coop-menu] native choice %u -> page %d\n",item,g_page);
@@ -236,6 +266,18 @@ static int update_hook(Cpu *c,uint64_t addr) {
     refresh(c,app);*c=keep;rt_call_original(c,addr);return 1;
 }
 void coop_menu_tick(bool overworld) {
+    if(g_trade_until && (plat_now_ns()>g_trade_until || !coop_net_enabled()))g_trade_until=0;
+    if(g_trade_until && overworld && !atomic_load(&g_visible)){
+        CoopRemote p;CoopTeamUp team;coop_net_teamup(&team);
+        if(coop_net_remote(&p) && (team.state==2 || coop_net_social_near(3000))){coop_trade_request(p.identity,p.name);g_trade_until=0;}
+    }
+    if(g_meet_queued<=1) {
+        CoopTeamUp m;coop_net_meetup(&m);CoopMeetPlan plan;coop_meet_view(&plan);
+        if(plat_now_ns()>g_meet_until || !coop_net_enabled() || (g_meet_queued==1 && (m.state!=1 || m.id!=g_meet_queued_id)))g_meet_queued=255;
+        else if(overworld && !atomic_load(&g_visible) && !coop_meet_script_busy() && (g_meet_queued==1 || !plan.reason)){
+            coop_net_meetup_action(g_meet_queued);g_meet_queued=255;
+        }
+    }
     if(g_team_queued<=1) {
         CoopTeamUp team;coop_net_teamup(&team);
         if(plat_now_ns()>g_team_until || !coop_net_enabled() || team.id!=g_team_queued_id)g_team_queued=255;
@@ -246,7 +288,7 @@ void coop_menu_tick(bool overworld) {
     if(overworld && coop_net_social_near(3000)){coop_net_emote(g_emote);g_emote=0;}
 }
 bool coop_menu_visible(void) { return atomic_load(&g_visible); }
-RT_ON_RESET(coop_menu_reset) {g_app=0;atomic_store(&g_visible,false);g_depth=0;g_emote=0;g_team_queued=255;}
+RT_ON_RESET(coop_menu_reset) {g_app=0;atomic_store(&g_visible,false);g_depth=0;g_emote=0;g_team_queued=255;g_trade_until=0;g_meet_queued=255;}
 void coop_menu_configure(int build) {
     static bool hooked;if(build!=GAME_BUILD_EEVEE_100 || hooked)return;hooked=true;
     rt_register_fnhook(NETWORK_FACTORY,factory_hook);

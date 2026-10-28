@@ -423,3 +423,109 @@ User-facing rules: [COOP-ONLINE.md](COOP-ONLINE.md#team-up-trainer-battles). Pro
   Master trainers excluded) become team-ups (section 7).
 - Verified on copied saves with `savediff`: `teamup-rewards2/payday` (no QA variables), and also `teamup-rewards2/abort`,
   `/loss`, `/disconnect`, `teamup-midturn2/*` and the solo baseline `teamup-rewards1/solo`.
+
+
+## 11. Wild team-ups (28 October 2026)
+
+User-facing rules: [COOP-ONLINE.md](COOP-ONLINE.md#team-up-wild-battles). Engine details and addresses:
+[COOP-BATTLE-PROTOTYPE.md](COOP-BATTLE-PROTOTYPE.md#wild-team-ups-and-the-partners-move-targets-28-october-2026).
+Protocol 10.
+
+### Scope and decisions
+
+- **Classic wild battles** (the PC setting "Wild battles", `wildbattle.c`'s synthetic `WILD_HASH` encounters with the
+  battle Bag) become team-ups: the host and the partner against the one wild Pokemon, in Let's Go's own 2 vs 1.
+- **Let's Go catch mode** (the default, the ball-throw minigame) stays solo. It is not a battle: there is no turn
+  engine to replay and no command stream, and the throws, motion and berry state live in the capture scene. A shared
+  catch would need a second synchronised scene and a new rule for who keeps the Pokemon, so it is left as it is.
+  A partner who has joined a team-up is not touched by wild Pokemon until its replay ends (either mode).
+- **Story statics** (`CallWildBattle`: Snorlax, the birds, Mewtwo, Electrode...) stay solo. Their battle runs the
+  legendary rule (a knock-out ends it, no EXP), then the GO capture, then the script's flags that make the static
+  disappear. A partner would get nothing (no EXP, no catch) and its replay would have to run that script's battle
+  without the flags. `coop_actor.c` keeps them solo (`social_trainer_hook` / `social_mode_hook`, return addresses
+  `0x700017e4c0` / `0x700017e4d0`), unchanged; only `WILD_HASH` battles are offered.
+- **Catch ownership: the catch belongs to the ball's thrower, and only the host can throw.** The partner's Bag is
+  refused in its menu (as in trainer team-ups); the host's Bag works and spends the host's balls. On the partner's
+  replay a caught battle (result 5) is turned into a run (result 3) before the result phase, so
+  `wildbattle_classic.c`'s `store_caught` never puts it in the partner's save, and the replay's game records (total
+  captured...) are skipped (`coop_actor.c` `replay_record_hook` on the record increment `0x70001cac40`). A guest-owned throw from its own bag was not
+  attempted: the battle spends items from the local slot's bag only, so the host's engine would throw a ball from no
+  one's bag and the replay would have to store a Pokemon in the other save.
+- **EXP:** as in trainer team-ups, from the partner's own replay after the end digest matches, once per battle ID
+  (`partner_exp`, `partner_rewards`), only for a won battle (the wild Pokemon knocked out). No prize money (wild).
+- **Fleeing:** only the host can run (the partner's Run reopens its menu); the escape ends the battle for both, and
+  the partner gets nothing.
+- **Pokedex:** the partner's replay registers the wild Pokemon as seen, as any battle would. Nothing else is written.
+
+### How a wild team-up runs
+
+1. **Offer at the touch.** `wildbattle.c` `trigger_hook` calls `coop_battle_wild_touch(species)` while both players
+   are still on the overworld (the relay's `team_near` needs both there). The B0 trainer field is
+   `0x8000 | species`; the guest's prompt reads "*Host* found a wild *species*! ...".
+2. **Hold.** The battle event `0x700028be80` (kind 2, static) is held at state 0, before its setup, for up to 10 s
+   (`wild_event_hook`, `entry_poll`); the screen has faded out and the host's overlay counts down. Decline, expiry, a
+   busy partner or a lost link: the setup runs untouched, solo.
+3. **Setup.** `wild_setup_hook` (`0x70009ccda0`, the static/wild setup builder) adds an ally trainer the way the multi
+   builder `0x70009cd7e0` does: party `+0xc0` with the guest's whole party, trainer data `+0x448` and info `+0x270` of
+   trainer 54 (its NPC chooses at a deadline; the model is the partner's avatar), mode 3. The host sends its party
+   (B7), the wild Pokemon as its battle built it (B7 chunks 12-13: PID, nature, IVs differ per game) and the seed with
+   its identity (B8, below).
+4. **The 2 vs 1 with an ally.** Rule 3's second player position is natively a second Pokemon of trainer 0 (local P2
+   borrows one of the player's own). While a wild team-up runs, the rule's position table, the positions per trainer
+   and the NPC controller table give position 2 to trainer 2 (`rule3_ally_*`), and the main module init of non-multi
+   battles, which builds only trainers 0 and 1, builds trainer 2's parties too (`main_init_hook`). A multi battle
+   (rule 1) instead needs an opponent 2: its empty party crashes the battle party setup (`teamup-wild1/e1`).
+5. **The partner's replay** starts with `wildbattle_replay()` (the same synthetic battle as a touch) once it is on the
+   overworld; its setup takes the host's wild Pokemon and its own party as the ally. From there the trainer
+   team-up's machinery is unchanged: per-round digests, the partner's native menu for slot 2 (the 2 vs 1 reads that
+   menu from P2's controller, a sideways right Joy-Con, so `input.c` gives P2 this player's controls while it is open,
+   with the d-pad as its stick), NPC at the deadline,
+   switches, rewards.
+
+### Replay fixes found by the wild team-ups (trainer team-ups too)
+
+- **EXP of a host Pokemon below level 100.** The EXP formula's "own Pokemon" (`0x70001c9d90`) and player language
+  (`0x70001c9d40`) answer for the local player; on the partner's replay the host's Pokemon counted as traded (x1.5),
+  so it reached another level and the digest broke. The host now sends which of its party slots are its own and its
+  language with the seed (B8, 19 bytes), and the replay's EXP step answers as the host did.
+- **Level-ups on the replay.** The battle builds trainer 0's party twice, for the server's and the client's pool,
+  and applies a level-up to each. The replay used one clone of the host's party for both, so the second level-up
+  started from the first's stats (HP 3 above the host's, `teamup-wild2/host-out4`, traced with `LARECOMP_WATCH`).
+  Each pool now gets its own clone.
+- All earlier trainer runs used level-100 hosts, which gain no EXP, so neither showed there.
+
+### Verification (two clients, copied saves, `tests/scripts/run-teamup-wild.sh pair`, `run-teamup-wild-suite.sh`)
+
+Runs in `tests/runs/teamup-wild1/` (engine bring-up) and `tests/runs/teamup-wild2/` (two clients). The savediff
+lists the reward blocks (party, money, Pokedex, records) as `[CHANGED]` against a trainer-oriented allowed list; each
+change was checked to be the battle's EXP, evolution or seen entry.
+
+| Run | What | Result |
+| --- | --- | --- |
+| `teamup-wild1/e1` | rule 1 (multi) with an empty opponent 2 | crash in the party setup: rule 3 chosen instead |
+| `teamup-wild1/e12`, `base1`-`base4` | first rule-3 2 vs 1 with the QA ally (one game) | battle runs to the end |
+| `teamup-wild2/basic2` | host + partner vs Snorlax, partner chooses in its native menu | digests match, partner EXP once, Charmander evolves, host Pay Day +500 |
+| `teamup-wild2/targets5` | partner picks Swords Dance, Growl, Earthquake by d-pad | Growl (all foes) and Earthquake (all adjacent) accepted; Swords Dance (self) was refused, fixed after the run (any target for moves that name no one), not re-run |
+| `teamup-wild2/flee2` | host runs | both result 3, no rewards |
+| `teamup-wild2/catch2`, `catch3` | host throws a Master Ball | caught Pokemon stored on the host only; partner result 3, no records, no Pokemon |
+| `teamup-wild2/decline` | partner declines | host battles solo |
+| `teamup-wild2/guestwild-offer` | a wild Pokemon touches the partner during the offer | the partner's own battle declines the offer; host solo |
+| `teamup-wild2/guestwild-accepted` | ... right after it joined | the touch is ignored; the replay is fine |
+| `teamup-wild2/guestwild-first` | the idle partner is in its own battle (an evolution) at the host's touch | no offer (busy), host solo |
+| `teamup-wild2/guest-idle2`, `guest-idle3` | partner never chooses | its NPC chooses at the 10 s deadline; digests match, rewards applied |
+| `teamup-wild2/host-out6`, `host-levels` | level-2 host Eevee levels to 8 on both sides | digests match after the EXP and level-up fixes |
+| `teamup-wild2/trainer-regress`, `trainer-host20` | trainer team-up (Doug) after the changes | same as the Pay Day baseline; level-20 host digests match |
+
+Unit and relay checks: `tests/scripts/run-battle-link-tests.sh coop-link-wild2` (wild B0/B7/B8 on the link and the
+relay, protocol 10), all pass.
+
+### Still open
+
+- **Move learning on the host's level-ups.** The replay answers "forget a move?" by itself (it presses A: yes, the
+  first move). If the host chooses differently, the next digest differs, the replay aborts and the partner gets no
+  rewards for that battle; neither save is harmed. Syncing the host's choice needs its answer to travel like a
+  decision; not done.
+- The ally's trainer data is trainer 54's; its trainer name only appears in texts that name the ally trainer.
+- Not run after the last changes: a partner's self-target and side moves (Swords Dance, Light Screen) in the native
+  menu, and its d-pad on a real controller; a team-up after the partner's own wild battle (`guestwild-first` with a
+  partner that does not evolve).

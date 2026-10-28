@@ -11,6 +11,7 @@ typedef struct {
     bool host;
     char saved_rooms[4][17];
     bool teamup_battles;  // "Team-up battles" (default on): ordinary trainers offer the tagged-up partner a team-up
+    bool shared_adventure, scene_nearby;  // "Adventure mode" Shared (default Social); scene offers to Everyone / Nearby
 } CoopOptions;
 typedef struct {
     CoopConnection connection;
@@ -38,6 +39,9 @@ typedef struct {
 void coop_net_teamup(CoopTeamUp *out);
 // 0 invite, 1 accept, 2 decline, 3 cancel/end. A social tag keeps battles solo.
 bool coop_net_teamup_action(uint8_t command);
+// Meet-up request (runtime/hle/coop_meet.c): the same commands and states, 2 being "accepted" (the requester flies).
+void coop_net_meetup(CoopTeamUp *out);
+bool coop_net_meetup_action(uint8_t command);
 typedef struct {
     bool valid;
     uint8_t gender, style;

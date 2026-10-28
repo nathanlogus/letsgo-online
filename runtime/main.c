@@ -216,6 +216,8 @@ int main(int argc, char **argv) {
         { extern void controller_skip_configure(void); controller_skip_configure(); }  // (runtime/hle/controller_skip.c)
         { extern void cutscene_configure(void); cutscene_configure(); }  // (runtime/hle/cutscene.c)
         { extern void gift_configure(void); gift_configure(); }  // (runtime/hle/gift.c: QA only; after fps60's world hook)
+        { extern void coop_trade_configure(void); coop_trade_configure(); }  // (runtime/hle/coop_trade_apply.c)
+        { extern void coop_scene_configure(void); coop_scene_configure(); }  // (runtime/hle/coop_scene_apply.c)
         { extern void serial_configure(void); serial_configure(); }  // (runtime/hle/serial.c: in-game Mystery Gift codes)
         boot(root);
         coop_net_start();  // boot has now loaded g_program_id from main.npdm

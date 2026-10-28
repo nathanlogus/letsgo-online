@@ -118,6 +118,8 @@ static int model_hook(Cpu *c, uint64_t addr) {
 void coop_actor_field(Cpu *c) {
     if (!rt_addr(TRAINER_GET)) return;
     coop_battle_field(c);
+    { extern void coop_trade_field(Cpu *c); coop_trade_field(c); }  // (runtime/hle/coop_trade_apply.c)
+    { extern void coop_scene_field(Cpu *c); coop_scene_field(c); }  // (runtime/hle/coop_scene_apply.c)
     Cpu call = *c;
     uint64_t local = trainer(&call, 0);
     if (!local) return;

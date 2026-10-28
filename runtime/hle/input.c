@@ -880,14 +880,14 @@ static void fill_state(Cpu *c) {
     int32_t rx = clamp_axis((menu ? 0 : key_rx + pad_rx) + script_rx), ry = clamp_axis((menu ? 0 : key_ry + pad_ry) + script_ry);
     // d-pad / arrow keys walk (setting) while the stick is at rest. "At rest" has a dead zone: a controller's stick
     // never reads exactly 0 (a DualSense rests at a few hundred), which used to turn the d-pad off altogether.
-    if (!menu && g_settings.dpad_move && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
+    if (!menu && (g_settings.dpad_move || as_p2) && (int64_t)lx * lx + (int64_t)ly * ly < 8000ll * 8000) {
         uint64_t d = key_buttons | pad_buttons | script_buttons;
         int dx = (int)((d >> BTN_RIGHT) & 1) - (int)((d >> BTN_LEFT) & 1);
         int dy = (int)((d >> BTN_UP) & 1) - (int)((d >> BTN_DOWN) & 1);
         int32_t m = dx && dy ? 23170 : 32767;  // diagonals: same speed (32767 / sqrt 2)
         if (dx || dy) lx = dx * m, ly = dy * m;
     }
-    if (as_p2 && !rx && !ry) rx = lx, ry = ly;  // (P2 is a sideways right Joy-Con: its stick is the right one, as below)
+    if (as_p2 && !rx && !ry) rx = lx, ry = ly;  // (P2 is a sideways right Joy-Con: no d-pad, its stick is the right one)
     // stick directions also appear as buttons (bits 16-23)
     if (lx < -16000) b |= 1ull << 16;
     if (ly > 16000) b |= 1ull << 17;

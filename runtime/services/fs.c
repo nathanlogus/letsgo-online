@@ -665,6 +665,10 @@ uint64_t g_savedata_guest;  // in-memory save image, for co-op QA diffs
 bool gift_before_replace(const char *save, const void *image, size_t size);  // (runtime/hle/gift.c: the gift receipt)
 void gift_after_replace(const char *save, bool ok);
 void gift_recover(const char *save);
+void coop_trade_recover(const char *save);  // (runtime/coop_trade.c: an online trade's record <save>.trade)
+void coop_trade_after_replace(bool ok);
+void coop_scene_recover(const char *save);  // (runtime/coop_scene.c: the Shared Adventure ledger <save>.scene)
+void coop_scene_after_replace(bool ok);
 
 // A whole-file write of a save (see save_settle). LARECOMP_SAVE_FAULT (QA): fail = report a write error and change
 // nothing; crash-copy / crash-receipt / crash-replaced = end the process before the gift receipt / after it, before
@@ -686,6 +690,8 @@ static bool save_replace(HostFile *f, const void *data, size_t size) {
     ok = ok && plat_replace_file(tmp, f->path);
     if (ok && fault && !strcmp(fault, "crash-replaced")) { LOG("[save] QA fault: end after replace\n"); _exit(3); }
     gift_after_replace(f->path, ok);
+    coop_trade_after_replace(ok);
+    coop_scene_after_replace(ok);
     if (!ok) { LOG("[save] write failed (errno %d): the save is unchanged\n", errno); unlink(tmp); }
     f->fd = open(f->path, O_RDWR);
     if (f->fd < 0) { LOG("[save] cannot reopen %s (errno %d)\n", f->path, errno); return false; }
@@ -840,7 +846,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
         f->fd = fd;
         strlcpy(f->path, p, sizeof f->path);
         f->save = strstr(p, "savedata") != NULL, f->size_due = -1;
-        if (f->save) gift_recover(p);
+        if (f->save) gift_recover(p), coop_trade_recover(p), coop_scene_recover(p);
         Service *fsvc = service_new("IFile", file, f);
         fsvc->on_close = file_close;
         ipc_return_object(resp, fsvc);
